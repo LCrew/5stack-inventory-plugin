@@ -2,7 +2,7 @@
   "name": "5stack-inventory-plugin-backend",
   "version": "0.1.0",
   "description": "Inventory API for the 5stack inventory plugin. Trusts 5stack forward-auth identity headers; owns its own Postgres schema.",
-  "license": "MIT",
+  "license": "AGPL-3.0-only",
   "type": "module",
   "scripts": {
     "start": "node --experimental-strip-types src/main.ts",
