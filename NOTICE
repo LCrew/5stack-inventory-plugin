@@ -47,15 +47,18 @@ the copyright holder: https://github.com/lukepolo
 THIRD-PARTY SOFTWARE
 
 This plugin uses third-party npm packages, each under its own license,
-among them cs2-lib and cs2-lib-inspect by Ian Lucas (MIT License). Their
-license texts are collected in THIRD_PARTY_NOTICES.txt. After changing
-dependencies, regenerate it with `npm run third-party-notices`.
+among them cs2-lib and cs2-lib-inspect by Ian Lucas (MIT License) and the
+module federation runtime from @originjs/vite-plugin-federation (Mulan
+Permissive Software License 2). Their license texts are collected in
+THIRD_PARTY_NOTICES.txt. After changing dependencies, regenerate it with
+`npm run third-party-notices`.
 
 
 MATERIAL NOT COVERED BY THIS LICENSE
 
-src/valveCombos/ holds shader code decompiled from Counter-Strike 2's
-shipped shader files with Source 2 Viewer, and other data in this
-repository is read from the game's files. That material is the property
-of Valve Corporation. The copyright holder does not license it under the
-GNU AGPL, and nothing in this repository grants rights to it.
+src/valveCombos/ and tools/shadertest/groundtruth/ hold shader code
+decompiled from Counter-Strike 2's shipped shader files with Source 2
+Viewer, and other data in this repository is read from the game's files.
+That material is the property of Valve Corporation. The copyright holder
+does not license it under the GNU AGPL, and nothing in this repository
+grants rights to it.
