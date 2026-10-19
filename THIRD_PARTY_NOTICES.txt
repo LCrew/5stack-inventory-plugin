@@ -4182,6 +4182,7 @@ SOFTWARE.
 The following npm packages may be included in this product:
 
  - pg
+ - pg-cloudflare
  - pg-protocol
 
 These packages each contain the following license:
