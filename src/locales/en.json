@@ -42,6 +42,33 @@
           "images_hint": "Flat catalog art for every item"
         }
       },
+      "prebake": {
+        "heading": "Pre-bake paint composites",
+        "description": "Composites every painted weapon and knife in anyone's inventory and saves it to the shared store, so nobody has to download that weapon's 20–40 MB of inputs to see it, and card bakes skip them too.",
+        "note": "It downloads every weapon's inputs (gigabytes in total) and keeps the GPU busy, so run it once after each model extraction, from a desktop browser, and leave this tab open until it finishes. Skins already stored are skipped. Gloves are not included: they composite on the fly.",
+        "start": "Pre-bake composites",
+        "stop": "Stop",
+        "stopping": "Stopping after this skin…",
+        "phones": "Also bake phone-size copies (1024 px)",
+        "skins": "{count} skins in inventories",
+        "planning": "Checking which skins are already stored…",
+        "progress": "{done} of {total}",
+        "stored": "{count} stored",
+        "skipped": "{count} already stored",
+        "failed": "{count} failed",
+        "current": "Compositing {name}",
+        "failures": "Failed skins ({count})",
+        "finished": "Pre-bake finished: {stored} stored, {skipped} already stored, {failed} failed.",
+        "stopped": "Pre-bake stopped: {stored} stored, {skipped} already stored, {failed} failed.",
+        "unsupported": "This backend can't list what people own yet. Update it to use pre-baking.",
+        "no_gen": "The catalog has not loaded yet, so there is nothing to name the composites by. Reload the page and try again.",
+        "verify_on": "Composite verification (?compositeverify=1) is on, and it compares instead of storing. Turn it off with ?compositeverify=0 first.",
+        "reason_model": "model not on the mount",
+        "reason_finish": "finish definition not on the mount",
+        "reason_incomplete": "paint textures missing on the mount",
+        "reason_composite": "composite failed: {detail}",
+        "reason_store": "store refused it: {detail}"
+      },
       "server": {
         "key_reissued": "New server key issued — the old key is now dead.",
         "cfg_synced": "invsim commands updated in: {files}"
