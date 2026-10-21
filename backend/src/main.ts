@@ -1,4 +1,4 @@
-import { readFileSync, createReadStream, createWriteStream } from "node:fs";
+import { readFileSync, createWriteStream } from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { promises as fs } from "node:fs";
@@ -10,7 +10,7 @@ import Fastify, { LogController } from "fastify";
 import type { PoolClient } from "pg";
 import { pool } from "./db.ts";
 // Shared with scripts/serve.mjs — see the module header for why it is .mjs.
-import { parseByteRange } from "./byteRange.mjs";
+import { IMMUTABLE, openAssetBody, planAsset } from "./assetResponse.mjs";
 import { getIdentity } from "./identity.ts";
 import { isAllowedOrigin, originPolicyFromEnv, refuseCrossSite, requestHost } from "./originGuard.ts";
 import { autoExtractor, installProblem } from "./autoExtract.ts";
@@ -501,11 +501,18 @@ const PAINTS_DIR = process.env.PAINTS_DIR ?? "/cs2-models/paints";
 const IMAGES_DIR = process.env.IMAGES_DIR ?? "/cs2-models/images";
 const MODELS_DIR = process.env.MODELS_DIR ?? "/cs2-models/models";
 const MUSIC_DIR = process.env.MUSIC_DIR ?? "/cs2-models/music";
+const ANIMS_DIR = process.env.ANIMS_DIR ?? "/cs2-models/anims";
 const ASSET_TYPES: Record<string, string> = {
   ".json": "application/json",
   ".webp": "image/webp",
   ".png": "image/png",
   ".glb": "model/gltf-binary",
+  // A weapon's composite-input position map (<key>.inputs.hd/position.exr).
+  // It was missing here, so a cross-node miss on it was a 404 and the two
+  // projected paint styles lost their placement.
+  ".exr": "image/x-exr",
+  // The map panoramas and backdrop plates under /anims/env/.
+  ".jpg": "image/jpeg",
   // Music kit menu themes. Both containers, because the extractor probes what
   // Source2Viewer actually wrote rather than assuming mp3 — the format follows
   // the codec inside the .vsnd_c.
@@ -517,82 +524,82 @@ const ASSET_TYPES: Record<string, string> = {
 // own CS2 install (scripts/extract-models.sh). A miss is a 404 and stays a
 // 404: there is no upstream to fall back to by design, so an unpopulated or
 // out-of-date mount shows up as a visible error instead of silently serving
-// someone else's copy. nginx serves these directly; these routes only back its
-// static-miss fallback (frontend/backend pods can land on different nodes).
-function serveAssetDir(routePrefix: string, dir: string) {
-  app.get<{ Params: { "*": string } }>(`${routePrefix}/*`, async (request, reply) => {
-    const rel = request.params["*"] ?? "";
-    const type = ASSET_TYPES[path.extname(rel).toLowerCase()];
-    if (!type || rel.includes("..") || rel.includes("\\") || !/^[\w\-./ %()]+$/.test(rel)) {
-      return reply.status(404).send({ error: "not found" });
-    }
-    reply.header("Access-Control-Allow-Origin", "*");
-    // On EVERY reply, not just ranged ones: a browser only attempts a range
-    // request after an ordinary response told it ranges are available, so an
-    // <audio> element that never sees this header treats the track as
-    // unseekable and downloads all 3.5MB before the first note.
-    reply.header("Accept-Ranges", "bytes");
-    const file = path.join(dir, rel);
-    // Two very different lifetimes behind one route:
-    //
-    //  - TEXTURES and ICONS carry a content hash in the filename, so a given
-    //    URL never changes meaning. Cache them hard.
-    //  - MATERIAL JSON does NOT: the filename comes from cs2-lib and is fixed,
-    //    while the content (and the texture names it points at) is rewritten
-    //    by every extraction. Caching those for a day meant a browser kept a
-    //    material referencing textures the new run had renamed — every one
-    //    404'd and the skin rendered white long after the mount was correct.
-    //  - MUSIC is the material case again: `valve_cs2_01.mp3` is a name the
-    //    extractor reuses every run, so it is NOT self-versioning either, and
-    //    treating it as immutable on filename alone would pin a browser to one
-    //    CS2 build's audio forever.
-    //
-    // So both are only immutable once the client has stamped the extraction
-    // version on them (see withAssetVersion). Unversioned requests still
-    // revalidate, which keeps old clients and hand-typed URLs correct.
-    // Set on the SUCCESS paths only, never up here. A miss on this route is a
-    // 404, and the extractor's atomic directory swap makes misses real: for the
-    // instant between its two renames the live directory does not exist, and a
-    // pod whose mount is a run behind answers 404 for longer than that. A 404
-    // that goes out `immutable` is a 404 the browser and Cloudflare keep for a
-    // year against a URL whose content now exists, so the skin stays white long
-    // after the mount is correct — the exact trap /images had to be fixed for
-    // once already.
-    //
-    // And a miss says `no-store` OUT LOUD. Sending no Cache-Control at all was
-    // meant to mean "revalidate every time", but Cloudflare stamps its default
-    // browser TTL (max-age=14400) on any response without one, 404s included:
-    // the glove tint maps restored after a CS2 format change stayed missing in
-    // browsers for four hours, every 22-finish glove still flat cyan.
-    const versioned = (request.query as { v?: string } | undefined)?.v != null;
-    const selfVersioning = type !== "application/json" && !type.startsWith("audio/");
-    const cacheControl = selfVersioning || versioned ? "public, max-age=31536000, immutable" : "no-cache";
-    try {
-      // Only stat when a range was actually asked for: the icon and texture
-      // routes are hot and pay nothing for a feature they never use.
-      if (request.headers.range) {
-        const { size } = await fs.stat(file);
-        const range = parseByteRange(request.headers.range, size);
-        if (range === false) {
-          return reply.code(416).header("Content-Range", `bytes */${size}`).send();
-        }
-        if (range) {
-          reply.header("Cache-Control", cacheControl);
-          reply.header("Content-Range", `bytes ${range.start}-${range.end}/${size}`);
-          reply.header("Content-Length", range.end - range.start + 1);
-          return reply.code(206).type(type).send(createReadStream(file, { start: range.start, end: range.end }));
-        }
+// someone else's copy. nginx serves these directly; these routes back its
+// static-miss fallback (frontend/backend pods can land on different nodes),
+// and they serve the dev host outright once it is switched to its own asset
+// route (`scripts/dev-backend.sh assets on`, see docs/CACHING.md).
+//
+// The answer itself — validators and 304s, the extractor's `.gz` siblings,
+// on-the-fly gzip, byte ranges — is decided in assetResponse.mjs, which
+// scripts/serve.mjs shares, so the three servers (nginx being the third) send
+// the same thing for the same URL.
+//
+// GET and HEAD are declared together instead of leaving HEAD to Fastify: its
+// automatic HEAD route runs the GET handler, so the viewer's HEAD existence
+// probe on a GLB read the whole file, and it then reset Content-Length to 0.
+function serveAssetDir(routePrefix: string, dir: string, opts: { immutable?: boolean } = {}) {
+  app.route<{ Params: { "*": string }; Querystring: { v?: string } }>({
+    method: ["GET", "HEAD"],
+    url: `${routePrefix}/*`,
+    handler: async (request, reply) => {
+      const rel = request.params["*"] ?? "";
+      const type = ASSET_TYPES[path.extname(rel).toLowerCase()];
+      if (!type || rel.includes("..") || rel.includes("\\") || !/^[\w\-./ %()]+$/.test(rel)) {
+        return reply.status(404).send({ error: "not found" });
       }
-      const buf = await fs.readFile(file);
-      reply.header("Cache-Control", cacheControl);
-      return reply.type(type).send(buf);
-    } catch {
-      return reply.status(404).header("Cache-Control", "no-store").send({ error: "not extracted" });
-    }
+      reply.header("Access-Control-Allow-Origin", "*");
+      // As nginx sends it: without it a cross-origin Resource Timing entry
+      // reports 0 bytes, and ?perf=1's byte counter is blind to these files.
+      reply.header("Timing-Allow-Origin", "*");
+      const file = path.join(dir, rel);
+      // Every tree behind this route except the icons is rewritten in place by
+      // an extraction under names that do not change: paint MATERIALS (cs2-lib's
+      // names), paint TEXTURES (hashed over their archive path, not their
+      // bytes), models and their textures, music (`valve_cs2_01.mp3` every
+      // run), clips. Caching a material for a day once kept a browser pointing
+      // at textures the next run had renamed, and every skin rendered white. So
+      // a file is only immutable once the client has stamped the extraction
+      // version on its URL (withAssetVersion); unversioned requests revalidate,
+      // which keeps old clients and hand-typed URLs correct — and with an ETag
+      // on every answer, revalidating costs a 304 rather than the file.
+      //
+      // This used to treat every non-JSON, non-audio file as self-versioning.
+      // That is true of the icons and of nothing else here: an unversioned GLB
+      // or texture from this route was pinned for a year, where nginx, the
+      // primary server for the same URL, revalidated it. Item ICONS keep it:
+      // their hash is cs2-lib's, over the image itself.
+      //
+      // An empty `?v=` is no stamp, as in nginx's map.
+      const cacheControl = opts.immutable || request.query?.v ? IMMUTABLE : "no-cache";
+      // Cache-Control is set on the SUCCESS paths only. A miss on this route is
+      // a 404, and the extractor's atomic directory swap makes misses real: for
+      // the instant between its two renames the live directory does not exist,
+      // and a pod whose mount is a run behind answers 404 for longer than that.
+      // A 404 that goes out `immutable` is a 404 the browser and Cloudflare keep
+      // for a year against a URL whose content now exists, so the skin stays
+      // white long after the mount is correct — the exact trap /images had to be
+      // fixed for once already.
+      //
+      // And a miss says `no-store` OUT LOUD. Sending no Cache-Control at all was
+      // meant to mean "revalidate every time", but Cloudflare stamps its default
+      // browser TTL (max-age=14400) on any response without one, 404s included:
+      // the glove tint maps restored after a CS2 format change stayed missing in
+      // browsers for four hours, every 22-finish glove still flat cyan.
+      const plan = await planAsset({ file, type, method: request.method, headers: request.headers, cacheControl }).catch(
+        () => null,
+      );
+      if (!plan) return reply.status(404).header("Cache-Control", "no-store").send({ error: "not extracted" });
+      for (const [name, value] of Object.entries(plan.headers)) {
+        // Appended, not set: @fastify/cors may already have put `Origin` there.
+        const prior = name === "Vary" ? reply.getHeader("vary") : undefined;
+        reply.header(name, prior ? `${prior}, ${value}` : value);
+      }
+      return reply.code(plan.status).send(plan.body ? openAssetBody(plan.body) : undefined);
+    },
   });
 }
 serveAssetDir("/paints", PAINTS_DIR);
-serveAssetDir("/images", IMAGES_DIR);
+serveAssetDir("/images", IMAGES_DIR, { immutable: true });
 // Models were the one mount-backed tree with no static-miss fallback: nginx
 // ended its /models/ block in `=404`. That was survivable while the tree was 36
 // weapons written in one early step, but agents mirror their whole archive path
@@ -605,6 +612,11 @@ serveAssetDir("/models", MODELS_DIR);
 // nginx's /music/ block ends in `try_files $uri @backend` — and it is the one
 // mount whose clients seek, which is why serveAssetDir learned byte ranges.
 serveAssetDir("/music", MUSIC_DIR);
+// First-person clips with their sounds and effect textures, and the map
+// panoramas. nginx's /anims/ block has always ended in `try_files $uri
+// @backend`, but nothing answered here, so a cross-node miss was Fastify's own
+// "route not found" and first person stood still.
+serveAssetDir("/anims", ANIMS_DIR);
 
 // Serve renders directly too — nginx falls back here when its mount copy
 // misses (e.g. frontend/backend pods on different nodes).
