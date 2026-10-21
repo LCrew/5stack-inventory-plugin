@@ -18,6 +18,7 @@ const API_BASE = resolveApiBase();
 export const API_ORIGIN = API_BASE;
 
 import { WEAR_STOPS } from "./itemVisuals";
+import { postCard } from "./cardEncode";
 
 export type Team = "CT" | "T";
 
@@ -148,6 +149,9 @@ export interface Catalog {
    *  key). Absent = the client's canonical rig. A server only sets it when its
    *  card store is its own — see the backend's /api/catalog. */
   bakeEnvironment?: string;
+  /** The image formats the card uploads take ("webp", "png"). Absent on a
+   *  backend from before WebP cards, which takes PNGs only. See cardEncode.ts. */
+  cardFormats?: string[];
 }
 
 export interface CatalogItem {
@@ -373,7 +377,11 @@ function applyCatalogRuntime(c: Partial<Catalog>) {
   // value overrides the default.
   if (c.assetOrigin) assetOrigin = c.assetOrigin;
   if (typeof c.bakeEnvironment === "string" && c.bakeEnvironment) bakeEnvironment = c.bakeEnvironment;
+  if (Array.isArray(c.cardFormats)) cardsTakeWebp = c.cardFormats.includes("webp");
 }
+/** Whether this backend's card uploads take WebP (`Catalog.cardFormats`).
+ *  False until the catalog says so, so an older backend only ever gets PNGs. */
+let cardsTakeWebp = false;
 /**
  * The rig the SERVER bakes its cards under, when it names one — see
  * `Catalog.bakeEnvironment`. Null means the client's own canonical rig.
@@ -449,6 +457,12 @@ export const fetchCatalog = () => request<Catalog>("/catalog");
 // and 4000. Keying on the count would re-bake every card on every kill.
 // stattrak is REQUIRED, not optional: an omitted flag silently builds a key
 // that disagrees with the one the writer used, and the card 404s forever.
+//
+// The `.png` at the end is part of the card's NAME, not a promise about its
+// bytes: a current backend stores most cards as WebP under the same stem and
+// answers this URL with whichever it has, under the right Content-Type
+// (backend/src/cardStore.ts). Keeping the name is what lets cards stored before
+// WebP, old clients and old backends all keep working with one request a card.
 let renderVersion = 0;
 type RenderKeyed = {
   id: number;
@@ -480,14 +494,12 @@ export const renderUrlFor = (i: RenderKeyed) =>
  * instance's card; must match catalogRenderKey there.
  */
 export const catalogRenderUrl = (itemId: number) => `${API_ORIGIN}/api/renders/cat-${itemId}-v${renderVersion}.png`;
+// Both card uploads take the snapshot's PNG and send it as a WebP where the
+// server and the browser allow (postCard in cardEncode.ts); the key and every
+// URL above stay the same either way.
 export async function uploadCatalogRender(itemId: number, blob: Blob): Promise<boolean> {
   try {
-    const res = await fetch(`${API_BASE}/api/render/catalog/${itemId}`, {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/octet-stream" },
-      body: blob,
-    });
+    const res = await postCard(`${API_BASE}/api/render/catalog/${itemId}`, blob, cardsTakeWebp);
     return res.ok;
   } catch {
     return false;
@@ -495,12 +507,7 @@ export async function uploadCatalogRender(itemId: number, blob: Blob): Promise<b
 }
 export async function uploadRender(instanceId: number, blob: Blob): Promise<{ ok: boolean; error?: string }> {
   try {
-    const res = await fetch(`${API_BASE}/api/render/${instanceId}`, {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/octet-stream" },
-      body: blob,
-    });
+    const res = await postCard(`${API_BASE}/api/render/${instanceId}`, blob, cardsTakeWebp);
     if (res.ok) return { ok: true };
     let error = `HTTP ${res.status}`;
     try {
