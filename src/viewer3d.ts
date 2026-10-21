@@ -5643,8 +5643,9 @@ async function buildViewer(
    * syncFpvSeat), so once is enough. The real meshes keep rendering and keep
    * their skeleton; the twins share their material, name and userData.
    */
-  /** Each pistol's world matrix in the pose the twins were taken in, for a
-   *  dual-wield rig in first person — empty otherwise. See followDualParts. */
+  /** World matrix, in the pose the twins were taken in, of each bone that
+   *  carries attachments through a first-person clip — a dual rig's pistols,
+   *  any other weapon's `weapon_offset`. See followDualParts. */
   const dualBind = new Map<string, import("three").Matrix4>();
   if (fpvSpec) {
     object.updateMatrixWorld(true);
@@ -5688,12 +5689,19 @@ async function buildViewer(
       twin.matrixWorld.copy(skinned.matrixWorld);
       weaponMeshes[i] = twin;
     }
-    // A dual rig's two pistols as they stand in the twins — see followDualParts.
-    for (const name of ["weapon_l", "weapon_r"]) {
+    // The bones that carry attachments through a clip, as they stand in the
+    // twins — see followDualParts: a dual rig's two pistols, everything else's
+    // `weapon_offset` (the rare inspects turn the weapon in the hand).
+    const carriers = object.getObjectByName("weapon_l") && object.getObjectByName("weapon_r")
+      ? ["weapon_l", "weapon_r"]
+      : object.getObjectByName("weapon_offset")
+        ? ["weapon_offset"]
+        : [];
+    for (const name of carriers) {
       const b = object.getObjectByName(name);
       if (b) dualBind.set(name, b.matrixWorld.clone());
     }
-    if (dualBind.size < 2) dualBind.clear();
+    if (dualBind.size < carriers.length) dualBind.clear();
   }
   /**
    * The subset that carries TEXCOORD_1 — i.e. the surfaces the game maps
@@ -8355,6 +8363,34 @@ async function buildViewer(
     return charmPoseFix ? p.applyMatrix4(charmPoseFix) : p;
   })();
 
+  /**
+   * THE DUAL BERETTAS' KEYCHAIN — where the game hangs a charm nobody has moved.
+   *
+   * Every other gun has a `keychain` anchor in charmAnchors.json. This one has
+   * none: the extractor measures those against `weapon_offset`, and a
+   * dual-wield rig has no such bone. So an unplaced charm took the no-anchor
+   * fallback below, a ray under the middle of the pair, and hung from the LEFT
+   * pistol's trigger guard. The game hangs it from the `keychain` attachment on
+   * `weapon_r` (models/keychain-anchors.json, which puts the StatTrak and the
+   * name tag on that pistol too). Read through the right pistol's own bone the
+   * way placeAttachedModule reads those two — bind frame, then pose — so it
+   * lands in the tent, side by side and held alike. A charm someone has placed
+   * keeps the stored position it has.
+   */
+  const DUAL_KEYCHAIN = { hd: [1.129417, 0.612476, 0.818759], legacy: [1.126869, 0.551046, 0.732226] };
+  function dualKeychainPoint(): import("three").Vector3 | null {
+    const bones = moduleFrames?.bones ?? poseBones;
+    if (!pres.dualLayout || !bones.byName.has("weapon_l")) return null;
+    const pose = bones.byName.get("weapon_r");
+    const bind = bones.bind.get("weapon_r");
+    if (!pose || !bind) return null;
+    const o = opts?.legacyPaint ? DUAL_KEYCHAIN.legacy : DUAL_KEYCHAIN.hd;
+    // Bone-relative inches -> model inches (bind) -> object metres (pose).
+    const local = new THREE.Vector3(o[0], o[1], o[2]).applyMatrix4(bind).applyMatrix4(pose);
+    object.updateMatrixWorld(true);
+    return object.localToWorld(local);
+  }
+
   // The anchor CS2 gives us is a clip point, which on some weapons sits just
   // inside the shell — hang from it verbatim and the charm renders half-buried
   // or pops through as the body rotates. Cast outward along each axis; if we
@@ -9238,6 +9274,10 @@ async function buildViewer(
       const stored = placed ? offsetToWorld(c).sub(center) : null;
       if (stored && charmPoseFix) stored.applyMatrix4(charmPoseFix);
       return liftOutOfBody(stored ?? charmAnchor.clone());
+    }
+    if (c.x == null && c.y == null && c.z == null) {
+      const hook = dualKeychainPoint();
+      if (hook) return hook;
     }
     const t = clamp(0.5 + (c.x ?? 0) * 0.45, 0.05, 0.95);
     const l = cbox.min.getComponent(AXIS_L) + t * sizeL;
@@ -11508,6 +11548,16 @@ async function buildViewer(
     // ALONG the blade — knives seat along the plate's own normal instead.
     const clearance = knife ? null : clearReadout(mod);
     if (clearance?.pushed || (knife && seatKnifePlate(mod) !== 0)) object.updateMatrixWorld(true);
+    // Held, the module rides the bone that carries it — the same as the name
+    // plate. A knife's blade flips, a gun turns in the hand in its rare
+    // inspects, and a module left on `object` stayed where the gun had been.
+    // `attach` keeps the world transform, so nothing moves at the swap.
+    const carrier = bone ?? (fpvSpec && object.getObjectByName("weapon_offset") ? "weapon_offset" : undefined);
+    const carrierBone = fpvSpec && carrier ? object.getObjectByName(carrier) : undefined;
+    if (carrierBone) {
+      object.updateMatrixWorld(true);
+      carrierBone.attach(mod);
+    }
     // Placement introspection for tools/shadertest/stattrak.html. Off unless
     // the rig sets the flag, so production pays nothing — and measuring these
     // boxes is what finally settled placement after several wrong theories.
@@ -11765,6 +11815,18 @@ async function buildViewer(
       const authored = new THREE.Quaternion().setFromEuler(
         new THREE.Euler(-anchorAngles[0] * rad, -anchorAngles[1] * rad, -anchorAngles[2] * rad, "XYZ"),
       );
+      // A plate on its own BONE reads along that bone as the pose turned it.
+      // Every gun's plate rides the body, which the pose leaves square (0.05-0.09
+      // degrees), so the angles alone were enough — until the Dual Berettas,
+      // whose plate is on `weapon_r` and whose tent stands that pistol 65
+      // degrees over: the name read 65 degrees off the barrel and stuck out
+      // sideways into the gap. placeAttachedModule gives the StatTrak module
+      // the same turn.
+      if (picked.bone) {
+        const frames = moduleFrames ?? { xform: poseXform, bones: poseBones };
+        const turn = clipRotation(THREE, frames.bones.byName.get(picked.bone), frames.bones.modelQuat);
+        if (turn) authored.premultiply(turn);
+      }
       const wanted = new THREE.Vector3(0, 0, 1).applyQuaternion(authored);
       const long = wanted.sub(normal.clone().multiplyScalar(wanted.dot(normal)));
       // Degenerate only if the plate reads straight out of the surface, which no
@@ -11795,8 +11857,11 @@ async function buildViewer(
     // plate left on `object` would hang in the air where the handle used to be.
     // `attach` keeps its world transform, so at the moment of the swap nothing
     // moves; from then on it follows the part.
-    if (fpvSpec && picked.bone) {
-      const b = object.getObjectByName(picked.bone);
+    // A gun's plate is authored on the body, but the body turns in the hand in
+    // the rare inspects (see propBones), so held it rides `weapon_offset`.
+    const carrier = picked.bone ?? (fpvSpec && object.getObjectByName("weapon_offset") ? "weapon_offset" : undefined);
+    if (fpvSpec && carrier) {
+      const b = object.getObjectByName(carrier);
       if (b) {
         object.updateMatrixWorld(true);
         b.attach(mod);
@@ -11849,7 +11914,8 @@ async function buildViewer(
 
   function removeStatTrak() {
     if (stattrakMod) {
-      object.remove(stattrakMod);
+      // Its parent is a bone in first person — see mountStatTrak.
+      stattrakMod.removeFromParent();
       stattrakMod = null;
     }
     for (const d of stattrakDisposables) d.dispose();
@@ -12056,8 +12122,22 @@ async function buildViewer(
    * way a knife does (see propRest).
    */
   const fpvDual = !!object.getObjectByName("weapon_hand_l") && !!object.getObjectByName("weapon_hand_r");
-  /** The weapon's skeleton follows the viewmodel clip's prop tracks. */
+  /** The weapon's whole skeleton follows the viewmodel clip's prop tracks. */
   const fpvProps = fpvKnife || fpvDual;
+  /**
+   * Which prop tracks an action takes, for a weapon that is not all prop
+   * tracks (fpvProps).
+   *
+   * A gun's parts come from its GLB's own clips where it has one for the
+   * action (reload, shoot, draw — PART_CLIP), and two clips on one bone average
+   * into neither, so those actions take only `weapon_offset`. The inspects have
+   * no part clip, so they take everything. `weapon_offset` is the gun turned in
+   * the hand: identity in every plain clip, and the whole point of the rare
+   * ones — the Deagle's spin and the C4's toss key it, and without it the hands
+   * went through the motion around a weapon that never moved.
+   */
+  const propBones = (action: ClipAction | "rest") => (b: string) =>
+    !!object.getObjectByName(b) && (fpvProps || b === "weapon_offset" || (action !== "rest" && !weaponActions.has(action)));
   const fpvTune = new THREE.Quaternion();
   const fpvEuler = new THREE.Euler();
   /**
@@ -12172,12 +12252,12 @@ async function buildViewer(
         for (const [action, re] of Object.entries(PART_CLIP) as [ClipAction, RegExp][]) {
           const src = gltf.animations?.find((a) => re.test(a.name));
           if (!src) continue;
-          // A dual rig's prop tracks already pose both pistols and their parts
-          // (see fpvDual); two clips on one bone average into neither. What the
-          // prop tracks lack is SCALE — the magazine hidden for the swap — so
-          // that is all this clip keeps there.
+          // Where the prop tracks pose the whole skeleton (a dual rig's pistols —
+          // see fpvProps), two clips on one bone would average into neither.
+          // What the prop tracks lack is SCALE — the magazine hidden for the
+          // swap — so that is all this clip keeps there.
           const tracks = src.tracks.filter(
-            (t) => !/^(weapon|weapon_offset|ag1_hand_[lr])\./i.test(t.name) && (!fpvDual || /\.scale$/.test(t.name)),
+            (t) => !/^(weapon|weapon_offset|ag1_hand_[lr])\./i.test(t.name) && (!fpvProps || /\.scale$/.test(t.name)),
           );
           if (!tracks.length) continue;
           const a = weaponMixer.clipAction(new THREE.AnimationClip(`parts:${action}`, src.duration, tracks));
@@ -12193,8 +12273,8 @@ async function buildViewer(
         // neither: no part clips, and a `weapon_offset` that turns the blade 125
         // degrees (butterfly idle). Without this it sat at bind, facing the wrong
         // way. The Dual Berettas need it for their hands — see fpvDual.
-        if (fpvProps && vm) {
-          const restClip = buildPropClip(THREE as unknown as typeof import("three"), vm, (b) => !!object.getObjectByName(b));
+        if (vm) {
+          const restClip = buildPropClip(THREE as unknown as typeof import("three"), vm, propBones("rest"));
           if (restClip) {
             propRest = weaponMixer.clipAction(restClip);
             propRest.play();
@@ -12717,7 +12797,7 @@ async function buildViewer(
       entry = {
         clip: built.clip,
         cues: [...(raw.sounds ?? [])].sort((a, b) => a.t - b.t),
-        prop: fpvProps ? buildPropClip(THREE as unknown as typeof import("three"), raw, (b) => !!object.getObjectByName(b)) : null,
+        prop: buildPropClip(THREE as unknown as typeof import("three"), raw, propBones(action)),
       };
       fpvClips.set(action, entry);
       // The fire clip carries the weapon's rate of fire — see the extractor.

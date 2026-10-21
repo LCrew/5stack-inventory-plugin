@@ -83,6 +83,12 @@ spec:
               value: /cs2-models/renders-dev
             - name: BAKE_ENVIRONMENT
               value: cs2
+            # Always this mount, never the 5stack asset CDN. The CDN switch is a
+            # setting in the SHARED database, so turning it on for the installed
+            # plugin turned it on here too, and the CDN holds upstream's
+            # extraction, not this fork's (see ASSET_CDN_OFF in main.ts).
+            - name: INVENTORY_ASSET_CDN
+              value: "off"
             # The live backend extracts on its own schedule; two of them racing
             # over one mount is the one thing a shared mount must never do.
             # Extraction from here is by hand only (⚙ settings → 3D Models).
