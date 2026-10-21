@@ -22,14 +22,18 @@
 // Editing an item (POST /api/inventory/<id>) is answered here and applied to
 // the in-memory inventory, so Save -> card re-bake can be tested; other writes
 // are proxied to a backend that will refuse them without a session. Card
-// uploads are accepted and dropped.
+// uploads are kept and served back (see the card store below: CARDS_DIR,
+// MOCK_CARD_FORMATS).
 import { createServer } from "node:http";
-import { readFile } from "node:fs/promises";
+import { rmSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { extname, join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const cat = await import(join(REPO, "backend/src/catalog.ts"));
+const { cardFormatOf, CARD_FORMATS, findCard, readCard, storeCard } = await import(join(REPO, "backend/src/cardStore.ts"));
 const DIST = process.argv[2];
 if (!DIST) {
   console.error("usage: node --experimental-strip-types tools/standalone/mock-server.mjs <dist dir>");
@@ -55,7 +59,22 @@ const INVENTORY = seed.map((e, n) => ({
   origin: "crafted",
 }));
 
-const CARDS = new Map();
+// The card store, through the backend's own cardStore.ts: a PNG upload is
+// transcoded to WebP when cwebp is installed, and a card is answered in
+// whichever format is stored. CARDS_DIR keeps it (as inst-<id>.png|.webp) for
+// the next run, which is how "a card stored as PNG by an older client still
+// shows" is checked; without it the store is a temp dir, gone on exit.
+const CARDS_DIR = process.env.CARDS_DIR || (await mkdtemp(join(tmpdir(), "mock-cards-")));
+if (!process.env.CARDS_DIR) {
+  process.on("exit", () => rmSync(CARDS_DIR, { recursive: true, force: true }));
+  for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => process.exit(0));
+}
+await mkdir(CARDS_DIR, { recursive: true });
+// MOCK_CARD_FORMATS plays an older or a broken backend:
+//   png          one from before WebP cards: no `cardFormats` on the catalog,
+//                PNG uploads stored as they come, WebP refused (400)
+//   refuse-webp  one that advertises WebP but refuses it anyway
+const CARD_MODE = process.env.MOCK_CARD_FORMATS ?? "";
 const MIME = {
   ".html": "text/html",
   ".js": "text/javascript",
@@ -103,19 +122,45 @@ createServer(async (req, res) => {
       }
       return json(res, row);
     }
+    // The catalog's `cardFormats` is what tells a client it may upload WebP
+    // cards; an old backend (MOCK_CARD_FORMATS=png) doesn't send it.
+    if (p === "/api/catalog") {
+      const body = await (await fetch(UP + req.url)).json();
+      if (CARD_MODE === "png") delete body.cardFormats;
+      else body.cardFormats = [...CARD_FORMATS];
+      return json(res, body);
+    }
     // Card store, the way a backend WITHOUT card_look keys it: one file per
     // instance whatever its stickers — the case where a stale card can win.
+    // Validated by magic bytes like the real one; an old backend refused
+    // anything but a PNG with exactly this answer.
     const up = req.method === "POST" && p.match(/^\/api\/render\/(\d+)$/);
     if (up) {
       const chunks = [];
       for await (const c of req) chunks.push(c);
-      CARDS.set(up[1], Buffer.concat(chunks));
+      const body = Buffer.concat(chunks);
+      const format = cardFormatOf(body);
+      if (!format || (CARD_MODE && format !== "png")) {
+        console.log(`card ${up[1]}: refused ${format ?? "unknown"} upload, ${body.length} bytes`);
+        res.writeHead(400, { "content-type": "application/json" });
+        return res.end(JSON.stringify({ error: "bad render" }));
+      }
+      const key = `inst-${up[1]}.png`;
+      if (CARD_MODE === "png") {
+        await writeFile(join(CARDS_DIR, key), body);
+        await rm(join(CARDS_DIR, `inst-${up[1]}.webp`), { force: true });
+      } else {
+        await storeCard(CARDS_DIR, key, body);
+      }
+      const stored = await findCard(CARDS_DIR, key);
+      console.log(`card ${up[1]}: got ${format} ${body.length} bytes, stored ${stored.type} ${(await stat(stored.file)).size} bytes`);
       return json(res, { ok: true });
     }
     const card = p.match(/^\/api\/renders\/inst-(\d+)-/);
-    if (card && CARDS.has(card[1])) {
-      res.writeHead(200, { "content-type": "image/png" });
-      return res.end(CARDS.get(card[1]));
+    const stored = card && (await readCard(CARDS_DIR, `inst-${card[1]}.png`));
+    if (stored) {
+      res.writeHead(200, { "content-type": stored.type });
+      return res.end(stored.body);
     }
     if (p === "/api/loadout") return json(res, LOADOUT);
     if (p === "/api/inventory") return json(res, INVENTORY);

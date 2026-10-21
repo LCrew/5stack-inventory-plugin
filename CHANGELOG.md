@@ -63,6 +63,7 @@ The 3D model extraction is now at pipeline version 37; run it once to get every 
 ### Features
 
 - **Glove model cards**: the eight bare glove models get cards baked from their 3D model, kept in the shared card store.
+- **Smaller cards**: new cards are stored as WebP, about a tenth of the size of the PNG they replace, so the inventory grid loads much faster with no visible difference. Cards already stored keep showing as they are, and cards baked in Safari are converted by the server.
 
 ### Bug Fixes
 
@@ -101,6 +102,7 @@ The 3D model extraction is now at pipeline version 37; run it once to get every 
 - **Base model on listings**: knife and glove catalog listings carry their base model's id, name and image.
 - **Sticker masks endpoint**: the sticker bounds endpoint returns each weapon body's sticker mask.
 - **Bake lighting**: the catalog reports which lighting the server bakes cards under. Charm shading data includes detail textures.
+- **WebP cards**: card uploads accept WebP as well as PNG, checked by their magic bytes, and a PNG upload is converted to WebP when `cwebp` is installed. The catalog lists the accepted formats as `cardFormats`, and a card is served in whichever format is stored, under the same `.png` URL.
 
 ## Dev Tooling & Deployment
 
@@ -114,6 +116,7 @@ The 3D model extraction is now at pipeline version 37; run it once to get every 
 - **Live camera drags**: `drag.mjs` turns the camera with the mouse after a viewer has loaded and screenshots each step, for bugs that only appear once the view moves.
 - **Dev copy asset route (opt-in)**: `scripts/dev-backend.sh assets on` serves the dev copy's models, item art and music from the dev backend, so this fork's caching and compression can be tried without touching the installed plugin. `assets off` puts it back.
 - **Caching guide**: `docs/CACHING.md` explains how files are cached and compressed, how to check it, and how to add an optional Cloudflare cache rule safely.
+- **Card store in the mock server**: `tools/standalone` keeps baked cards (`CARDS_DIR` saves them between runs) and can play a backend from before WebP cards (`MOCK_CARD_FORMATS=png`).
 
 ### Removed
 
