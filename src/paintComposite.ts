@@ -32,6 +32,7 @@
 //   spray/anodized-air styles, uvScale for everything else
 import { getAssetOrigin, withAssetVersion } from "./api";
 import { loadRawPngTexture } from "./rawPng";
+import { prefetchedUrl } from "./prefetchStore";
 import {
   buildValveMaterials,
   loadValveCombo,
@@ -1885,7 +1886,9 @@ function loadTex(
     // The weapon inputs are PNGs with data in their alpha, which Safari empties
     // when the file is fully transparent -- see rawPng.ts.
     cached = loadRawPngTexture(THREE, url)
-      .then((raw) => raw ?? new THREE.TextureLoader().loadAsync(url))
+      // prefetchedUrl: held bytes when src/prefetch.ts warmed this file. The
+      // cache key above stays the real URL either way.
+      .then((raw) => raw ?? prefetchedUrl(url).then((src) => new THREE.TextureLoader().loadAsync(src)))
       .then((t) => {
         t.colorSpace = opts.srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
         if (opts.addr) {
@@ -1948,6 +1951,16 @@ const MAX_COMPOSITE_SIZE = COARSE_POINTER ? 1024 : 2048;
 // 1024 for the game too, so resolution here is the atlas, not the input). Match
 // it on desktop; coarse-pointer devices stay at 1024 for memory.
 const MAX_COMPOSITE_SIZE_PROJECTED = COARSE_POINTER ? 1024 : 4096;
+
+/**
+ * The resolution cap a composite of this paint is made, and filed in the
+ * shared store, at — before any `maxSize` a caller adds. Split out of
+ * compositePaint so src/prefetch.ts can name the store file a mount is about
+ * to look up.
+ */
+export function compositeSizeCap(def: PaintDef): number {
+  return def.style === 2 || def.style === 5 ? MAX_COMPOSITE_SIZE_PROJECTED : MAX_COMPOSITE_SIZE;
+}
 
 type CacheEntry = { result: Omit<CompositeResult, "release">; refs: number; dispose: () => void };
 type RendererCache = Map<string, CacheEntry>;
@@ -2083,10 +2096,7 @@ export async function compositePaint(
   // projected skin is sixteen times the pixels of a 1024² one for an answer the
   // eye cannot use mid-gesture. The full-size composite still runs when the
   // drag stops, so nothing ships at proxy resolution.
-  const sizeCap = Math.min(
-    wantsProjection ? MAX_COMPOSITE_SIZE_PROJECTED : MAX_COMPOSITE_SIZE,
-    opts.maxSize ?? Infinity,
-  );
+  const sizeCap = Math.min(compositeSizeCap(def), opts.maxSize ?? Infinity);
   const key = `${def.pattern ?? "-"}|${def.overlay ?? "-"}|${def.style}|${wear.toFixed(4)}|${seed}|${wkey}|d${opts.debug ?? 0}|${def.caseHardening ? `ch${def.caseHardeningRamp ?? "-"}${def.chRampOffset}` : ""}|a${def.patternAddrH}_${def.patternAddrV}|c${sizeCap}`;
   const cache = cacheFor(renderer);
   const hit = opts.reference || opts.forcePort ? undefined : cache.get(key);
