@@ -2,7 +2,7 @@
 
 How the fixes in [CHANGELOG.md](../CHANGELOG.md) were found, and how to find the
 next one. It covers placement (StatTrak, name tags, stickers), texture spaces,
-sticker effects, cards and the extraction. For a **paint/skin that renders
+sticker effects, cards, the extraction and 3D load time. For a **paint/skin that renders
 wrong**, start with
 [tools/shadertest/DEBUGGING-SKINS.md](../tools/shadertest/DEBUGGING-SKINS.md)
 instead; the rig itself is described in
@@ -152,6 +152,9 @@ registry is `src/devFlags.ts`.
 | `pivotdot` | a dot at the point an orbit drag rotates around |
 | `perf` | per-frame timing HUD |
 | `inspectanim` | the idle inspect motion (also gates the holo drift) |
+| `compositelog` | every composite store lookup: generation, stem, `HIT`/`MISS`, uploads (not in the HUD) |
+| `prefetchlog` | every prefetch warm (`start`, `ready`, `missing`), every file a loader took from it (`HIT`, `loader waits for`), and `window.__prefetch.stats()` (not in the HUD); see [§4.12](#412-opening-an-item-in-3d-is-slow) |
+| `noprefetch` | turns prefetching off, for timing a cold open against a warm one (not in the HUD) |
 | `globalThis.__stDebug = true` (in a rig) | StatTrak placement and readout clearance, logged as `[st]` / `[st-clear]` |
 
 **Live vs card path.** `still: true` (cards, bakes) and the live viewer differ:
@@ -176,6 +179,17 @@ catalog from your working tree's `catalog.ts`; everything else is proxied.
 `drive.mjs` runs a JSON list of steps (JS to run, wait, screenshot) and prints
 console errors. Saves don't work (there's no session), and a "saving it failed"
 notice for card renders is expected.
+
+Two switches on the mock matter for anything about load time:
+
+- `MOCK_CARDS=stub` answers every card with a placeholder, so the card backfill
+  never runs. Without it, every card-less item is baked on load, and each bake
+  pulls the same GLB and composite into the viewer's caches that the open you
+  are timing would have fetched.
+- `MOCK_COMPOSITES=keep` keeps paint composite uploads in memory and serves them
+  back, so the first open of a skin stores it and the next browser session gets
+  a store HIT. Without it every lookup goes to the dev backend's store, which
+  the mock cannot write to, so every open is a MISS.
 
 ### 3.7 Data tools
 
@@ -455,10 +469,87 @@ scratch map as its R channel BEFORE resizing: its alpha is 0, Pillow
 premultiplies RGBA on resize, and the scratches silently become all zero. That
 made a correct shader look like it under-wore.
 
+### 4.12 Opening an item in 3D is slow
+
+A cold open is almost all network, and it is a chain: the GLB, then the
+textures its JSON names, then the paint chain and the composite store lookup,
+and on a store MISS the composite's sources (the weapon's `.inputs[.hd]`,
+10-40MB, plus the paint's own textures). `?perf=1` puts the mount's per-stage
+milliseconds and its MB over the wire in the HUD.
+
+`src/prefetch.ts` starts that chain before the click: on a tile hover, on the
+Edit / View in 3D press, and for the equipped items once the page is idle (its
+header says what each one fetches). The bytes go into `src/prefetchStore.ts`
+and the loaders take them from there through four hooks (`prefetchedFetch`,
+`prefetchedUrl`, `prefetchedUrlSync`, `settlePrefetched`); nothing depends on
+the HTTP cache. `?prefetchlog=1` shows every `start`, `ready` and `missing`, and
+on the loader side every `HIT`, `loader waits for` and `in use`;
+`window.__prefetch.stats()` has the totals. `?noprefetch=1` is the baseline.
+
+**Timing an open.** Run tools/standalone with `MOCK_CARDS=stub` (§3.6), click
+Edit from a page script, then poll the new canvas every frame until it has lit
+pixels. Two traps:
+
+- Use a real GPU (`--use-angle=metal` on macOS). Under SwiftShader the
+  composite alone takes ~20s and buries every network effect.
+- Proxied to the dev mount, the same cold open varies 2-3x between runs (one
+  AK-47 took 8.7-13.1s). For before/after numbers, serve the assets from memory
+  through one paced link of fixed bandwidth and round trip instead. The table
+  below came from a copy of the mock doing that at 100 Mbit/s and 30ms
+  (median of 3, click to first frame, composite store MISS):
+
+| Item | Bytes | No prefetch | Press only | Hover 1.5s, then Edit | Hover 8s |
+| --- | --- | --- | --- | --- | --- |
+| Bayonet \| Doppler | 15MB | 2.02s | 1.85s | 0.71s | 0.70s |
+| AK-47 \| Redline (legacy body, 3 stickers) | 31MB | 3.65s | 2.63s¹ | 1.63s | 1.57s |
+| AK-47 \| Predator (HD body, projected) | 76MB | 8.44s | 7.36s | 6.00s | 4.50s |
+
+¹ Partly the idle warm of the equipped AK-47 | First Class, which shares the
+legacy body's GLB and textures. A hover never fetches the composite inputs, so
+the Predator's 36MB of them are still downloaded after the click. A build
+without the prefetch code at all opens in the same time as the "No prefetch"
+column (2.01s and 8.46s), so the hooks cost nothing when nothing is warmed.
+With the card backfill left on, the bakes take what the idle warm fetched:
+the page loaded 116.8MB with prefetch and 116.8MB without.
+
+The same items once their composite is in the store (`MOCK_COMPOSITES=keep`,
+median of 2), where an open needs no inputs at all:
+
+| Item | Bytes | No prefetch | Press only | Hover 1.5s, then Edit | Hover 8s |
+| --- | --- | --- | --- | --- | --- |
+| Bayonet \| Doppler | 3MB | 0.48s | 0.33s | 0.26s | 0.25s |
+| AK-47 \| Redline | 15MB | 1.38s | 0.50s¹ | 0.48s | 0.49s |
+| AK-47 \| Predator | 53MB | 3.92s | 3.48s | 2.09s | 1.26s |
+
+In WebKit (Playwright, same lab link) the Bayonet's store-miss open went from
+2.05-2.13s to 0.78-0.86s after an 8s hover, with masks.png served from the
+store through the raw PNG path (§4.9) and the Doppler painted.
+
+**Checking "never downloads twice".** Count requests per URL in CDP's Network
+domain during hover and open. The one duplicate this found: a finish drawn
+through Valve's combo shader loads its pattern twice, once for the combo and
+once for the port, with different sampler settings, so the texture cache misses
+and the second `<img>` load relied on the browser's image cache to pair it with
+the first by URL. A blob: URL for the first and the real URL for the second
+broke the pairing (1MB extra on AK-47 | Predator). The store now hands every
+load of a taken file the same blob: URL for a minute.
+
+**The politeness rules**, one at a time: Save-Data and 2g by overriding
+`navigator.connection` before the page loads (CDP
+`Page.addScriptToEvaluateOnNewDocument`); a hidden tab by overriding
+`document.hidden` and dispatching `visibilitychange`; the concurrency cap and
+the yield to a building viewer by sampling `window.__prefetch.stats()`
+(`activeBackground`, `peakBackground`, `viewerBusy`) every 50ms.
+
 ## 5. Gotchas
 
 - **Disk.** Headless Chrome profiles are large; use the runners in this repo,
   which delete theirs.
+- **`npm i --no-save playwright` rewrites `yarn.lock`.** Put it back
+  (`git checkout yarn.lock`) before committing.
+- **A prefetched file loads from a `blob:` URL.** In devtools it shows as a
+  blob: request; the real URL was fetched earlier by src/prefetchStore.ts, at
+  low priority unless a press asked for it.
 - **An attached charm's gravity is the camera's down**, not world −Y. Anything
   physical on a charm (cloth, liquid) must use `charmGravity`'s axis.
 - **Alpha is data in the composite inputs.** `masks.png` alpha is unused and 0,

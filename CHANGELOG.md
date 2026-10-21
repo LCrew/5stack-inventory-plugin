@@ -72,6 +72,13 @@ The 3D model extraction is now at pipeline version 37; run it once to get every 
 
 ## Performance
 
+### Features
+
+- **3D views load ahead of the click**: resting the pointer on an item card starts downloading what its 3D view needs, so a Bayonet | Doppler then opens in Edit in 0.7 s instead of 2 s on a 100 Mbit/s connection. Moving off the card before a download starts cancels it.
+- **Edit starts every download at once**: pressing Edit or View in 3D fetches the model, its textures and the paint together, instead of one after another as the viewer reaches each.
+- **Equipped items warm in the background**: once the loadout has loaded, the equipped items' 3D models are fetched while the page is idle, up to a fixed memory budget.
+- Prefetching stays out of the way: it is off under Save-Data and on 2G, and pauses while the tab is hidden or a 3D view is loading. The large paint inputs are only fetched once Edit or View in 3D is pressed, never on hover.
+
 ### Bug Fixes
 
 - Scrubbing glove patterns no longer stutters: each repaint went from 60–100 ms to about 1 ms with identical output.
@@ -106,6 +113,8 @@ The 3D model extraction is now at pipeline version 37; run it once to get every 
 - **Test tools**: `mount.html` renders any item with any options from the URL, `tools/standalone` runs the real UI against a fake inventory, and `glb-info`/`knife-anchors` read and apply the game's model data.
 - **Safari test runner**: `shoot-webkit.mjs` renders the same test pages in Safari's engine (WebKit) headlessly, for bugs that only Safari shows.
 - **Live camera drags**: `drag.mjs` turns the camera with the mouse after a viewer has loaded and screenshots each step, for bugs that only appear once the view moves.
+- **Prefetch switches**: `?prefetchlog=1` logs every prefetch and whether the viewer used it, and `?noprefetch=1` turns prefetching off to time a cold open.
+- **Load-time testing in the standalone UI**: `MOCK_CARDS=stub` stops the card backfill, whose bakes would otherwise pre-load the model being timed. `MOCK_COMPOSITES=keep` stores paint composites in the mock, so a second session opens with a store hit.
 
 ### Removed
 
