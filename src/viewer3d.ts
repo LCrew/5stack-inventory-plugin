@@ -12122,8 +12122,11 @@ async function buildViewer(
    * against the game's 41% / 66%, and the Karambit's two hands within a few
    * percent of the game's. The 3 degrees is a deliberate nudge above that
    * reference, which was taken with a viewmodel set lower than the default.
-   * The field of view stays the shared one (54): a narrower one made both
-   * knives larger than the game draws them.
+   *
+   * Knives have their own field of view too (`fpvknifefov`, 46 — about CS2's
+   * default viewmodel_fov of 60), and this tilt is a dial (`fpvknifepitch`)
+   * with this as its default. At the guns' 54 a knife read smaller than it
+   * does in game, and at 46 the guns crowd the frame, so the two part here.
    */
   const FPV_KNIFE_PITCH = -3;
   /**
@@ -12622,7 +12625,7 @@ async function buildViewer(
 
   const applyFpvTuning = () => {
     if (!fpvCamera || !arms) return;
-    const fov = debugNumber("fpvfov", 54);
+    const fov = fpvKnife ? debugNumber("fpvknifefov", 46) : debugNumber("fpvfov", 54);
     if (fpvCamera.fov !== fov) {
       fpvCamera.fov = fov;
       fpvCamera.updateProjectionMatrix();
@@ -12637,7 +12640,7 @@ async function buildViewer(
     // Knives take none of the gun dials — see FPV_KNIFE_PITCH.
     fpvTune.setFromEuler(
       fpvEuler.set(
-        ((fpvKnife ? FPV_KNIFE_PITCH : debugNumber("fpvpitch", 0)) * Math.PI) / 180,
+        ((fpvKnife ? debugNumber("fpvknifepitch", FPV_KNIFE_PITCH) : debugNumber("fpvpitch", 0)) * Math.PI) / 180,
         ((fpvKnife ? 0 : debugNumber("fpvyaw", 0)) * Math.PI) / 180,
         0,
         "YXZ",
