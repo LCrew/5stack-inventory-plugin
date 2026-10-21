@@ -72,9 +72,15 @@ The 3D model extraction is now at pipeline version 37; run it once to get every 
 
 ## Performance
 
+### Features
+
+- **Compressed models and data**: the plugin's web server compresses 3D models, animations and other data files, and sends the extraction's ready-made compressed copies when they exist. An AK-47's model goes from 3.3 MB to 1.1 MB on the wire, and its inspect animation from 273 KB to 32 KB.
+
 ### Bug Fixes
 
 - Scrubbing glove patterns no longer stutters: each repaint went from 60–100 ms to about 1 ms with identical output.
+- Models, EXR maps, HDR lighting and WAV music kits are served with their real file types instead of as unknown binary data.
+- When the web server had to hand a file to the backend, unversioned models and textures were kept by browsers for a year, and a re-check downloaded the whole file. They are now re-checked like everywhere else, with a tiny "not modified" answer, and first-person animations and projected-finish position maps no longer come back missing on that path.
 
 ## Model Extraction
 
@@ -106,6 +112,8 @@ The 3D model extraction is now at pipeline version 37; run it once to get every 
 - **Test tools**: `mount.html` renders any item with any options from the URL, `tools/standalone` runs the real UI against a fake inventory, and `glb-info`/`knife-anchors` read and apply the game's model data.
 - **Safari test runner**: `shoot-webkit.mjs` renders the same test pages in Safari's engine (WebKit) headlessly, for bugs that only Safari shows.
 - **Live camera drags**: `drag.mjs` turns the camera with the mouse after a viewer has loaded and screenshots each step, for bugs that only appear once the view moves.
+- **Dev copy asset route (opt-in)**: `scripts/dev-backend.sh assets on` serves the dev copy's models, item art and music from the dev backend, so this fork's caching and compression can be tried without touching the installed plugin. `assets off` puts it back.
+- **Caching guide**: `docs/CACHING.md` explains how files are cached and compressed, how to check it, and how to add an optional Cloudflare cache rule safely.
 
 ### Removed
 
@@ -114,3 +122,4 @@ The 3D model extraction is now at pipeline version 37; run it once to get every 
 ### Bug Fixes
 
 - The headless render runner (`shoot.mjs`) now deletes its temporary Chrome profile and finishes as soon as the page is done. Leftover profiles had grown to several gigabytes.
+- The hot-swap dev server answered a refresh on any page below the plugin (such as `/admin`) with an error instead of the app.

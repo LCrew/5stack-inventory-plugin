@@ -113,7 +113,7 @@ anything:
 | --- | --- | --- |
 | Deployment | `inventory-backend` | `inventory-dev-backend` |
 | Image | upstream `:latest` | `ghcr.io/lcrew/5stack-inventory-plugin-backend:dev`, built by **dev-backend** |
-| Host | `inventory.<panel domain>` | `inventory-dev.<panel domain>` (`/` still served by the installed frontend) |
+| Host | `inventory.<panel domain>` | `inventory-dev.<panel domain>` (`/` still served by the installed frontend; assets too, unless `assets on`) |
 | Database | | **shared** — same inventories, same loadouts |
 | Models mount, CS2 install | | **shared** — same node |
 | Card store | `/cs2-models/renders` | `/cs2-models/renders-dev`, baked under the CS2 rig |
@@ -152,6 +152,15 @@ database instead.
 
 Updating after a push: `./scripts/dev-backend.sh update` (once the
 **dev-backend** run is green). Removing: `./scripts/dev-backend.sh remove`.
+
+### Serving the dev copy's assets (optional)
+
+By default the dev host gets models, item art and music from the installed
+plugin's frontend, so this fork's caching and compression never reach the dev
+copy. `./scripts/dev-backend.sh assets on` sends those paths on the dev host to
+the dev backend instead (same files, same mount); `assets off` undoes it. The
+installed plugin is not touched either way. Details and the checks it runs:
+[CACHING.md](CACHING.md#the-dev-copy).
 
 ### The C4's 3D model
 

@@ -3,7 +3,13 @@
 # already serves the shared mount, so nothing is copied or duplicated.
 #
 # Filled in by scripts/dev-backend.sh: __DOMAIN__, __CLASS__ (the live ingress's
-# class), and the TLS block when the live plugin terminates TLS in the cluster.
+# class), the TLS block when the live plugin terminates TLS in the cluster, and
+# — only after `scripts/dev-backend.sh assets on` — five asset paths in place
+# of the ASSETS marker below. They send /models, /paints, /images, /music and
+# /anims on THIS host to the dev backend instead, so the dev copy is served
+# with this fork's caching and compression (docs/CACHING.md). Same files either
+# way: both read the one shared mount. The installed plugin's host is never
+# touched.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -26,6 +32,7 @@ spec:
                   number: 3000
             path: /api
             pathType: Prefix
+          #__ASSETS__
           - backend:
               service:
                 name: inventory-frontend
