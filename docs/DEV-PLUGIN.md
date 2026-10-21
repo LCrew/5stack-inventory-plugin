@@ -246,9 +246,20 @@ refuses to start a second run over it (`runningElsewhere` in
 **Animation files are cached hard.** `src/viewmodelClip.ts` stamps every
 `/anims/` URL with the extraction version and `CLIP_SCHEMA`, and a versioned URL
 is served immutable for a year. A scoped run does not change the extraction
-version, so after `step viewmodel-anims` changes a clip, bump `CLIP_SCHEMA`
-and push, or browsers keep the old clip. Bump it only after the new files are
-on the mount, never before.
+version, so the clips are also keyed on `anims/index.json`'s `_built` (the time
+the animation step wrote it), and the index itself is always revalidated. A
+`step viewmodel-anims` therefore reaches browsers on their next page load with
+no code change. `CLIP_SCHEMA` is still the key to bump when the clip FORMAT
+changes, and only once files in the new format are on the mount.
+
+**Assets come from this mount, not the 5stack CDN.** The installed plugin's
+"Use the 5stack asset CDN" switch is stored in the shared database, and when
+the CDN's pipeline version and CS2 build match the mount's, a backend hands the
+app `https://skins.5stack.gg` as its asset origin. That CDN holds upstream's
+extraction, without this fork's clips, so the dev backend runs with
+`INVENTORY_ASSET_CDN=off` (k8s/dev/backend.yaml): it never uses the CDN, hides
+the switch and refuses to change it. If clips or models on the dev copy look
+like upstream's, check `assetOrigin` in `/api/catalog` first.
 
 ## Taking a change to the installed plugin
 

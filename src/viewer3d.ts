@@ -12721,6 +12721,8 @@ async function buildViewer(
    * semi-auto, so the first press is never faster than the truth.
    */
   let fireCycle = 0.3;
+  /** Which of a knife's two slashes the last Fire played — see playFpvAction. */
+  let knifeSecondSlash = false;
   let fireAuto = false;
   let fireDone: (() => void) | undefined;
 
@@ -12800,9 +12802,16 @@ async function buildViewer(
       return;
     }
     fpvNow = action;
-    let entry = fpvClips.get(action);
+    // A knife's left click alternates its two slashes, as the game does. The
+    // second plays under "fire" all the same: the fire gates read fpvNow.
+    let clipName: ClipAction = action;
+    if (action === "fire" && fpvKnife && fpvHave?.has("fire2")) {
+      knifeSecondSlash = !knifeSecondSlash;
+      if (knifeSecondSlash) clipName = "fire2";
+    }
+    let entry = fpvClips.get(clipName);
     if (!entry) {
-      const raw = await loadViewmodelClip(model, action);
+      const raw = await loadViewmodelClip(model, clipName);
       // A newer press, or a teardown, while this was loading: it wins.
       if (disposed || token !== fpvPlayToken) return;
       if (!raw) {
@@ -12816,7 +12825,7 @@ async function buildViewer(
         cues: [...(raw.sounds ?? [])].sort((a, b) => a.t - b.t),
         prop: buildPropClip(THREE as unknown as typeof import("three"), raw, propBones(action)),
       };
-      fpvClips.set(action, entry);
+      fpvClips.set(clipName, entry);
       // The fire clip carries the weapon's rate of fire — see the extractor.
       if (action === "fire") {
         if (typeof raw.cycle === "number" && raw.cycle > 0) fireCycle = raw.cycle;
@@ -12860,7 +12869,8 @@ async function buildViewer(
       parts.play();
     }
     fpvCues = entry.cues.slice();
-    if (action === "fire") flash?.fire();
+    // A knife has a `wpnTip` like any viewmodel, but a slash has no muzzle.
+    if (action === "fire" && !fpvKnife) flash?.fire();
   }
   /**
    * Cross the knife's own skeleton onto `clip`, or back to its rest with null.
