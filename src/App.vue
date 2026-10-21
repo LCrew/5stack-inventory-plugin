@@ -93,10 +93,12 @@ import {
 // player never reaches. Async so they arrive with the route.
 const AdminConsole = defineAsyncComponent(() => import("./components/AdminConsole.vue"));
 import { activeFlags, flagValue, flagsVersion } from "./devFlags";
-import Armory from "./components/Armory.vue";
+// The catalog browser (its own screen) and the sticker/charm picker (an
+// overlay) are never on screen at load either: async, ~39kB off the boot chunk.
+const Armory = defineAsyncComponent(() => import("./components/Armory.vue"));
 import InventoryScreen from "./components/InventoryScreen.vue";
 import LoadoutGrid from "./components/LoadoutGrid.vue";
-import AttachmentPicker from "./components/AttachmentPicker.vue";
+const AttachmentPicker = defineAsyncComponent(() => import("./components/AttachmentPicker.vue"));
 import ShareMenu from "./components/ShareMenu.vue";
 import Tooltip from "./components/Tooltip.vue";
 import { MDEBUG, mdebug, setMdebugAmbient, traceLayer } from "./mdebug";
@@ -111,14 +113,19 @@ import TileActions from "./components/TileActions.vue";
 import FilterDropdown from "./components/FilterDropdown.vue";
 import InfiniteSentinel from "./components/InfiniteSentinel.vue";
 import SortDirection from "./components/SortDirection.vue";
-import PatternRail from "./components/PatternRail.vue";
+// The pattern rails and the spec/pet panels are async for the same reason as
+// AdminConsole: they import the CPU side of the 3D pipeline (the pattern scan's
+// compositors, charm liquid and material, pet material and pose), ~100kB that
+// the grid and the loadout never render. They only show in the item view and
+// the editor, which open a 3D viewer anyway, so they arrive with its chunks.
+const PatternRail = defineAsyncComponent(() => import("./components/PatternRail.vue"));
 import PriceTag from "./components/PriceTag.vue";
-import ItemSpecs from "./components/ItemSpecs.vue";
-import PetControls from "./components/PetControls.vue";
+const ItemSpecs = defineAsyncComponent(() => import("./components/ItemSpecs.vue"));
+const PetControls = defineAsyncComponent(() => import("./components/PetControls.vue"));
 import TraitBars, { type TraitRow } from "./components/TraitBars.vue";
 import { DEFAULT_PET_CLIP, loadPetClipIndex, petWanderPool } from "./petAnim";
 import ItemBadges from "./components/ItemBadges.vue";
-import PatternScoreRail from "./components/PatternScoreRail.vue";
+const PatternScoreRail = defineAsyncComponent(() => import("./components/PatternScoreRail.vue"));
 import { SCAN_READ_SIZE } from "./patternScan";
 import { useRenderWindow, WINDOW_FIRST } from "./composables/useRenderWindow";
 import ViewerControls from "./components/ViewerControls.vue";
