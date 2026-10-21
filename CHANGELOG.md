@@ -78,6 +78,9 @@ The 3D model extraction is now at pipeline version 38; run it once to get every 
 
 - **Compressed models and data**: the plugin's web server compresses 3D models, animations and other data files, and sends the extraction's ready-made compressed copies when they exist. An AK-47's model goes from 3.3 MB to 1.1 MB on the wire, and its inspect animation from 273 KB to 32 KB.
 - **Lighter HD skin downloads**: HD gun finishes load their weapon textures at 2048 instead of 4096 pixels where the skin is drawn at 2048 anyway, so an AK-47 skin fetches about 10MB instead of 35MB with no visible difference. Spray-paint and airbrushed finishes keep the full-size textures on desktop, where they are drawn at 4096.
+- **Lighter first load**: the 3D viewer, the editor's pattern rails, the item spec panel, the Craft catalog and the sticker and charm picker now download when first used instead of at startup. Before any 3D view opens, the plugin loads about a third less code (218 kB compressed instead of 335 kB).
+- **Faster first 3D view**: the default CS2 lighting no longer waits for the studio lighting file, and the 3D engine downloads alongside the viewer instead of after it. Opening the first item in 3D downloads about 1 MB less.
+- **Smaller studio lighting**: the lighting behind the Studio, Showcase, Warm and Dark presets is 371 kB instead of 1.4 MB, and is fetched only when one of them is in use. Test renders are unchanged to within 1 level in 99% of pixels.
 
 ### Bug Fixes
 
@@ -122,6 +125,7 @@ The 3D model extraction is now at pipeline version 38; run it once to get every 
 - **Caching guide**: `docs/CACHING.md` explains how files are cached and compressed, how to check it, and how to add an optional Cloudflare cache rule safely.
 - **Card store in the mock server**: `tools/standalone` keeps baked cards (`CARDS_DIR` saves them between runs) and can play a backend from before WebP cards (`MOCK_CARD_FORMATS=png`).
 - **Composite store in the standalone mock**: `tools/standalone/mock-server.mjs` answers the pre-bake list from the fake inventory, accepts composite uploads after checking their names the way the backend does, and serves them back.
+- **Bundle report**: `tools/bundle-report.config.ts` builds the plugin and lists what each chunk contains and what loads with it.
 
 ### Removed
 
