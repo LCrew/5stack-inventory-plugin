@@ -508,6 +508,7 @@ const STEP_LABELS: Record<string, string> = {
   "rename-models": "Mapping models to catalog keys",
   "model-textures": "Compressing model textures",
   "composite-inputs": "Extracting composite inputs",
+  "inputs-2048": "Making 2048 composite inputs",
   "charm-anchors": "Reading charm anchors",
   "sticker-markup": "Reading sticker slots",
   "sticker-masks": "Extracting sticker masks",
@@ -518,6 +519,7 @@ const STEP_LABELS: Record<string, string> = {
   "paint-chain": "Extracting paint chain",
   "sticker-art": "Extracting sticker & decal art",
   "music-audio": "Extracting music kit audio",
+  precompress: "Precompressing models",
   stamp: "Recording the build",
 };
 
