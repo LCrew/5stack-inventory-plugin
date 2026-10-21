@@ -12111,6 +12111,22 @@ async function buildViewer(
    */
   const fpvKnife = /^(knife|bayonet)/.test(model);
   /**
+   * A KNIFE'S WHOLE CAMERA: the clip's own eye, tipped down this many degrees.
+   *
+   * The gun dials (yaw -7, pitch -12, the eye 6cm right) were tuned on rifles,
+   * and knives kept them when they shed the push and the shift. They turned
+   * the view down and across, which lifted both hands into the middle of the
+   * frame with the forearms in shot. CS2's own preview (Inventory → Inspect,
+   * held, 16:9) puts them along the bottom edge with the horizon level: the
+   * clip's eye untouched lands the Butterfly's tip at 43% across and 65% down
+   * against the game's 41% / 66%, and the Karambit's two hands within a few
+   * percent of the game's. The 3 degrees is a deliberate nudge above that
+   * reference, which was taken with a viewmodel set lower than the default.
+   * The field of view stays the shared one (54): a narrower one made both
+   * knives larger than the game draws them.
+   */
+  const FPV_KNIFE_PITCH = -3;
+  /**
    * A DUAL-WIELD rig — two weapons, each carried into its hand by its own
    * `weapon_hand_l`/`weapon_hand_r` bone. The Dual Berettas are the one.
    *
@@ -12618,10 +12634,11 @@ async function buildViewer(
     // pitch applied after a yaw tilts the horizon instead of raising the view.
     // Composed ONTO the auto-framed orientation, so zero means "as framed"
     // rather than "looking down -Z into whatever happens to be there".
+    // Knives take none of the gun dials — see FPV_KNIFE_PITCH.
     fpvTune.setFromEuler(
       fpvEuler.set(
-        (debugNumber("fpvpitch", 0) * Math.PI) / 180,
-        (debugNumber("fpvyaw", 0) * Math.PI) / 180,
+        ((fpvKnife ? FPV_KNIFE_PITCH : debugNumber("fpvpitch", 0)) * Math.PI) / 180,
+        ((fpvKnife ? 0 : debugNumber("fpvyaw", 0)) * Math.PI) / 180,
         0,
         "YXZ",
       ),
@@ -12638,8 +12655,8 @@ async function buildViewer(
     const base = fpvSpec?.offset;
     fpvCamera.position
       .set(0, 0, 0)
-      .addScaledVector(FPV_RIGHT, (base?.x ?? 0) + debugNumber("fpvx", 0))
-      .addScaledVector(FPV_UP, (base?.y ?? 0) + debugNumber("fpvy", 0))
+      .addScaledVector(FPV_RIGHT, (base?.x ?? 0) + (fpvKnife ? 0 : debugNumber("fpvx", 0)))
+      .addScaledVector(FPV_UP, (base?.y ?? 0) + (fpvKnife ? 0 : debugNumber("fpvy", 0)))
       // Negative is BACK, matching every other "distance" control here.
       //
       // DEFAULT ZERO — the eye belongs exactly where the clip puts it. Pulling
