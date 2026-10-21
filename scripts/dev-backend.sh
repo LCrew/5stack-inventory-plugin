@@ -10,6 +10,10 @@
 #   ./scripts/dev-backend.sh assets on  # serve the dev host's models, art and
 #                                       # music from the dev backend (opt-in)
 #   ./scripts/dev-backend.sh assets off # back to the installed frontend
+#   ./scripts/dev-backend.sh step viewmodel-anims
+#                                       # re-run ONE extraction step (or a
+#                                       # comma list) in the dev pod, minutes
+#                                       # instead of a full run
 #
 # `assets` only changes where the DEV host (inventory-dev.<domain>) gets those
 # files from; see docs/CACHING.md. Re-running the install keeps whichever it is.
@@ -62,6 +66,25 @@ case "${1:-install}" in
     exit 0
     ;;
   install) ;;
+  step)
+    # ONE step of scripts/extract-models.sh, in the dev pod, with the same
+    # environment the backend gives a full run (startExtraction in
+    # backend/src/main.ts). A scoped run stamps nothing, so the mount still
+    # reads as due a full run — see "Step selection" in that script.
+    steps="${2:-}"
+    [[ "$steps" =~ ^[a-z0-9,-]+$ ]] || die "usage: $0 step <step-id>[,<step-id>...]   e.g. $0 step viewmodel-anims"
+    kc get deployment inventory-dev-backend >/dev/null 2>&1 || die "The dev backend is not installed yet. Run $0 first."
+    # The backend's own run holds this lock; two runs over one mount is the
+    # thing the shared mount must never see.
+    if kc exec deployment/inventory-dev-backend -- test -e /cs2-models/extract.lock; then
+      die "An extraction is running (or one was killed and left /cs2-models/extract.lock). Wait for it, then retry."
+    fi
+    say "Running step(s) $steps in the dev backend pod..."
+    kc exec deployment/inventory-dev-backend -- env ONLY_STEPS="$steps" CS2_DIR=/cs2-game \
+      OUT_DIR=/cs2-models WORK_DIR=/cs2-models/.work bash /app/scripts/extract-models.sh
+    say "Done. Reload the page in Safari with Option+Command+R."
+    exit 0
+    ;;
   assets)
     case "${2:-}" in
       on | off) assets="$2" ;;
@@ -69,7 +92,7 @@ case "${1:-install}" in
     esac
     kc get ingress inventory-dev >/dev/null 2>&1 || die "The dev backend is not installed yet. Run $0 first."
     ;;
-  *) die "usage: $0 [install|update|remove|assets on|off]" ;;
+  *) die "usage: $0 [install|update|remove|assets on|off|step <id>]" ;;
 esac
 mode="${1:-install}"
 # Where the dev host's asset paths go. A plain re-install keeps what is there,
