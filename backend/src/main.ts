@@ -40,10 +40,21 @@ import {
 import { patchSlotsFor, warmPatchSlots } from "./agentPatchSlots.ts";
 import { GRID_SLOT_IDS, GRID_SLOTS, resolveGrid } from "./loadoutGrid.ts";
 import {
+  CARD_FILE_RE,
+  CARD_FORMATS,
+  CARD_KEY_RE,
+  cardFormatOf,
+  cardPixelSize,
+  cardStem,
+  findCard,
+  plausibleCard,
+  readCard,
+  storeCard,
+} from "./cardStore.ts";
+import {
   itemDescription,
   itemTitle,
   parseShareTarget,
-  pngPixelSize,
   renderUnfurl,
   requestOrigin,
   truncate,
@@ -265,6 +276,10 @@ app.get("/api/catalog", async () => {
     // copy's) can bake under another rig without a single card in a shared store
     // ending up lit two different ways.
     bakeEnvironment: process.env.BAKE_ENVIRONMENT || undefined,
+    // The image formats the card uploads take (see cardStore.ts). A client
+    // sends WebP only when this says it may: a backend from before WebP cards
+    // sends nothing here and refuses anything but a PNG.
+    cardFormats: CARD_FORMATS,
   };
 });
 
@@ -315,6 +330,9 @@ export function renderKeyForRow(
   // count: the 2D module renders a blank display, so the card is identical at 0
   // kills and 4000, and keying on the count would re-bake every card on every
   // kill. Must match renderKeyFor in src/api.ts.
+  //
+  // The `.png` is part of the NAME only: the file behind it may be the WebP
+  // with the same stem (storeCard / findCard in cardStore.ts).
   const st = row.stattrak ? "-st" : "";
   // A PET's coat and life stage change its card as much as a seed does, so they
   // key it too — as suffixes present only when SET, which leaves every other
@@ -352,11 +370,12 @@ async function pruneRenders(): Promise<number> {
   // is-stale. Deleting the whole cache on that reading would be the worst
   // possible response to a read failure.
   if (!current) return 0;
-  const suffix = `-v${current}.png`;
+  const suffix = `-v${current}`;
   let removed = 0;
   for (const name of await fs.readdir(RENDERS_DIR).catch(() => [])) {
     // `cat-` is the catalog store (see /api/render/catalog), same versioning.
-    if (!/^(inst|cat)-/.test(name) || !name.endsWith(".png") || name.endsWith(suffix)) continue;
+    // Either format: a card is its key's stem plus `.png` or `.webp`.
+    if (!CARD_FILE_RE.test(name) || cardStem(name).endsWith(suffix)) continue;
     await fs.rm(path.join(RENDERS_DIR, name), { force: true }).catch(() => {});
     removed++;
   }
@@ -364,14 +383,17 @@ async function pruneRenders(): Promise<number> {
 }
 // The size check below allows 3MB, but Fastify's 1MB default would have
 // rejected anything over 1MB before the handler saw it — so that ceiling was
-// never real. Card PNGs are ~100KB, which is why it never surfaced.
+// never real. Card PNGs are 0.2-1MB (measured on 16 bakes), WebPs a tenth of it.
+//
+// PNG or WebP, told apart by their magic bytes (cardStore.ts), and stored as
+// whichever it is, a PNG transcoded to WebP when cwebp is there.
 app.post<{ Params: { id: string } }>("/api/render/:id", { bodyLimit: 3_000_000 }, async (request, reply) => {
   const identity = await getIdentity(request);
   if (!identity) {
     return reply.status(401).send({ error: "not signed in" });
   }
   const body = request.body as Buffer;
-  if (!Buffer.isBuffer(body) || body.length === 0 || body.length > 3_000_000 || !/^\x89PNG/.test(body.subarray(0, 4).toString("latin1"))) {
+  if (!Buffer.isBuffer(body) || body.length === 0 || body.length > 3_000_000 || !cardFormatOf(body)) {
     return reply.status(400).send({ error: "bad render" });
   }
   const { rows } = await pool.query(
@@ -387,11 +409,7 @@ app.post<{ Params: { id: string } }>("/api/render/:id", { bodyLimit: 3_000_000 }
   }
   try {
     const [resolved] = await withAttachments(identity.steamId, [rows[0]]);
-    await fs.mkdir(RENDERS_DIR, { recursive: true });
-    await fs.writeFile(
-      path.join(RENDERS_DIR, renderKeyForRow({ ...rows[0], look: cardLook(resolved) }, await renderVersion())),
-      body,
-    );
+    await storeCard(RENDERS_DIR, renderKeyForRow({ ...rows[0], look: cardLook(resolved) }, await renderVersion()), body);
     return { ok: true };
   } catch {
     return reply.status(500).send({ error: "render store unavailable" });
@@ -417,18 +435,10 @@ app.post<{ Params: { id: string } }>("/api/render/:id", { bodyLimit: 3_000_000 }
 //    the session (bakeCatalogArt) and simply doesn't publish it.
 //  - Only these types, and FIRST WRITER WINS: a stored card is never replaced
 //    by an upload, only by the version sweep after an extraction.
-//  - The PNG's own header must describe a plausible card, not just start with
-//    the magic bytes.
+//  - The PNG's or WebP's own header must describe a plausible card, not just
+//    start with the magic bytes (plausibleCard in cardStore.ts).
 const CATALOG_RENDER_TYPES = new Set(["pet", "glove"]);
 export const catalogRenderKey = (itemId: number, version: number) => `cat-${itemId}-v${version}.png`;
-/** IHDR sanity: the signature, an IHDR chunk first, and card-sized dimensions. */
-function plausibleCardPng(buf: Buffer): boolean {
-  if (buf.length < 33 || !buf.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return false;
-  if (buf.readUInt32BE(8) !== 13 || buf.subarray(12, 16).toString("latin1") !== "IHDR") return false;
-  const w = buf.readUInt32BE(16);
-  const h = buf.readUInt32BE(20);
-  return w >= 16 && h >= 16 && w <= 4096 && h <= 4096;
-}
 app.post<{ Params: { id: string } }>("/api/render/catalog/:id", { bodyLimit: 3_000_000 }, async (request, reply) => {
   const denied = await requireAdmin(request);
   if (denied) return reply.status(denied.code).send({ error: denied.error });
@@ -438,16 +448,15 @@ app.post<{ Params: { id: string } }>("/api/render/catalog/:id", { bodyLimit: 3_0
     return reply.status(400).send({ error: "not an item that takes a catalog render" });
   }
   const body = request.body as Buffer;
-  if (!Buffer.isBuffer(body) || body.length > 3_000_000 || !plausibleCardPng(body)) {
+  if (!Buffer.isBuffer(body) || body.length > 3_000_000 || !plausibleCard(body)) {
     return reply.status(400).send({ error: "bad render" });
   }
   try {
-    await fs.mkdir(RENDERS_DIR, { recursive: true });
-    // `wx`: fails if it exists, which is the first-writer-wins rule above.
-    await fs.writeFile(path.join(RENDERS_DIR, catalogRenderKey(id, await renderVersion())), body, { flag: "wx" });
-    return { ok: true };
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "EEXIST") return { ok: true, existing: true };
+    // `exclusive`: nothing is written if a card is already there in either
+    // format, which is the first-writer-wins rule above.
+    const stored = await storeCard(RENDERS_DIR, catalogRenderKey(id, await renderVersion()), body, { exclusive: true });
+    return stored === "exists" ? { ok: true, existing: true } : { ok: true };
+  } catch {
     return reply.status(500).send({ error: "render store unavailable" });
   }
 });
@@ -611,20 +620,24 @@ serveAssetDir("/music", MUSIC_DIR);
 // Registered under BOTH paths: /api/renders/* is the canonical client path
 // (the /api ingress provably reaches this pod — uploads use it); bare
 // /renders/* backs nginx's static-miss fallback.
+//
+// The key names the card, not its format: `<key>.png` answers with the WebP
+// when that is what is stored, as image/webp (readCard in cardStore.ts).
 for (const route of ["/api/renders/:key", "/renders/:key"]) {
   app.get<{ Params: { key: string } }>(route, async (request, reply) => {
   const key = request.params.key;
-  if (!/^[\w.-]+\.png$/.test(key)) {
+  if (!CARD_KEY_RE.test(key)) {
     return reply.status(404).send({ error: "not found" });
   }
   try {
-    const buf = await fs.readFile(path.join(RENDERS_DIR, key));
+    const card = await readCard(RENDERS_DIR, key);
+    if (!card) throw new Error("not stored");
     // CORS comes from @fastify/cors (echoed origin + allow-credentials). A
     // manual `*` here overrides that echo, and browsers reject `*` on
     // credentialed fetches — the client's "already baked?" HEAD check then
     // fails every load and cards re-bake despite the render being served.
     reply.header("Cache-Control", "public, max-age=3600");
-    return reply.type("image/png").send(buf);
+    return reply.type(card.type).send(card.body);
   } catch {
     // A MISS must never be cached. `.png` is an extension Cloudflare caches by
     // default, 404s included, so a card asked for a moment before its first
@@ -719,7 +732,7 @@ interface ShareArt {
  * a Location header would put the owner's row handle in a public response, which
  * is exactly what withoutInstanceHandle exists to prevent one level down.
  */
-async function bakedShareRender(facts: ShareFacts, version: number): Promise<string | null> {
+async function bakedShareRender(facts: ShareFacts, version: number): Promise<{ file: string; type: string } | null> {
   if (facts.instanceId == null) return null;
   // The card's look (stickers, charm) is in its filename too, and the facts do
   // not carry it — read it off the row with its links resolved, as the upload
@@ -728,11 +741,11 @@ async function bakedShareRender(facts: ShareFacts, version: number): Promise<str
     steam_id: string; stickers: unknown[] | null; charm_id: number | null; charm_offset: ItemRow["charm_offset"];
   }>(`SELECT steam_id, stickers, charm_id, charm_offset FROM inventory.owned_items WHERE id = $1`, [facts.instanceId]);
   const look = rows[0] ? cardLook((await withAttachments(String(rows[0].steam_id), [rows[0]]))[0]) : "";
-  const file = path.join(
+  // Either format — the bake is a WebP or a PNG under the same key.
+  return findCard(
     RENDERS_DIR,
     renderKeyForRow({ id: facts.instanceId, wear: facts.wear, seed: facts.seed, stattrak: facts.stattrak, look }, version),
   );
-  return (await fs.stat(file).then((s) => s.isFile(), () => false)) ? file : null;
 }
 
 /** The econ icon's path on the mount, or null if the catalog's value is not the
@@ -762,7 +775,7 @@ function econIconFile(image: string | null | undefined): string | null {
 async function shareArtFor(facts: ShareFacts | null, version: number): Promise<ShareArt | null> {
   if (!facts) return null;
   const baked = await bakedShareRender(facts, version);
-  if (baked) return { file: baked, type: "image/png", baked: true };
+  if (baked) return { ...baked, baked: true };
   const image = getItem(facts.itemId)?.image ?? null;
   const icon = econIconFile(image);
   if (icon && (await fs.stat(icon).then((s) => s.isFile(), () => false))) {
@@ -1027,15 +1040,16 @@ function sharePluginPath(target: ShareTarget): string {
   }
 }
 
-/** PNG dimensions without reading the file: 24 bytes off the front. Only the
- *  bakes are PNGs, so an icon simply has no dimensions to declare. */
+/** A bake's dimensions without reading the file: 30 bytes off the front, PNG
+ *  or WebP (cardPixelSize). Only bakes are asked, so an icon simply has no
+ *  dimensions to declare. */
 async function pngSizeOf(file: string): Promise<{ width: number; height: number } | null> {
   let handle: Awaited<ReturnType<typeof fs.open>> | null = null;
   try {
     handle = await fs.open(file, "r");
-    const head = Buffer.alloc(24);
-    const { bytesRead } = await handle.read(head, 0, 24, 0);
-    return pngPixelSize(head.subarray(0, bytesRead));
+    const head = Buffer.alloc(30);
+    const { bytesRead } = await handle.read(head, 0, 30, 0);
+    return cardPixelSize(head.subarray(0, bytesRead));
   } catch {
     return null;
   } finally {
@@ -1083,7 +1097,7 @@ app.get("/api/share/meta", async (request, reply) => {
   const query = flatQuery(request.query);
   const { target, art, title, description } = await resolveShare(query);
   const origin = requestOrigin(request);
-  const size = art?.file && art.type === "image/png" ? await pngSizeOf(art.file) : null;
+  const size = art?.file && art.baked ? await pngSizeOf(art.file) : null;
   reply.header("Cache-Control", "public, max-age=300");
   return {
     kind: target.kind,
@@ -1107,7 +1121,7 @@ app.get("/api/share/unfurl", async (request, reply) => {
   const query = flatQuery(request.query);
   const { target, art, title, description } = await resolveShare(query);
   const origin = requestOrigin(request);
-  const size = art?.file && art.type === "image/png" ? await pngSizeOf(art.file) : null;
+  const size = art?.file && art.baked ? await pngSizeOf(art.file) : null;
   const canonical = panelShareUrl(sharePluginPath(target), forwardedShareQuery(query));
   // og:url is the address of the THING, so it is the panel's page when we know
   // it and the URL actually fetched when we do not — never a guess. The human
