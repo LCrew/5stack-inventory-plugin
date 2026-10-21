@@ -80,6 +80,27 @@ case "${1:-install}" in
     # runs use those. Same derivation as startExtraction: the models root is
     # RENDERS_DIR's parent, the scratch dir EXTRACT_WORK_DIR beside it.
     # shellcheck disable=SC2016 # expanded in the pod, not here
+    # WHO HOLDS THE LOCK. Both backends share the models folder and its
+    # extract.lock: this one's runs from ⚙ → 3D Models, and the installed
+    # plugin's, which starts one by itself after a CS2 update. A run that was
+    # killed leaves the lock behind with nothing holding it. So look for a live
+    # extract-models process in either pod — `extract-model[s]` so the probe's
+    # own command line, which spells the pattern out, never matches itself —
+    # and clear the lock only when there is none.
+    running() {
+      kc exec "deployment/$1" -- sh -c 'for d in /proc/[0-9]*; do tr "\0" " " <"$d/cmdline" 2>/dev/null | grep -q "extract-model[s]" && exit 0; done; exit 1' >/dev/null 2>&1
+    }
+    # shellcheck disable=SC2016 # expanded in the pod
+    lockfile='$(dirname "${RENDERS_DIR:-/cs2-models/renders}")/extract.lock'
+    lock=$(kc exec deployment/inventory-dev-backend -- sh -c "cat $lockfile 2>/dev/null" 2>/dev/null || true)
+    if [[ -n "$lock" ]]; then
+      running inventory-dev-backend &&
+        die "The dev backend is running an extraction (⚙ → 3D Models shows its progress). Wait for it to finish, then retry."
+      running inventory-backend &&
+        die "The INSTALLED plugin's backend is running an extraction on the shared models folder (it starts one by itself after a CS2 update). Wait for it to finish, then retry."
+      say "Clearing a lock left by a run that is no longer running: $lock"
+      kc exec deployment/inventory-dev-backend -- sh -c "rm -f $lockfile"
+    fi
     say "Running step(s) $steps in the dev backend pod..."
     kc exec deployment/inventory-dev-backend -- env ONLY_STEPS="$steps" sh -c '
       out=$(dirname "${RENDERS_DIR:-/cs2-models/renders}")
