@@ -80,6 +80,13 @@ git merge upstream/main
 git push
 ```
 
+**Not upstream's whole `main`, as it stands.** Upstream's
+`chore: remove the fork's dev-copy workflows and setup` (f2d20bc) deletes the
+files in the table below, so a plain merge turns the dev copy off. Take the
+commits you want with `git cherry-pick -x <commit>`, or merge and keep this
+fork's side of those files. The extraction robustness fix (upstream #48) came
+in that way, folded into pipeline v39.
+
 The changes this fork makes for the dev copy are all opt-in through build
 environment variables, so a normal build is the upstream build:
 
@@ -151,7 +158,10 @@ database instead.
    it back to the installed host returns the dev copy to the installed backend.
 
 Updating after a push: `./scripts/dev-backend.sh update` (once the
-**dev-backend** run is green). Removing: `./scripts/dev-backend.sh remove`.
+**dev-backend** run is green). It restarts the dev backend, which ends an
+extraction **the dev backend itself** started (the page then says
+"Interrupted"); a run the installed plugin is doing carries on. Removing:
+`./scripts/dev-backend.sh remove`.
 
 ### Serving the dev copy's assets (optional)
 
@@ -181,6 +191,64 @@ long each step took.
 
 To track down something that looks wrong in the dev copy, see
 [DEBUGGING.md](DEBUGGING.md).
+
+### Two backends, one models folder
+
+Both backends extract onto the same mount, so they have to agree on what is
+there.
+
+**The version number.** Each backend reads `EXTRACT_VERSION` from its own
+`scripts/extract-models.sh` and calls the mount out of date when
+`models/extract-version.json` is stamped *lower*. The installed backend then
+re-extracts by itself; the dev backend only says so (its runs are by hand).
+So keep this fork's number equal to upstream's. On 2026-10-21 upstream released
+this fork's lighter assets as its v39 while the fork still called them v38,
+and the installed plugin started a full re-extraction over the fork's run. Both
+are v39 now.
+
+**What a run writes.** A full run from either side produces the same assets
+except one step: the fork's `viewmodel-anims` also extracts the C4's own clips
+(`equipment/c4`) and the rare inspects (`inspect2`, `inspect3`). After the
+installed plugin re-extracts, put them back with a single step:
+
+```bash
+sudo ./scripts/dev-backend.sh step viewmodel-anims
+```
+
+**Running one step.** `step <id>[,<id>…]` runs those steps of
+`extract-models.sh` inside the dev pod, with the CS2, models and scratch
+folders the running backend was installed with. The ids are the script's
+`STEPS` list: `decompile-models rename-models pet-models model-textures
+composite-inputs inputs-2048 charm-anchors sticker-markup sticker-masks
+stattrak-art charm-models charm-physics econ-icons paint-chain sticker-art
+music-audio viewmodel-anims precompress stamp`. A scoped run stamps nothing,
+so it never makes either backend think the mount changed version.
+`precompress` runs every time, because each run starts by deleting every
+`.gz` copy. Before starting, `step` checks the shared `extract.lock`:
+
+| It finds | It does |
+| --- | --- |
+| a run in the dev backend | stops: wait for it (⚙ → 3D Models shows its progress) |
+| a run in the installed backend | stops: wait for it |
+| a lock and no run anywhere | clears the lock (a killed run left it) and goes ahead |
+| no CS2 install at the pod's `CS2_DIR` | stops and lists what is in that folder |
+
+**The run's status files are shared too.** `extract-state.json`,
+`extract.lock`, `extract-last.log` and `extract-progress.json` sit on the mount,
+and a backend cannot see the other pod's processes. A backend that finds a
+"running" state with no run of its own looks at the log and progress files: if
+either changed in the last 10 minutes and the lock is still there, the run is
+the other backend's. The dev copy's **3D Models** page then shows it as
+running, with its progress and a note saying whose it is, and **Re-extract**
+refuses to start a second run over it (`runningElsewhere` in
+`backend/src/main.ts`).
+
+**Animation files are cached hard.** `src/viewmodelClip.ts` stamps every
+`/anims/` URL with the extraction version and `CLIP_SCHEMA`, and a versioned URL
+is served immutable for a year. A scoped run does not change the extraction
+version, so after `step viewmodel-anims` changes a clip, bump `CLIP_SCHEMA`
+and push, or browsers keep the old clip. Bump it only after the new files are
+on the mount, never before.
 
 ## Taking a change to the installed plugin
 
