@@ -1,7 +1,7 @@
 # Changelog
 
 Changes in the LCrew fork of `lukepolo/5stack-inventory-plugin`, all made on 2026-10-20.
-The 3D model extraction is now at pipeline version 38; run it once to get every asset listed below.
+The 3D model extraction is now at pipeline version 39, the same number as the installed plugin's, so neither re-extracts over the other on the shared models folder.
 
 ## Crafting & Editing
 
@@ -115,6 +115,7 @@ The 3D model extraction is now at pipeline version 38; run it once to get every 
 - **v34, sticker masks**: each weapon body's sticker mask is extracted, which is what hides stickers under modelled parts.
 - **v35, charm detail textures**: each charm material's detail layer and its placement are recorded, and the texture is extracted.
 - **v37, MVP anthems**: each music kit's round-MVP anthem is extracted beside its menu theme, with its own manifest.
+- **v39, one number with upstream**: upstream released this fork's lighter assets as its v39, and the installed plugin re-extracts whenever the shared models folder is stamped lower than its own number. The fork is now at v39 too. Upstream's own v38 fixes (a schema check, float textures kept as EXR) are not in the fork yet, so a full run is best left to the installed plugin; the fork's first-person animation step can follow it on its own.
 - **v38, lighter assets**: composite inputs larger than 2048 pixels get a 2048 copy beside the original, and every model and data file gets a gzip copy. No existing file changes, so older clients keep loading what they always did.
 - **v36, StatTrak art and knife data**: the knife digit texture is extracted with its cut-out channel intact. Every knife's attachment points and bone chain are written out as the source for knife counter and name tag placement.
 - **C4 model**: the extraction publishes the C4 model with its sticker slots and charm surfaces.

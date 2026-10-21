@@ -239,6 +239,20 @@ set -euo pipefail
 # texture channels and csgo_weapon.vfx does not use them raw: Charm | Sasquatch
 # authors its eyes metalness 1 but declares g_vMetalnessRemapRange [0, 0.5], and
 # its roughness channel (max 0.51) is scaled by brightness 1.9 / contrast 0.7.
+# v39 (2026-10-21): THE NUMBER UPSTREAM GAVE THE LIGHTER ASSETS. Upstream
+# released this fork's v38 below as its own v39, and the installed plugin and
+# this fork's dev backend share one models mount: each auto-runs whenever the
+# mount's stamp is BELOW its script's number, so a fork stamping 38 under an
+# upstream at 39 had the installed plugin re-extracting over it. Same number,
+# so neither does. Two differences in content remain until upstream is merged:
+#   - this fork lacks upstream's v38 (econ schema check before the
+#     schema-dependent assets; float paint/position textures kept as EXR) —
+#     a FULL run from here writes without those, so prefer upstream's run;
+#   - step viewmodel-anims here has the C4 on its own clips (equipment/c4),
+#     the rare inspects (inspect2/inspect3 from lookat02/lookat03), the clip
+#     index kept whole by `--only`, and stale per-action files removed.
+#     A scoped run of that step (dev-backend.sh step viewmodel-anims) stamps
+#     nothing, so it can follow upstream's full run without a re-extract.
 # v38 (2026-10-21): LIGHTER ASSETS, same pixels (scripts/lighten-assets.mjs).
 #   inputs-2048  every composite input over 2048px gets a 2048 copy beside it
 #                (`<name>.2048.png`, listed in meta.json as `textures2048`). The
@@ -332,7 +346,7 @@ set -euo pipefail
 # so resolving the model from the item's image name found nothing for them and
 # they rendered as flat art. The named materials ride the paint chain, so their
 # textures land alongside every other one.
-EXTRACT_VERSION=38
+EXTRACT_VERSION=39
 
 # Default is the node's CS2 dedicated-server install — the same tree the
 # game-server pods mount, present on every 5stack game node. Its root IS the
