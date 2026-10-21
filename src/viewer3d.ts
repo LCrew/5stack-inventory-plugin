@@ -3655,13 +3655,20 @@ async function buildViewer(
   // see liveFrames. Kept apart rather than written into poseXform: stickers and
   // the charm read that one too, and they are right in first person as it is.
   let moduleFrames: { xform: import("three").Matrix4 | null; bones: PoseBones } | null = null;
-  // Lay a dual-wield pair out parallel rather than in the icon's tent. Off for
-  // card bakes (`still`), which want the game's own item art — see the call to
-  // bakePose below. Harmless on a single-weapon rig: bakePose finds no `*_l`
-  // bones to move and the frame correction below finds no `weapon_r`.
+  // Lay a dual-wield pair out parallel rather than in the icon's tent.
+  // Harmless on a single-weapon rig: bakePose finds no `*_l` bones to move and
+  // the frame correction below finds no `weapon_r`.
+  //
+  // OFF NOW, live viewer included — `?dualside=1` brings it back. The parallel
+  // pair was synthesised (no clip holds the pistols that way) and it was
+  // wrong against the game in the way that matters for crafting: the game's
+  // inspect and Apply Sticker screens both show the icon's own tent, each pistol
+  // turned to the side its stickers go on, and the synthesised pair showed the
+  // right pistol's StatTrak side in front with the left pistol's sticker side
+  // facing away. The tent is what the card already bakes (stillTent below).
   const kind = opts?.kind ?? "weapon";
   const pres = PRESENTATION[kind];
-  const dualSideBySide = pres.dualLayout && !opts?.still;
+  const dualSideBySide = pres.dualLayout && !opts?.still && debugFlag("dualside");
   // Whether the WEAPON compositor runs. A glove has a paintMaterial too, but it
   // is a csgo_customglove template — fetchPaintDef would resolve it, find none
   // of the params it expects, and return a full set of defaults, i.e. a
@@ -5597,6 +5604,9 @@ async function buildViewer(
    * syncFpvSeat), so once is enough. The real meshes keep rendering and keep
    * their skeleton; the twins share their material, name and userData.
    */
+  /** Each pistol's world matrix in the pose the twins were taken in, for a
+   *  dual-wield rig in first person — empty otherwise. See followDualParts. */
+  const dualBind = new Map<string, import("three").Matrix4>();
   if (fpvSpec) {
     object.updateMatrixWorld(true);
     const v = new THREE.Vector3();
@@ -5639,6 +5649,12 @@ async function buildViewer(
       twin.matrixWorld.copy(skinned.matrixWorld);
       weaponMeshes[i] = twin;
     }
+    // A dual rig's two pistols as they stand in the twins — see followDualParts.
+    for (const name of ["weapon_l", "weapon_r"]) {
+      const b = object.getObjectByName(name);
+      if (b) dualBind.set(name, b.matrixWorld.clone());
+    }
+    if (dualBind.size < 2) dualBind.clear();
   }
   /**
    * The subset that carries TEXCOORD_1 — i.e. the surfaces the game maps
@@ -7820,7 +7836,7 @@ async function buildViewer(
    *  gesture and nothing at all in where the charm ends up. */
   const dragRawAnchor = new THREE.Vector3();
   let dragRawSet = false;
-  function moveCharmSimAnchor(c: Charm, anchor: import("three").Vector3) {
+  function moveCharmSimAnchor(c: Charm, anchor: import("three").Vector3, carry = CHARM_DRAG_CARRY) {
     const sim = c.sim;
     if (!sim?.space) return;
     // BOTH ends through the LIVE matrix, rather than rotating a world delta by
@@ -7844,7 +7860,7 @@ async function buildViewer(
     // arrives first. 0.85 keeps it under the cursor while still trailing enough
     // to read as an object on a string rather than a sticker on the pointer.
     charmClipLocal.add(anchorDelta);
-    moveCharmAnchor(sim, anchorDelta.x, anchorDelta.y, anchorDelta.z, CHARM_DRAG_CARRY);
+    moveCharmAnchor(sim, anchorDelta.x, anchorDelta.y, anchorDelta.z, carry);
     wakeCharm();
   }
 
@@ -11989,6 +12005,20 @@ async function buildViewer(
    * the extractor files under the knife family.
    */
   const fpvKnife = /^(knife|bayonet)/.test(model);
+  /**
+   * A DUAL-WIELD rig — two weapons, each carried into its hand by its own
+   * `weapon_hand_l`/`weapon_hand_r` bone. The Dual Berettas are the one.
+   *
+   * Those bones are where the pistols ARE, and only the viewmodel clip's prop
+   * tracks pose them: the GLB's own clips cover reload, shoot and draw, so at
+   * idle and through the inspect nothing moved them off bind — 20 inches apart
+   * and out of the frame. Held, the hands came up empty and the pistols showed
+   * only while a reload or a shot was playing. So these take the prop tracks the
+   * way a knife does (see propRest).
+   */
+  const fpvDual = !!object.getObjectByName("weapon_hand_l") && !!object.getObjectByName("weapon_hand_r");
+  /** The weapon's skeleton follows the viewmodel clip's prop tracks. */
+  const fpvProps = fpvKnife || fpvDual;
   const fpvTune = new THREE.Quaternion();
   const fpvEuler = new THREE.Euler();
   /**
@@ -12103,7 +12133,13 @@ async function buildViewer(
         for (const [action, re] of Object.entries(PART_CLIP) as [ClipAction, RegExp][]) {
           const src = gltf.animations?.find((a) => re.test(a.name));
           if (!src) continue;
-          const tracks = src.tracks.filter((t) => !/^(weapon|weapon_offset|ag1_hand_[lr])\./i.test(t.name));
+          // A dual rig's prop tracks already pose both pistols and their parts
+          // (see fpvDual); two clips on one bone average into neither. What the
+          // prop tracks lack is SCALE — the magazine hidden for the swap — so
+          // that is all this clip keeps there.
+          const tracks = src.tracks.filter(
+            (t) => !/^(weapon|weapon_offset|ag1_hand_[lr])\./i.test(t.name) && (!fpvDual || /\.scale$/.test(t.name)),
+          );
           if (!tracks.length) continue;
           const a = weaponMixer.clipAction(new THREE.AnimationClip(`parts:${action}`, src.duration, tracks));
           a.setLoop(THREE.LoopOnce, 1);
@@ -12112,12 +12148,13 @@ async function buildViewer(
           a.clampWhenFinished = true;
           weaponActions.set(action, a);
         }
-        // KNIVES ONLY. A gun's parts come from its GLB's own clips above, and
-        // its `weapon_offset` is identity in every clip measured — so the prop
-        // tracks would only duplicate what already plays. A knife has neither:
-        // no part clips, and a `weapon_offset` that turns the blade 125 degrees
-        // (butterfly idle). Without this it sat at bind, facing the wrong way.
-        if (fpvKnife && vm) {
+        // KNIVES AND DUAL RIGS ONLY. A gun's parts come from its GLB's own clips
+        // above, and its `weapon_offset` is identity in every clip measured — so
+        // the prop tracks would only duplicate what already plays. A knife has
+        // neither: no part clips, and a `weapon_offset` that turns the blade 125
+        // degrees (butterfly idle). Without this it sat at bind, facing the wrong
+        // way. The Dual Berettas need it for their hands — see fpvDual.
+        if (fpvProps && vm) {
           const restClip = buildPropClip(THREE as unknown as typeof import("three"), vm, (b) => !!object.getObjectByName(b));
           if (restClip) {
             propRest = weaponMixer.clipAction(restClip);
@@ -12629,7 +12666,7 @@ async function buildViewer(
       entry = {
         clip: built.clip,
         cues: [...(raw.sounds ?? [])].sort((a, b) => a.t - b.t),
-        prop: fpvKnife ? buildPropClip(THREE as unknown as typeof import("three"), raw, (b) => !!object.getObjectByName(b)) : null,
+        prop: fpvProps ? buildPropClip(THREE as unknown as typeof import("three"), raw, (b) => !!object.getObjectByName(b)) : null,
       };
       fpvClips.set(action, entry);
       // The fire clip carries the weapon's rate of fire — see the extractor.
@@ -12714,6 +12751,86 @@ async function buildViewer(
     if (!rearm) a.fadeIn(PARTS_FADE);
     a.play();
     propNow = a;
+  }
+  /**
+   * A DUAL RIG'S STICKERS AND CHARM RIDE THEIR PISTOL.
+   *
+   * The rest of first person leans on the weapon never moving (syncFpvSeat):
+   * stickers are cut once against the twins and stay where they were cut, the
+   * charm hangs from a fixed hook. The Dual Berettas break that — their prop
+   * tracks carry each pistol through the frame on its own bone (fpvDual) — and
+   * every sticker and the charm were left hanging in the air where the pistols
+   * stand in the file. So each takes its pistol's motion since the twins:
+   * now x bind^-1, on the nearer pistol at bind (they stand 20 inches apart
+   * there, so "nearer" is never close). The charm's hook moves through
+   * moveCharmSimAnchor, so the body trails it and swings.
+   */
+  const dualNow = new Map<string, import("three").Matrix4>();
+  const dualInv = new THREE.Matrix4();
+  const dualAt = new THREE.Vector3();
+  let dualCharm: { key: string; bone: string; bind: import("three").Vector3; dragged: boolean } | null = null;
+  function dualNearest(p: import("three").Vector3): string | null {
+    let best: string | null = null;
+    let dist = Infinity;
+    for (const [name, bind] of dualBind) {
+      const d = dualAt.setFromMatrixPosition(bind).distanceToSquared(p);
+      if (d < dist) {
+        dist = d;
+        best = name;
+      }
+    }
+    return best;
+  }
+  function followDualParts() {
+    if (!dualBind.size) return;
+    for (const [name, bind] of dualBind) {
+      const bone = object.getObjectByName(name);
+      if (!bone) continue;
+      bone.updateWorldMatrix(true, false);
+      let m = dualNow.get(name);
+      if (!m) dualNow.set(name, (m = new THREE.Matrix4()));
+      m.multiplyMatrices(bone.matrixWorld, dualInv.copy(bind).invert());
+    }
+    for (const mesh of liveMesh.values()) {
+      const at = mesh.userData.stickerCenter as import("three").Vector3 | undefined;
+      if (!at) continue;
+      const name = (mesh.userData.dualBone as string | undefined) ?? (mesh.userData.dualBone = dualNearest(at));
+      const m = name ? dualNow.get(name) : undefined;
+      if (!m) continue;
+      mesh.matrixAutoUpdate = false;
+      mesh.matrix.copy(m);
+      mesh.matrixWorldNeedsUpdate = true;
+    }
+    if (!charm) {
+      dualCharm = null;
+      return;
+    }
+    // A new charm's pivot comes from its stored offset, i.e. in the pose the
+    // twins were taken in; a dragged one was set against the pistol as shown.
+    if (charmDragging) {
+      if (dualCharm) dualCharm.dragged = true;
+      return;
+    }
+    let jump = false;
+    if (!dualCharm || dualCharm.key !== charm.key) {
+      // The pistol the hook resolved onto — the same one the item view hangs
+      // it from, since both seat it on the authored charm surfaces.
+      const bone = dualNearest(charm.pivot);
+      if (!bone) return;
+      dualCharm = { key: charm.key, bone, bind: charm.pivot.clone(), dragged: false };
+      jump = true;
+    } else if (dualCharm.dragged) {
+      const m = dualNow.get(dualCharm.bone);
+      if (m) dualCharm.bind.copy(charm.pivot).applyMatrix4(dualInv.copy(m).invert());
+      dualCharm.dragged = false;
+    }
+    const m = dualNow.get(dualCharm.bone);
+    if (!m) return;
+    dualAt.copy(dualCharm.bind).applyMatrix4(m);
+    // The first move can be the whole width of the rig — taken rigidly, or the
+    // charm would arrive swinging from half a metre away.
+    if (charm.sim) moveCharmSimAnchor(charm, dualAt, jump ? 1 : CHARM_DRAG_CARRY);
+    else charm.pivot.copy(dualAt);
   }
   /** Fire any cue the play head has passed. Called once a frame. */
   function pumpFpvCues() {
@@ -14040,6 +14157,7 @@ async function buildViewer(
       // The weapon follows the clip's own `wpn` track. AFTER the mixer, because
       // that is what moved the node this reads.
       syncFpvSeat();
+      followDualParts();
       flash?.update(dt);
       pumpFpvCues();
       pumpFpvAuto();

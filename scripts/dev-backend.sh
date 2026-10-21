@@ -74,14 +74,29 @@ case "${1:-install}" in
     steps="${2:-}"
     [[ "$steps" =~ ^[a-z0-9,-]+$ ]] || die "usage: $0 step <step-id>[,<step-id>...]   e.g. $0 step viewmodel-anims"
     kc get deployment inventory-dev-backend >/dev/null 2>&1 || die "The dev backend is not installed yet. Run $0 first."
-    # The backend's own run holds this lock; two runs over one mount is the
-    # thing the shared mount must never see.
-    if kc exec deployment/inventory-dev-backend -- test -e /cs2-models/extract.lock; then
-      die "An extraction is running (or one was killed and left /cs2-models/extract.lock). Wait for it, then retry."
-    fi
+    # Everything is read off the POD, not stated here: `update` only restarts
+    # the deployment and never re-applies k8s/dev/backend.yaml, so the running
+    # backend can be on paths an older manifest gave it — and the backend's own
+    # runs use those. Same derivation as startExtraction: the models root is
+    # RENDERS_DIR's parent, the scratch dir EXTRACT_WORK_DIR beside it.
+    # shellcheck disable=SC2016 # expanded in the pod, not here
     say "Running step(s) $steps in the dev backend pod..."
-    kc exec deployment/inventory-dev-backend -- env ONLY_STEPS="$steps" CS2_DIR=/cs2-game \
-      OUT_DIR=/cs2-models WORK_DIR=/cs2-models/.work bash /app/scripts/extract-models.sh
+    kc exec deployment/inventory-dev-backend -- env ONLY_STEPS="$steps" sh -c '
+      out=$(dirname "${RENDERS_DIR:-/cs2-models/renders}")
+      export CS2_DIR="${CS2_DIR:-/cs2-game}" OUT_DIR="$out" WORK_DIR="${EXTRACT_WORK_DIR:-$out/.work}"
+      echo "--- CS2_DIR=$CS2_DIR OUT_DIR=$OUT_DIR WORK_DIR=$WORK_DIR"
+      # The backend holds this lock for its own runs; two runs over one mount
+      # is the thing a shared mount must never see.
+      if [ -e "$out/extract.lock" ]; then
+        echo "!! An extraction is running (or one was killed and left $out/extract.lock). Wait for it, then retry."
+        exit 1
+      fi
+      if [ ! -f "$CS2_DIR/game/csgo/pak01_dir.vpk" ]; then
+        echo "!! No CS2 install at $CS2_DIR in the pod. What is there:"
+        ls -la "$CS2_DIR" "$CS2_DIR/game" 2>&1 | head -20
+        exit 1
+      fi
+      exec bash /app/scripts/extract-models.sh'
     say "Done. Reload the page in Safari with Option+Command+R."
     exit 0
     ;;
