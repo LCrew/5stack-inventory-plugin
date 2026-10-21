@@ -72,6 +72,12 @@ The 3D model extraction is now at pipeline version 37; run it once to get every 
 
 ## Performance
 
+### Features
+
+- **Lighter first load**: the 3D viewer, the editor's pattern rails, the item spec panel, the Craft catalog and the sticker and charm picker now download when first used instead of at startup. Before any 3D view opens, the plugin loads about a third less code (218 kB compressed instead of 335 kB).
+- **Faster first 3D view**: the default CS2 lighting no longer waits for the studio lighting file, and the 3D engine downloads alongside the viewer instead of after it. Opening the first item in 3D downloads about 1 MB less.
+- **Smaller studio lighting**: the lighting behind the Studio, Showcase, Warm and Dark presets is 371 kB instead of 1.4 MB, and is fetched only when one of them is in use. Test renders are unchanged to within 1 level in 99% of pixels.
+
 ### Bug Fixes
 
 - Scrubbing glove patterns no longer stutters: each repaint went from 60–100 ms to about 1 ms with identical output.
@@ -106,6 +112,7 @@ The 3D model extraction is now at pipeline version 37; run it once to get every 
 - **Test tools**: `mount.html` renders any item with any options from the URL, `tools/standalone` runs the real UI against a fake inventory, and `glb-info`/`knife-anchors` read and apply the game's model data.
 - **Safari test runner**: `shoot-webkit.mjs` renders the same test pages in Safari's engine (WebKit) headlessly, for bugs that only Safari shows.
 - **Live camera drags**: `drag.mjs` turns the camera with the mouse after a viewer has loaded and screenshots each step, for bugs that only appear once the view moves.
+- **Bundle report**: `tools/bundle-report.config.ts` builds the plugin and lists what each chunk contains and what loads with it.
 
 ### Removed
 

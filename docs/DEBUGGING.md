@@ -184,6 +184,10 @@ notice for card renders is expected.
 - `node tools/knife-anchors.mjs <knife-attachments.json|url> [--dry-run]`
   regenerates the knife StatTrak anchors from game data and checks the knife name
   tags against it.
+- `CHUNKS=App-,viewer3d- npx vite build --config tools/bundle-report.config.ts --outDir /tmp/inv-report`
+  prints what is in each named chunk and what loads with it ([§4.12](#412-the-first-load-is-heavy-or-something-downloads-before-it-is-needed)).
+- `python3 tools/hdr-half.py <in.hdr> <out.hdr>` halves a Radiance HDRI in
+  linear light. It is how `src/assets/venice_sunset_512.hdr` was made.
 - **Offline simulation.** Before changing GLSL, re-implement the formula in a
   few lines of Python against the real textures and sweep the free variable.
   The lenticular fix started with a 30-line simulation that showed the needle
@@ -455,6 +459,61 @@ scratch map as its R channel BEFORE resizing: its alpha is 0, Pillow
 premultiplies RGBA on resize, and the scratches silently become all zero. That
 made a correct shader look like it under-wore.
 
+### 4.12 The first load is heavy, or something downloads before it is needed
+
+Measure what each phase downloads before moving any code.
+
+1. **Network per phase, in the standalone mock** ([§3.6](#36-the-real-ui-locally-toolsstandalone)).
+   Record every request with its encoded and decoded size between steps: load,
+   open the inventory, open one item in 3D. CDP's `Network` events are the
+   reliable source; `performance.getEntriesByType("resource")` caps at 250
+   entries unless the page calls `performance.setResourceTimingBufferSize`
+   first. `Network.emulateNetworkConditions` throttles the same run. Three
+   things skew the numbers:
+   - The mock serves files uncompressed, so its transfer size is the raw size.
+     Compare against the gzip column Vite prints for production.
+   - Missing cards are baked in the browser, which pulls in all of three,
+     the HDRI and the GLBs as soon as the inventory opens. Run the flow once to
+     fill the mock's card store, then measure a second, fresh-profile run.
+   - `vue.js` (about 170kB) is the mock's stand-in for the panel's Vue. It is
+     not part of the plugin.
+2. **What is in a chunk, and why**: `tools/bundle-report.config.ts` lists each
+   named chunk's modules, largest first, with what loads with the chunk and
+   what it can load later.
+3. **Bound a split before doing it.** In a throwaway config, a `resolveId` hook
+   can send the UI's imports of a module to a stub that exports the same names.
+   The boot chunk's size with the stub is the most that a real split can save.
+   This is how the 2026-10-21 split was chosen: the paint, glove, charm and pet
+   pipelines were about a third of the App chunk (75kB of 228kB gzipped).
+4. **The trap is shared modules.** A module lives in exactly one chunk. When
+   the boot chunk imports one small function from a heavy module, such as
+   `loadPaintDef` from `paintComposite.ts`, the whole module lands in a chunk
+   that the boot chunk imports statically. It downloads at load, even if every
+   other importer is lazy. `defineAsyncComponent` fixes this cheaply when a
+   component is the only static importer: the pattern rails, `ItemSpecs` and
+   `PetControls` took charm liquid, charm material and pet material with them.
+   App.vue's own imports of the paint and glove definition loaders still keep
+   `paintComposite` and `gloveComposite` (about 150kB, 51kB gzipped) in the boot
+   graph. Moving them out would mean splitting each file into a definition
+   half and a GPU half, about 1,100 lines of upstream code.
+5. **A smaller asset that feeds a renderer**: compare renders, not files. Card
+   bakes (`mount.html`, default `still=1`) are deterministic. Two identical runs
+   differ by exactly 0, so any difference is the change. Live renders of
+   animated items are not deterministic: a live glove differed from itself on
+   58% of its pixels. Serve the candidate through a temporary `?zz…=` override
+   and diff over the drawn pixels: mean absolute difference, 99th percentile,
+   and the share of pixels more than 2 levels off. For the studio HDRI the
+   threshold was a mean under 0.25, a 99th percentile of at most 1, and under
+   0.1% of pixels over 2.
+
+   Watch for anything sized from its input. `PMREMGenerator` builds its cube
+   at the source width / 4, so a 512-wide HDRI prefilters at 128 instead of
+   256 and shifts every roughness level. Used as is, the half-size file failed
+   on the glove (6.9% of pixels over 2). Widened back to 1024 before the
+   prefilter, it passed on all four items (mean 0.06 or less, 99th percentile 1,
+   0.02% of pixels over 2). Check WebKit too (`shoot-webkit.mjs`). It gave the
+   same numbers.
+
 ## 5. Gotchas
 
 - **Disk.** Headless Chrome profiles are large; use the runners in this repo,
@@ -482,5 +541,13 @@ made a correct shader look like it under-wore.
   accident upstream. Leave it alone so merges stay clean.
 - **`BAKE_ENVIRONMENT`** in `src/viewerEnvironments.ts` must stay `"studio"` in
   commits; switch it only for local bake experiments.
+- **The default live rig never touches the studio HDRI.** CS2 lights by its own
+  painted sky, so a live `mount.html` shot tests the HDRI only with `&env=studio`
+  (or another studio rig). A still (`still=1`, the default) always uses the
+  bake rig, and the bake rig is Studio.
+- **Nothing 3D loads at startup.** `viewer3d`, three and GLTFLoader are fetched
+  together by the first `viewer3d()` call (`src/viewer3dLazy.ts`), which is a 3D
+  view or a card bake. Code that wants them earlier has to call
+  `prefetchViewer3d()` on a real signal of intent.
 - **In-game screenshots are not orthographic.** Compare ratios and sides, never
   absolute pixel positions.
