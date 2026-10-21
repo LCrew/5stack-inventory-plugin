@@ -455,6 +455,38 @@ scratch map as its R channel BEFORE resizing: its alpha is 0, Pillow
 premultiplies RGBA on resize, and the scratches silently become all zero. That
 made a correct shader look like it under-wore.
 
+### 4.12 An asset re-downloads on every load, or a stale one sticks
+
+The rules are in [CACHING.md](CACHING.md); this is how to tell which one broke.
+
+1. **Read the headers the browser got**, with the URL the client really asked
+   for (DevTools → Network → copy as cURL, or build it: `?v=` is the catalog's
+   `assetVersion`):
+   `curl -sI -H 'Accept-Encoding: gzip' '<url>' | grep -i -e cache-control -e etag -e content-encoding -e content-type -e cf-cache`.
+   No `?v=` on a mount URL means the caller skipped `withAssetVersion`; a
+   `content-type: application/octet-stream` on a `.glb` means the answer came
+   from a server without the fork's types (on the dev host, the installed
+   plugin's nginx: see "The dev copy" in CACHING.md).
+2. **Find out which server answered.** nginx sends `server: nginx` and no
+   `vary: Origin`; the backend sends `vary: Origin, …` (from @fastify/cors).
+   Behind Cloudflare both are hidden, so ask the pods directly with
+   `kubectl -n 5stack exec deploy/inventory-frontend -- wget -qSO /dev/null 'http://127.0.0.1/models/ak47.glb'`
+   (or `deploy/inventory-dev-backend -- node -e 'fetch(…)'` for the dev backend).
+3. **Reproduce it locally** before changing a server. `nginx.conf` runs as is
+   in `docker run --rm -p 127.0.0.1:8811:80 -v "$PWD/nginx.conf:/etc/nginx/conf.d/default.conf:ro" -v <tree>:/cs2-models:ro --add-host inventory-backend:host-gateway nginx:alpine`
+   against a few real files downloaded into `<tree>/models/…`;
+   `nginx -t` in the same image validates it. The backend runs locally with
+   `MODELS_DIR`, `PAINTS_DIR`, … pointed at the same tree (it needs a Postgres;
+   a throwaway `postgres:16-alpine` container does), and `scripts/serve.mjs`
+   takes the same variables. Running the same `curl` list against all three is
+   how they were checked against each other.
+4. **Check the decoded bytes, not just the headers.** `curl --compressed` the
+   file and compare its hash with the file on disk; a gzip body under the wrong
+   type or a stale `.gz` "loads" fine and is wrong.
+
+`npm run check:assets` covers the shared Node logic (ETags, 304s, `.gz`
+freshness, ranges, HEAD).
+
 ## 5. Gotchas
 
 - **Disk.** Headless Chrome profiles are large; use the runners in this repo,
@@ -484,3 +516,9 @@ made a correct shader look like it under-wore.
   commits; switch it only for local bake experiments.
 - **In-game screenshots are not orthographic.** Compare ratios and sides, never
   absolute pixel positions.
+- **The dev host's assets come from the installed plugin** unless
+  `scripts/dev-backend.sh assets on` was run, so a change to `nginx.conf` here
+  does not show there. See [CACHING.md](CACHING.md#the-dev-copy).
+- **A `.gz` beside a mount file is what gzip clients get.** nginx never checks
+  that it matches the file; if an asset looks stale only in some clients,
+  compare the `.gz` with its original.
