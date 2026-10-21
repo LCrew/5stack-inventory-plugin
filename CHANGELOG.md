@@ -81,6 +81,10 @@ The 3D model extraction is now at pipeline version 38; run it once to get every 
 - **Lighter first load**: the 3D viewer, the editor's pattern rails, the item spec panel, the Craft catalog and the sticker and charm picker now download when first used instead of at startup. Before any 3D view opens, the plugin loads about a third less code (218 kB compressed instead of 335 kB).
 - **Faster first 3D view**: the default CS2 lighting no longer waits for the studio lighting file, and the 3D engine downloads alongside the viewer instead of after it. Opening the first item in 3D downloads about 1 MB less.
 - **Smaller studio lighting**: the lighting behind the Studio, Showcase, Warm and Dark presets is 371 kB instead of 1.4 MB, and is fetched only when one of them is in use. Test renders are unchanged to within 1 level in 99% of pixels.
+- **3D views load ahead of the click**: resting the pointer on an item card starts downloading what its 3D view needs, so a Bayonet | Doppler then opens in Edit in 0.7 s instead of 2 s on a 100 Mbit/s connection. Moving off the card before a download starts cancels it.
+- **Edit starts every download at once**: pressing Edit or View in 3D fetches the model, its textures and the paint together, instead of one after another as the viewer reaches each.
+- **Equipped items warm in the background**: once the loadout has loaded, the equipped items' 3D models are fetched while the page is idle, up to a fixed memory budget.
+- Prefetching stays out of the way: it is off under Save-Data and on 2G, and pauses while the tab is hidden or a 3D view is loading. The large paint inputs are only fetched once Edit or View in 3D is pressed, never on hover.
 
 ### Bug Fixes
 
@@ -126,6 +130,8 @@ The 3D model extraction is now at pipeline version 38; run it once to get every 
 - **Card store in the mock server**: `tools/standalone` keeps baked cards (`CARDS_DIR` saves them between runs) and can play a backend from before WebP cards (`MOCK_CARD_FORMATS=png`).
 - **Composite store in the standalone mock**: `tools/standalone/mock-server.mjs` answers the pre-bake list from the fake inventory, accepts composite uploads after checking their names the way the backend does, and serves them back.
 - **Bundle report**: `tools/bundle-report.config.ts` builds the plugin and lists what each chunk contains and what loads with it.
+- **Prefetch switches**: `?prefetchlog=1` logs every prefetch and whether the viewer used it, and `?noprefetch=1` turns prefetching off to time a cold open.
+- **Load-time testing in the standalone UI**: `MOCK_CARDS=stub` stops the card backfill, whose bakes would otherwise pre-load the model being timed. The mock keeps the paint composites it is sent, so a second session opens with a store hit, and `MOCK_COMPOSITES=keep` also reads the dev server's store for the rest.
 
 ### Removed
 

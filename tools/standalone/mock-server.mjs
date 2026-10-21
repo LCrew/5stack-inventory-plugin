@@ -18,6 +18,10 @@
 //     stickers?: [{ id, x?, y?, r?, w? }] }
 // and item ids come from cs2-lib (see backend/src/catalog.ts getItemIdByName).
 // MOCK_LOADOUT is the /api/loadout answer, inline JSON (default []).
+// MOCK_CARDS=stub answers every instance card with a 1x1 PNG, so the card
+// backfill never runs. Use it to time a COLD 3D open: a backfill bake loads the
+// same GLB and composite into the viewer's caches, and the open you then time
+// finds them already there.
 //
 // Editing an item (POST /api/inventory/<id>) is answered here and applied to
 // the in-memory inventory, so Save -> card re-bake can be tested; other writes
@@ -35,6 +39,9 @@
 // sizes so the Asset Cache tab renders. GET /__mock/composites lists what is
 // stored. MOCK_PREBAKE=0 answers the work list 404, like a backend that
 // predates it; MOCK_ADMIN=0 answers every admin route 403.
+// MOCK_COMPOSITES=keep also lets a composite this mock does not hold fall
+// through to the real backend's store (read only), for timing a store HIT
+// on skins someone already opened against the dev mount.
 import { createServer } from "node:http";
 import { rmSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
@@ -113,6 +120,11 @@ const ownedByAnyone = (id) =>
         store.compositeWear(e.wear) === store.compositeWear(id.wear) &&
         e.seed === id.seed,
     );
+// 1x1 transparent PNG — see MOCK_CARDS.
+const STUB_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+  "base64",
+);
 const MIME = {
   ".html": "text/html",
   ".js": "text/javascript",
@@ -260,9 +272,17 @@ createServer(async (req, res) => {
     const cget = p.match(/^\/(?:api\/)?composites\/([^/]+)\/([^/]+)$/);
     if (cget) {
       const b = COMPOSITES.get(decodeURIComponent(cget[1]))?.get(decodeURIComponent(cget[2]));
-      if (!b) return status(res, 404, { error: "not found" });
-      res.writeHead(200, { "content-type": cget[2].endsWith(".webp") ? "image/webp" : "image/png" });
-      return res.end(req.method === "HEAD" ? undefined : b);
+      if (b) {
+        res.writeHead(200, { "content-type": cget[2].endsWith(".webp") ? "image/webp" : "image/png" });
+        return res.end(req.method === "HEAD" ? undefined : b);
+      }
+      // A miss is a 404 unless MOCK_COMPOSITES=keep, which reads it through
+      // from the real backend's store below (see the header).
+      if (process.env.MOCK_COMPOSITES !== "keep") return status(res, 404, { error: "not found" });
+    }
+    if (card && process.env.MOCK_CARDS === "stub") {
+      res.writeHead(200, { "content-type": "image/png" });
+      return res.end(STUB_PNG);
     }
     if (p === "/api/loadout") return json(res, LOADOUT);
     if (p === "/api/inventory") return json(res, INVENTORY);

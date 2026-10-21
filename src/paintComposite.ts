@@ -32,6 +32,7 @@
 //   spray/anodized-air styles, uvScale for everything else
 import { getAssetOrigin, withAssetVersion } from "./api";
 import { loadRawPngTexture } from "./rawPng";
+import { prefetchedUrl } from "./prefetchStore";
 import {
   buildValveMaterials,
   loadValveCombo,
@@ -1900,7 +1901,9 @@ function loadTex(
     // The weapon inputs are PNGs with data in their alpha, which Safari empties
     // when the file is fully transparent -- see rawPng.ts.
     cached = loadRawPngTexture(THREE, url)
-      .then((raw) => raw ?? new THREE.TextureLoader().loadAsync(url))
+      // prefetchedUrl: held bytes when src/prefetch.ts warmed this file. The
+      // cache key above stays the real URL either way.
+      .then((raw) => raw ?? prefetchedUrl(url).then((src) => new THREE.TextureLoader().loadAsync(src)))
       .then((t) => {
         t.colorSpace = opts.srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
         if (opts.addr) {
@@ -2048,12 +2051,24 @@ export interface CompositeReferenceCtx extends ValveInputs {
  * The resolution cap a composite of `def` is made and STORED at on this device
  * (`maxSize`: see compositePaint). It is part of the shared store's key
  * (CompositeIdentity.cap), so anything that names a stored composite without
- * rendering it, like the admin pre-bake in compositePrebake.ts, must ask here
- * rather than repeat the constants, or it bakes files no viewer looks up.
+ * rendering it (the admin pre-bake in compositePrebake.ts, the prefetch in
+ * prefetch.ts) must ask here rather than repeat the constants, or it bakes or
+ * warms files no viewer looks up.
  */
 export function compositeSizeCap(def: PaintDef, maxSize?: number): number {
   const wantsProjection = def.style === 2 || def.style === 5;
   return Math.min(wantsProjection ? MAX_COMPOSITE_SIZE_PROJECTED : MAX_COMPOSITE_SIZE, maxSize ?? Infinity);
+}
+
+/**
+ * The weapon inputs a composite at `sizeCap` actually samples. At a cap of 2048
+ * or less the GPU would read a 4096 input at its 2048 mip, so the 2048 copies
+ * (WeaponInputs.at2048, extraction v38) are the same texels for a quarter of the
+ * download; above it, the full set. compositePaint and src/prefetch.ts both ask
+ * here, so what a prefetch warms is what the composite then loads.
+ */
+export function weaponInputsAt(weapon: WeaponInputs | null | undefined, sizeCap: number): WeaponInputs | null | undefined {
+  return weapon?.at2048 && sizeCap <= 2048 ? { ...weapon, ...weapon.at2048 } : weapon;
 }
 
 export async function compositePaint(
@@ -2114,13 +2129,10 @@ export async function compositePaint(
   // eye cannot use mid-gesture. The full-size composite still runs when the
   // drag stops, so nothing ships at proxy resolution.
   const sizeCap = compositeSizeCap(def, opts.maxSize);
-  // The weapon's own inputs at the resolution this composite can use. See
-  // WeaponInputs.at2048: at a cap of 2048 or less the GPU would sample a 4096
-  // input at its 2048 mip, so the 2048 copy is the same texels for a quarter of
-  // the download. Only the four paint-UV maps have copies; everything else is
-  // the full set unchanged.
-  const inputs: WeaponInputs | null | undefined =
-    opts.weapon?.at2048 && sizeCap <= 2048 ? { ...opts.weapon, ...opts.weapon.at2048 } : opts.weapon;
+  // The weapon's own inputs at the resolution this composite can use (see
+  // weaponInputsAt). Only the four paint-UV maps have 2048 copies; everything
+  // else is the full set unchanged.
+  const inputs = weaponInputsAt(opts.weapon, sizeCap);
   const key = `${def.pattern ?? "-"}|${def.overlay ?? "-"}|${def.style}|${wear.toFixed(4)}|${seed}|${wkey}|d${opts.debug ?? 0}|${def.caseHardening ? `ch${def.caseHardeningRamp ?? "-"}${def.chRampOffset}` : ""}|a${def.patternAddrH}_${def.patternAddrV}|c${sizeCap}`;
   const cache = cacheFor(renderer);
   const hit = opts.reference || opts.forcePort ? undefined : cache.get(key);

@@ -45,6 +45,7 @@ import { compositeGlove, gloveLegacySeedMoves, loadGlovePaintDef } from "./glove
 import { compositeGloveModern, gloveSeedMoves, loadGloveModernDef } from "./gloveCompositeModern";
 import { isQuadModel } from "./viewerModel";
 import { hasModel, modelUrlFor } from "./modelAvailability";
+import { gltfUseKey, notePrefetchUse, prefetchedFetch, prefetchedUrlSync, settlePrefetched } from "./prefetchStore";
 import { INCOMPLETE } from "./viewerSentinel";
 // The one media query the viewer answers to. Everything else about layout is a
 // component's business, but "should this move on its own" is the renderer's.
@@ -82,6 +83,10 @@ import { createViewerCursor, type CursorMode } from "./viewerCursor";
 import HDR_URL from "./assets/venice_sunset_512.hdr?url";
 
 export { loadPaintDef, type PaintDef } from "./paintComposite";
+// What src/prefetch.ts needs to name a mount's files, reached through the one
+// lazy import it already pays for (viewer3dLazy) rather than its own imports.
+export { compositeSizeCap, loadWeaponInputs, paintTextureUrl, weaponInputsAt } from "./paintComposite";
+export { compositeKey, storedCompositeUrls } from "./compositeStore";
 
 export type ThreeBundle = {
   THREE: typeof import("three");
@@ -765,6 +770,45 @@ function discardableImages(json: Record<string, unknown>, variant: GltfVariant):
   return drop;
 }
 
+/** What loadGltf's URL modifier turns a GLB texture URL into: BLANK_PNG for an
+ *  image `drop` skips, otherwise the version-stamped URL that is fetched. */
+function gltfTextureUrl(url: string, drop: Set<string>): string {
+  if (/^(data|blob):/.test(url)) return url;
+  const file = decodeURIComponent(url.split("/").pop()?.split("?")[0] ?? "");
+  if (drop.has(file)) return BLANK_PNG;
+  // The GLB's sibling textures are referenced by bare filename, and this is
+  // the only place their URLs exist — so the extraction stamp has to be
+  // applied here or the biggest files on the mount stay uncacheable.
+  return /[?&]v=/.test(url) ? url : withAssetVersion(url);
+}
+
+/** The texture URLs a parse of this GLB will request, spelled exactly as the
+ *  URL modifier spells them. Only the relative URIs the extraction writes;
+ *  anything else is left to the loader. */
+function keptTextureUrls(json: Record<string, unknown>, drop: Set<string>): string[] {
+  const base = `${getAssetOrigin()}/models/`;
+  const out: string[] = [];
+  for (const img of (json as { images?: { uri?: string }[] }).images ?? []) {
+    const uri = img.uri;
+    if (!uri || /^([a-z][a-z0-9+.-]*:|\/)/i.test(uri)) continue;
+    const url = gltfTextureUrl(base + uri, drop);
+    if (url !== BLANK_PNG) out.push(url);
+  }
+  return out;
+}
+
+/**
+ * What src/prefetch.ts warms for a model: the textures loadGltf will fetch for
+ * this GLB and variant, after the same discardableImages() skip. Lives beside
+ * loadGltf so the two cannot drift apart — a stale list here would only cost a
+ * wasted or an un-warmed download, never a wrong texture, but it would cost it
+ * on every hover.
+ */
+export function gltfTextureUrls(buf: ArrayBuffer, variant: GltfVariant): string[] {
+  const json = glbJson(buf);
+  return json ? keptTextureUrls(json, discardableImages(json, variant)) : [];
+}
+
 // Parsed-GLTF LRU (the heavy part — geometry + textures). Keyed by model AND
 // variant: the two bodies and the painted/unpainted cases each drop a different
 // set of textures, so they are genuinely different parses.
@@ -774,6 +818,8 @@ const gltfCache = new Map<string, Promise<import("three/examples/jsm/loaders/GLT
 const GLTF_CACHE_MAX = 12;
 async function loadGltf(model: string, variant: GltfVariant) {
   const key = `${model}|${variant.legacy ? "legacy" : "hd"}|${variant.painted ? "p" : "u"}`;
+  // Hit or miss, this parse is in use — src/prefetch.ts won't warm it again.
+  notePrefetchUse(gltfUseKey(modelUrlFor(model), variant));
   const existing = gltfCache.get(key);
   if (existing) {
     // refresh LRU order
@@ -786,25 +832,28 @@ async function loadGltf(model: string, variant: GltfVariant) {
     // Fetched here rather than through GLTFLoader so the JSON chunk can be read
     // BEFORE the loader starts pulling images — deciding what to skip is only
     // possible while there is still something to skip.
-    const buf = await fetch(modelUrlFor(model)).then((r) => {
+    // prefetchedFetch: from src/prefetch.ts's store when a hover or a press
+    // already fetched it, otherwise this exact fetch.
+    const buf = await prefetchedFetch(modelUrlFor(model)).then((r) => {
       if (!r.ok) throw new Error(`model ${model}: HTTP ${r.status}`);
       return r.arrayBuffer();
     });
     const json = glbJson(buf);
     const drop = json ? discardableImages(json, variant) : new Set<string>();
+    // Textures a warm is still downloading are waited for rather than asked
+    // for a second time — the modifier below can only hand over what is
+    // already held. Free when nothing was warmed.
+    if (json) await settlePrefetched(keptTextureUrls(json, drop));
 
     // A loader-local manager, NOT three's default one: a URL modifier on the
     // default manager would rewrite every texture every other loader in the app
     // ever fetches.
     const manager = new THREE.LoadingManager();
     manager.setURLModifier((url) => {
-      if (/^(data|blob):/.test(url)) return url;
-      const file = decodeURIComponent(url.split("/").pop()?.split("?")[0] ?? "");
-      if (drop.has(file)) return BLANK_PNG;
-      // The GLB's sibling textures are referenced by bare filename, and this is
-      // the only place their URLs exist — so the extraction stamp has to be
-      // applied here or the biggest files on the mount stay uncacheable.
-      return /[?&]v=/.test(url) ? url : withAssetVersion(url);
+      const out = gltfTextureUrl(url, drop);
+      if (out === BLANK_PNG || /^(data|blob):/.test(out)) return out;
+      // A warmed texture loads from its held bytes, through the same loader.
+      return prefetchedUrlSync(out) ?? out;
     });
     const loader = new GLTFLoader(manager);
     // Textures are flat-copied to the models ROOT, but a .glb in a subdirectory

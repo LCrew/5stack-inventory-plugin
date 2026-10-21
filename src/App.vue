@@ -177,6 +177,7 @@ import { revealInScroller, scrollFade, scrollPanelToTop } from "./dom";
 import { hasModel, hasModelSync } from "./modelAvailability";
 import { INCOMPLETE } from "./viewerSentinel";
 import { snapshotModel, viewersIdle, viewerStats } from "./viewer3dLazy";
+import { prefetchEquipped, prefetchView } from "./prefetch";
 import type { CameraState, ViewerHandle, ViewerKind, StickerPlacement, CharmPlacement } from "./viewer3d";
 import { resolveViewerModel, resolveViewerModelSync, type ViewerTarget } from "./viewerModel";
 import "./style.css";
@@ -2351,10 +2352,13 @@ async function restoreDraftRoute(skinId: number) {
     fail(e);
   }
 }
-function openEdit(inst: InventoryItem) {
+function openEdit(inst: InventoryItem, warm: "edit" | "open" = "edit") {
   agentPose.value = DEFAULT_AGENT_POSE;
   mdebug("openEdit()", { inst: inst.id, hasItem: !!inst.item });
   if (!inst.item) return;
+  // Start the 3D view's downloads now, all at once, rather than one after
+  // another as the mount reaches each — see src/prefetch.ts.
+  prefetchView(inst, warm);
   craftModel.value = inst.item.model ?? null;
   viewOnly.value = false;
   craftInstId.value = inst.id;
@@ -2448,7 +2452,8 @@ function openView(inst: InventoryItem) {
     viewOnly.value = true;
     return;
   }
-  withRouteSync(() => openEdit(inst));
+  // "open": a view, so nothing is warmed for editing it.
+  withRouteSync(() => openEdit(inst, "open"));
   viewOnly.value = true;
 }
 /**
@@ -7456,6 +7461,8 @@ async function load() {
       void loadPriceStatus().then(() => loadPrices());
       loadSkins(sheetKey.value);
       queueLoadoutRenders();
+      // Idle-time warm of the equipped items' 3D views — see src/prefetch.ts.
+      prefetchEquipped(current, inv, team.value);
       // Off to the side: the nag dot is the least important thing on screen and
       // must never hold up (or fail) the load it rides along with.
       void loadSteamSyncState();
