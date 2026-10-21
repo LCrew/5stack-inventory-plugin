@@ -16,7 +16,7 @@
 // paintComposite.ts for the shader and its provenance.
 import { API_ORIGIN, getAssetOrigin, getBakeEnvironment, withAssetVersion } from "./api";
 import { buildArms, buildTwistSolver, weaponSeat, type ArmsRig, type Hand, type TwistSolver } from "./viewerArms";
-import { buildPropClip, buildViewmodelClip, loadViewmodelClip, viewmodelAssetUrl, type ClipAction, type ClipCue } from "./viewmodelClip";
+import { buildPropClip, buildViewmodelClip, INSPECTS, loadViewmodelClip, viewmodelActions, viewmodelAssetUrl, type ClipAction, type ClipCue } from "./viewmodelClip";
 import { buildMuzzleFlash, type MuzzleFlash } from "./muzzleFlash";
 import { CHOICES, FLAGS, NUMBERS, choicesVersion, choiceValue, flagValue, flagsVersion, numberValue, numbersVersion, setChoice, setFlag, setNumber } from "./devFlags";
 import { BAKE_ENVIRONMENT, viewerEnvironment, type ViewerEnvironment } from "./viewerEnvironments";
@@ -12612,6 +12612,10 @@ async function buildViewer(
    */
   /** What is playing right now — the gates below read it. */
   let fpvNow: ClipAction = "idle";
+  /** The actions this weapon has clips for, once the index answers — which of
+   *  its inspects a repeated press can step to (requestFpvAction). */
+  let fpvHave: Set<ClipAction> | null = null;
+  if (fpvSpec) void viewmodelActions(model).then((have) => (fpvHave = have));
   let fireHeld = false;
   let lastShot = -1e9;
   /**
@@ -12640,7 +12644,15 @@ async function buildViewer(
       return true;
     }
     if (fpvNow === "reload" || fpvNow === "draw") return false;
-    if (action === "inspect" && fpvNow !== "idle") return false;
+    if (action === "inspect" && INSPECTS.includes(fpvNow)) {
+      // INSPECT AGAIN, MID-INSPECT: the next of the weapon's inspects — the
+      // plain one, then the rare ones the game rolls now and then (inspect2/3),
+      // round again. A weapon with only the plain one keeps the old rule, where
+      // an inspect never interrupts itself.
+      const have = INSPECTS.filter((a) => fpvHave?.has(a) ?? a === "inspect");
+      if (have.length < 2) return false;
+      action = have[(have.indexOf(fpvNow) + 1) % have.length];
+    } else if (action === "inspect" && fpvNow !== "idle") return false;
     if (action === "fire") {
       fireDone = onDone;
       return tryFire();

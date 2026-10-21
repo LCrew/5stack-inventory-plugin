@@ -36,6 +36,7 @@ The 3D model extraction is now at pipeline version 38; run it once to get every 
 ### Features
 
 - **Loading in the scene**: while a 3D model loads, the pane already shows the chosen lighting preset's backdrop, the CS2 haze or the map photograph, so the item appears in place instead of the whole scene popping in with it. The studio presets, which have no backdrop, keep the card behind.
+- **Rare inspects**: in first person, pressing Inspect again while a weapon is being inspected plays its rarer inspect, the one the game rolls now and then: the Deagle's spin, the AK-47's, a second trick on most knives, and the C4's and the Butterfly Knife's third. Weapons with only one inspect behave as before. Needs the next run of the first-person animation step.
 - **CS2 lighting preset (new default)**: neutral daylight and the main menu's blue-grey haze, measured against in-game inspect screenshots. Items no longer come out pink-tinted and dull.
 - **CS2 scene presets**: Ancient (night), Italy and Italy (alley) place the item in front of a blurred in-game screenshot of the map. The same image lights the item's reflections.
 - **Knife StatTrak counter**: the kill count is scratched into the blade as in game, at each knife's exact spot from the game's own attachment data. The digits use the game's own cut-out texture and stay sharp however close you zoom.
@@ -116,6 +117,7 @@ The 3D model extraction is now at pipeline version 38; run it once to get every 
 - **v38, lighter assets**: composite inputs larger than 2048 pixels get a 2048 copy beside the original, and every model and data file gets a gzip copy. No existing file changes, so older clients keep loading what they always did.
 - **v36, StatTrak art and knife data**: the knife digit texture is extracted with its cut-out channel intact. Every knife's attachment points and bone chain are written out as the source for knife counter and name tag placement.
 - **C4 model**: the extraction publishes the C4 model with its sticker slots and charm surfaces.
+- **Rare inspect clips**: the animation step also extracts each weapon's second and third inspects (`lookat02`/`lookat03`) where the game has them.
 - **C4 first-person clips**: the animation step takes the C4's own clips (the game keeps them under equipment, not with the guns). A re-run also removes clips an action no longer has, and a one-weapon run keeps every other weapon's entry in the clip index.
 
 ## Backend & API

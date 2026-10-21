@@ -137,7 +137,14 @@ export function viewmodelAssetUrl(rel: string): string {
  * holds the gun up and turned, filling the frame, which reads as broken
  * framing rather than as a pose.
  */
-export type ClipAction = "idle" | "inspect" | "draw" | "reload" | "fire";
+export type ClipAction = "idle" | "inspect" | "inspect2" | "inspect3" | "draw" | "reload" | "fire";
+/**
+ * The inspect and its rarer variants, in the order a repeated press steps
+ * through them. `inspect2`/`inspect3` are the game's lookat02/lookat03 — the
+ * Deagle's spin, the AK's, a knife's second trick — and most weapons have
+ * neither; the clip index says which (see viewmodelActions).
+ */
+export const INSPECTS: readonly ClipAction[] = ["inspect", "inspect2", "inspect3"];
 
 /**
  * What the game lets you do with an item in hand, where that is LESS than the
