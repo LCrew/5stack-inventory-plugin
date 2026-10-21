@@ -151,6 +151,7 @@ The 3D model extraction is now at pipeline version 39, the same number as the in
 - **Safari test runner**: `shoot-webkit.mjs` renders the same test pages in Safari's engine (WebKit) headlessly, for bugs that only Safari shows.
 - **Live camera drags**: `drag.mjs` turns the camera with the mouse after a viewer has loaded and screenshots each step, for bugs that only appear once the view moves.
 - **Dev copy asset route (opt-in)**: `scripts/dev-backend.sh assets on` serves the dev copy's models, item art and music from the dev backend, so this fork's caching and compression can be tried without touching the installed plugin. `assets off` puts it back.
+- **Which build is running**: ⚙ settings shows the build this page is running, under "Plugin Settings", and says when the server has a newer one, so "is the fix live, or do I need to reload?" has an answer on screen.
 - **Single extraction step**: `scripts/dev-backend.sh step <step>` runs one extraction step in the dev backend, for example `step viewmodel-anims` for the first-person animations, in minutes instead of a full run. It uses the CS2 and models folders the running backend was installed with, and says what it found if CS2 isn't there.
 - **Caching guide**: `docs/CACHING.md` explains how files are cached and compressed, how to check it, and how to add an optional Cloudflare cache rule safely.
 - **Card store in the mock server**: `tools/standalone` keeps baked cards (`CARDS_DIR` saves them between runs) and can play a backend from before WebP cards (`MOCK_CARD_FORMATS=png`).
