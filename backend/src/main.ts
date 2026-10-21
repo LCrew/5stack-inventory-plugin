@@ -3,6 +3,8 @@ import { createHash, randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { promises as fs } from "node:fs";
 import os from "node:os";
+import { extractWorkerLimit } from "./extractWorkers.ts";
+import { machineMemoryMb } from "./machineMemory.ts";
 import path from "node:path";
 import Fastify, { LogController } from "fastify";
 // Type-only, so node's type stripping erases it — "pg" is CJS and has no such
@@ -14,6 +16,7 @@ import { IMMUTABLE, openAssetBody, planAsset } from "./assetResponse.mjs";
 import { getIdentity } from "./identity.ts";
 import { isAllowedOrigin, originPolicyFromEnv, refuseCrossSite, requestHost } from "./originGuard.ts";
 import { autoExtractor, installProblem } from "./autoExtract.ts";
+import { readSavedExtractState, IDLE_STATE, type ExtractState } from "./extractState.ts";
 import {
   GAME_PLUGIN_SLUG,
   deleteTypeCfg,
@@ -5899,28 +5902,7 @@ const PANEL_RESERVE_MB = 3072;
 const EXTRACT_JOBS_DEFAULT = 1;
 
 function extractCores(): number {
-  return Math.max(1, os.cpus().length || 1);
-}
-
-/** Node memory, for the panel's "N workers ≈ X GB of Y GB" warning. Reads
- *  /proc/meminfo first: under a cgroup os.freemem() reports the HOST's free
- *  pages, and MemAvailable is the number that actually predicts an OOM. */
-async function machineMemoryMb(): Promise<{ totalMb: number | null; availableMb: number | null }> {
-  try {
-    const meminfo = await fs.readFile("/proc/meminfo", "utf8");
-    const field = (name: string) => {
-      const m = new RegExp(`^${name}:\\s+(\\d+) kB`, "m").exec(meminfo);
-      return m ? Math.round(Number(m[1]) / 1024) : null;
-    };
-    const totalMb = field("MemTotal");
-    const availableMb = field("MemAvailable");
-    if (totalMb) return { totalMb, availableMb };
-  } catch {
-    // Not Linux — fall through to the os module.
-  }
-  const totalMb = Math.round(os.totalmem() / 1024 / 1024);
-  const freeMb = Math.round(os.freemem() / 1024 / 1024);
-  return { totalMb: totalMb || null, availableMb: freeMb || null };
+  return extractWorkerLimit(os.cpus().length || 1, process.env.INVENTORY_EXTRACT_MAX_JOBS);
 }
 
 async function readExtractJobs(): Promise<number> {
@@ -5944,26 +5926,8 @@ async function writeExtractJobsFile(jobs: number): Promise<void> {
   }
 }
 
-type ExtractState = {
-  state: "idle" | "running" | "succeeded" | "failed" | "interrupted";
-  startedAt: string | null;
-  finishedAt: string | null;
-  exitCode: number | null;
-  error: string | null;
-  log: string;
-};
-const IDLE_STATE: ExtractState = {
-  state: "idle",
-  startedAt: null,
-  finishedAt: null,
-  exitCode: null,
-  error: null,
-  log: "",
-};
-
-// Only one run at a time, and only this process can be running it — a child
-// dies with its parent, so "running in the file" + "no child here" means a
-// restart killed it (reported as `interrupted`, not a phantom `running`).
+// A run can outlive the API process, so consult the existing PID lock before
+// reporting an interruption. The admin status route uses that same lock.
 let extractChild: ChildProcess | null = null;
 let extractLog: string[] = [];
 
@@ -6011,17 +5975,9 @@ async function extractLogTail(): Promise<string> {
 }
 
 async function readExtractState(): Promise<ExtractState> {
-  try {
-    const raw = await fs.readFile(EXTRACT_STATE_FILE, "utf8");
-    const parsed = { ...IDLE_STATE, ...(JSON.parse(raw) as Partial<ExtractState>) };
-    if (parsed.state === "running" && !extractChild) {
-      if (await runningElsewhere()) return parsed;
-      return { ...parsed, state: "interrupted", error: "The backend restarted while extraction was running." };
-    }
-    return parsed;
-  } catch {
-    return IDLE_STATE; // never run, or the mount was wiped
-  }
+  // A run in another pod on this mount is invisible to liveExtractionPid (pids
+  // are per pod) and must not read as interrupted — see runningElsewhere.
+  return readSavedExtractState(EXTRACT_STATE_FILE, extractChild != null || (await runningElsewhere()), liveExtractionPid);
 }
 
 // ---- Pipeline version: is what's on the mount what this build expects? ------
@@ -6483,7 +6439,7 @@ app.get("/api/admin/extract-models", async (request, reply) => {
  *  the setting, what the box has, and what a worker costs at each end of the
  *  measured range. */
 async function extractWorkerInfo() {
-  const { totalMb, availableMb } = await machineMemoryMb();
+  const { totalMb, availableMb, scope } = await machineMemoryMb();
   return {
     jobs: await readExtractJobs(),
     cores: extractCores(),
@@ -6492,6 +6448,7 @@ async function extractWorkerInfo() {
     panelReserveMb: PANEL_RESERVE_MB,
     memTotalMb: totalMb,
     memAvailableMb: availableMb,
+    memoryScope: scope,
   };
 }
 

@@ -244,10 +244,9 @@ set -euo pipefail
 # this fork's dev backend share one models mount: each auto-runs whenever the
 # mount's stamp is BELOW its script's number, so a fork stamping 38 under an
 # upstream at 39 had the installed plugin re-extracting over it. Same number,
-# so neither does. Two differences in content remain until upstream is merged:
-#   - this fork lacks upstream's v38 (econ schema check before the
-#     schema-dependent assets; float paint/position textures kept as EXR) —
-#     a FULL run from here writes without those, so prefer upstream's run;
+# so neither does. Upstream's own v38 (econ schema check before the
+# schema-dependent assets; float paint/position textures kept as EXR) is merged
+# in, so a full run from either side writes the same assets — bar one step:
 #   - step viewmodel-anims here has the C4 on its own clips (equipment/c4),
 #     the rare inspects (inspect2/inspect3 from lookat02/lookat03), the clip
 #     index kept whole by `--only`, and stale per-action files removed.
@@ -346,6 +345,12 @@ set -euo pipefail
 # so resolving the model from the item's image name found nothing for them and
 # they rendered as flat art. The named materials ride the paint chain, so their
 # textures land alongside every other one.
+# Upstream's v38 (merged into v39 here): require a readable econ schema before
+# producing schema-dependent assets. A single archive match can be written as
+# the output file itself unless the destination directory already exists,
+# leaving pets, gloves and music empty. Also preserve floating-point
+# paint/position textures as EXR and reference their real format. Passing them
+# to cwebp silently left missing paint inputs.
 EXTRACT_VERSION=39
 
 # Default is the node's CS2 dedicated-server install — the same tree the
@@ -402,12 +407,22 @@ DECOMPILE_WORKER_MB=1400   # measured peak RSS of one decompile shard
 EXTRACT_WORKER_MB=120      # …and of one texture extract/convert worker
 JOBS_FILE="${EXTRACT_JOBS_FILE:-${OUT_DIR:-$WORK}/extract-jobs}"
 CORES=$(nproc 2>/dev/null || echo 4)
-read_jobs() { # the panel's number, else the env, else 1 — clamped to the cores
+# Keep this grammar aligned with backend/src/extractWorkers.ts. This caps the
+# heavy decompile workers; the smaller texture pools retain their own limits.
+MAX_JOBS=$CORES
+if [[ -n "${INVENTORY_EXTRACT_MAX_JOBS:-}" ]]; then
+  if [[ "$INVENTORY_EXTRACT_MAX_JOBS" =~ ^[1-9][0-9]{0,8}$ ]]; then
+    if (( INVENTORY_EXTRACT_MAX_JOBS < MAX_JOBS )); then MAX_JOBS=$INVENTORY_EXTRACT_MAX_JOBS; fi
+  else
+    MAX_JOBS=1
+  fi
+fi
+read_jobs() { # the panel's number, else the env, else 1 — clamped to the deployment ceiling
   local n=""
   if [[ -r "$JOBS_FILE" ]]; then read -r n < "$JOBS_FILE" || true; fi
   if [[ ! "$n" =~ ^[0-9]+$ ]]; then n="${EXTRACT_JOBS:-1}"; fi
   if [[ ! "$n" =~ ^[0-9]+$ ]]; then n=1; fi
-  if (( n > CORES )); then n=$CORES; fi
+  if (( n > MAX_JOBS )); then n=$MAX_JOBS; fi
   if (( n < 1 )); then n=1; fi
   printf '%s' "$n"
 }
@@ -493,14 +508,20 @@ prog_init() {
 }
 prog_init
 
-step() { # step "Name" — closes the previous step and opens this one
+finish_step() {
   local now; now=$(date +%s)
   if [[ -n "${STEP_NAME:-}" ]]; then
     local d=$(( now - STEP_START ))
     STEP_TIMES+=("$STEP_NAME=$d")
     echo "--- [${STEP_NAME}] took $(fmt_dur "$d")"
     prog "$STEP_NAME" done "" "" "$d"
+    STEP_NAME=""
   fi
+}
+
+step() { # step "Name" — closes the previous step and opens this one
+  finish_step
+  local now; now=$(date +%s)
   STEP_NAME="$1"
   STEP_START=$now
   prog "$1" running
@@ -701,7 +722,8 @@ else
   # Each shard touches a marker on completion, which is both the progress count
   # the panel reads and how the scheduler below knows what is still in flight.
   SHARD_DONE="$SHARDS/.done"
-  mkdir -p "$SHARD_DONE"
+  SHARD_FAILED="$SHARDS/.failed"
+  mkdir -p "$SHARD_DONE" "$SHARD_FAILED"
   # FILTER, do not silence. As one pass this step emitted ~26k lines, almost all
   # of it the documented VCS-71 shader noise plus a four-line vpk preamble per
   # shard. Dumping it all buried everything; dumping none of it also threw away
@@ -711,12 +733,24 @@ else
   shard_one() {
     local dir="$1" tag
     tag="${dir//\//_}"
+    # grep returns 1 when every line was expected noise. That is harmless;
+    # a nonzero decompiler exit is not. Preserve the pipeline statuses before
+    # another command overwrites PIPESTATUS, and let the pool report failure.
+    local -a status
+    set +e
     "$CLI" -i "$VPK" -o "$SHARDS/$tag" -d -f "$dir" -e "vmdl_c" \
       --gltf_export_format glb --gltf_export_materials --gltf_textures_adapt \
       --gltf_export_animations 2>&1 |
       grep -vE "$SHARD_NOISE" |
-      sed "s|^|    [$(basename "$dir")] |" || true
-    : >"$SHARD_DONE/$tag"
+      sed "s|^|    [$(basename "$dir")] |"
+    status=("${PIPESTATUS[@]}")
+    set -e
+    if (( status[0] != 0 || status[1] > 1 || status[2] != 0 )); then
+      printf '%s %s %s\n' "${status[@]}" >"$SHARD_FAILED/$tag"
+      echo "!! Decompile failed for $dir (pipeline exits: ${status[*]})" >&2
+    else
+      : >"$SHARD_DONE/$tag"
+    fi
   }
   # A dynamic pool rather than `xargs -P N`: xargs fixes its width at launch,
   # and the whole point of the knob is that an operator who starts at one worker
@@ -730,6 +764,14 @@ else
   while :; do
     done_n=$(find "$SHARD_DONE" -type f 2>/dev/null | wc -l | tr -d "[:space:]")
     prog "decompile-models" running "$done_n" "$shard_total"
+    failed_n=$(find "$SHARD_FAILED" -type f 2>/dev/null | wc -l | tr -d "[:space:]")
+    if (( failed_n > 0 )); then
+      # Launch nothing else. Let only this pool's in-flight shards finish,
+      # then fail before merging partial models or writing a success stamp.
+      wait
+      echo "!! $failed_n model decompile shard(s) failed; scratch retained at $SHARDS" >&2
+      exit 1
+    fi
     if (( done_n >= shard_total )); then break; fi
     prev=$want
     want=$(read_jobs)
@@ -850,8 +892,15 @@ export MODEL_KEY_JSON
 echo ""
 echo "--- Reading the econ schema…"
 rm -rf "$WORK/raw_items"
-"$CLI" -i "$VPK" -o "$WORK/raw_items" -d -f "scripts/items/items_game.txt" >/dev/null 2>&1 || true
-ITEMS_GAME="$(find "$WORK/raw_items" -name items_game.txt | head -1)"
+# Pre-create the directory: some CLI releases treat a single matching file as
+# the output itself when the destination does not exist.
+mkdir -p "$WORK/raw_items"
+"$CLI" -i "$VPK" -o "$WORK/raw_items/" -d -f "scripts/items/items_game.txt" >/dev/null
+ITEMS_GAME="$WORK/raw_items/scripts/items/items_game.txt"
+if [[ ! -s "$ITEMS_GAME" ]]; then
+  echo "!! Econ schema missing or empty after extraction: $ITEMS_GAME" >&2
+  exit 1
+fi
 
 # ---- Glove model key -> mesh -------------------------------------------------
 # 10 cs2-lib keys against 12 meshes, and NOT guessable: `t_gloves` is
@@ -1461,54 +1510,51 @@ for root, _dirs, files in os.walk(dest):
             glbs.append(os.path.join(root, f))
 
 def read_glb(path):
-    """(header_version, json_dict, bin_chunk_bytes) or None."""
+    """Read only the JSON chunk; mesh buffers stay on disk."""
     with open(path, "rb") as fh:
-        data = fh.read()
-    if len(data) < 20 or data[:4] != b"glTF":
-        return None
-    ver = struct.unpack_from("<I", data, 4)[0]
-    off, doc, binc = 12, None, b""
-    while off + 8 <= len(data):
-        clen, ctype = struct.unpack_from("<II", data, off)
-        chunk = data[off + 8: off + 8 + clen]
-        if ctype == 0x4E4F534A:
-            doc = json.loads(chunk.decode("utf-8"))
-        elif ctype == 0x004E4942:
-            binc = chunk
-        off += 8 + clen
-    return None if doc is None else (ver, doc, binc)
+        header = fh.read(20)
+        if len(header) < 20 or header[:4] != b"glTF":
+            return None
+        ver, total, size, kind = struct.unpack_from("<IIII", header, 4)
+        if kind != 0x4E4F534A or total != os.fstat(fh.fileno()).st_size or size > total - 20:
+            raise ValueError(f"Invalid GLB header: {path}")
+        return ver, json.loads(fh.read(size).decode("utf-8"))
 
-def write_glb(path, ver, doc, binc):
-    """Rebuild the container. Chunk payloads are 4-byte aligned by spec — JSON
-    pads with spaces, BIN with zeros — and every length in the header has to
-    agree or the loader rejects the file outright."""
+def write_glb(path, ver, doc):
+    """Replace JSON atomically and stream all following chunks unchanged."""
     js = json.dumps(doc, separators=(",", ":")).encode("utf-8")
     js += b" " * (-len(js) % 4)
-    out = bytearray()
-    out += b"glTF" + struct.pack("<I", ver) + struct.pack("<I", 0)  # length patched below
-    out += struct.pack("<II", len(js), 0x4E4F534A) + js
-    if binc:
-        pad = binc + b"\x00" * (-len(binc) % 4)
-        out += struct.pack("<II", len(pad), 0x004E4942) + pad
-    struct.pack_into("<I", out, 8, len(out))
     tmp = path + ".tmp"
-    with open(tmp, "wb") as fh:
-        fh.write(bytes(out))
-    os.replace(tmp, path)
+    try:
+        with open(path, "rb") as src, open(tmp, "wb") as out:
+            header = src.read(20)
+            old_size = struct.unpack_from("<I", header, 12)[0]
+            total = os.fstat(src.fileno()).st_size + len(js) - old_size
+            out.write(b"glTF" + struct.pack("<IIII", ver, total, len(js), 0x4E4F534A))
+            out.write(js)
+            src.seek(20 + old_size)
+            shutil.copyfileobj(src, out, length=1024 * 1024)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
-# Collect every PNG the models actually reference. Anything unreferenced is left
-# alone — converting it would spend minutes on bytes nothing fetches.
-parsed = {}
+# Keep only texture names between passes. Retaining every model's parsed JSON
+# and BIN chunk can exceed the worker's entire memory budget before conversion
+# starts. Reopen one model at a time when updating its image references below.
 wanted = set()
 for g in glbs:
     got = read_glb(g)
     if not got:
         continue
-    parsed[g] = got
     for img in got[1].get("images", []) or []:
         uri = img.get("uri")
         if uri and uri.lower().endswith(".png"):
             wanted.add(uri)
+    del got
 
 # Same trap the paint staging hits: skipping what already exists is the right
 # resume behaviour right up until the ENCODING changes, at which point every
@@ -1579,7 +1625,11 @@ if todo:
 # PNG and its URI, so a partial pass degrades to "some are still PNG" rather
 # than to a model referencing a file that was never written.
 rewritten = 0
-for g, (ver, doc, binc) in parsed.items():
+for g in glbs:
+    got = read_glb(g)
+    if not got:
+        continue
+    ver, doc = got
     changed = False
     for img in doc.get("images", []) or []:
         uri = img.get("uri")
@@ -1589,8 +1639,9 @@ for g, (ver, doc, binc) in parsed.items():
                 img["mimeType"] = "image/webp"
             changed = True
     if changed:
-        write_glb(g, ver, doc, binc)
+        write_glb(g, ver, doc)
         rewritten += 1
+    del got, doc
 
 # Only now are the PNGs safe to drop: every .glb that named one points at the
 # .webp. Done last so an interrupted run leaves both forms on disk (harmless)
@@ -4755,7 +4806,12 @@ for entry in manifest:
         unresolved.append(entry["out"])
 
 
+texture_names = {}
+
+
 def out_name(path, kind):
+    if kind == "vtex" and path in texture_names:
+        return texture_names[path]
     if path in wanted_name:
         return wanted_name[path]
     stem = os.path.basename(path)
@@ -5026,8 +5082,39 @@ def convert(node):
 # textures still present, or the new one with textures already written. The
 # worst a reader sees is a material that hasn't been refreshed yet, which is a
 # correct older skin rather than a broken new one.
+def is_exr(file):
+    try:
+        with open(file, "rb") as fh:
+            return fh.read(4) == b"\x76\x2f\x31\x01"
+    except OSError:
+        return False
+
+
+def restore_float_texture_names(textures, tex_dir):
+    # Reuse real EXRs on later runs. Older installations without cwebp may
+    # instead contain EXR bytes under .webp; copy them under the honest name.
+    # Never rename or overwrite a hardlinked live file in place.
+    for path in textures:
+        original = out_name(path, "vtex")
+        name = os.path.splitext(original)[0] + ".exr"
+        target = os.path.join(tex_dir, name)
+        legacy = os.path.join(tex_dir, original)
+        if is_exr(target):
+            texture_names[path] = name
+        elif is_exr(legacy):
+            tmp = target + ".tmp"
+            try:
+                shutil.copyfile(legacy, tmp)
+                os.replace(tmp, target)
+            finally:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            texture_names[path] = name
+
+
 have_cwebp = shutil.which("cwebp") is not None
 tex_dir = os.path.join(dest, "textures")
+restore_float_texture_names(textures, tex_dir)
 missing = [t for t in sorted(textures) if not os.path.exists(os.path.join(tex_dir, out_name(t, "vtex")))]
 # Two phases, two progress rows, two times: paint textures under "paint-chain"
 # and sticker art under "sticker-art". Sticker art is thousands of files on a
@@ -5149,10 +5236,13 @@ def extract_textures(todo, step, close=False):
         if src is None:
             failed.append(f"{t} (no image written)")
             continue
-        jobs.append((src, os.path.join(tex_dir, out_name(t, "vtex"))))
+        name = out_name(t, "vtex")
+        if is_exr(src):
+            name = os.path.splitext(name)[0] + ".exr"
+        jobs.append((t, src, os.path.join(tex_dir, name)))
 
     def to_webp(job):
-        src, dst = job
+        _, src, dst = job
         # Write to a temp and rename. Staging is seeded with HARDLINKS to the
         # live copy, so writing a texture in place would mutate the file being
         # served right now. Today the skip-existing filter above means we never
@@ -5161,7 +5251,12 @@ def extract_textures(todo, step, close=False):
         # catch a half-written image.
         tmp = dst + ".tmp"
         try:
-            if not have_cwebp:
+            if is_exr(src):
+                # Preserve floating-point data exactly; cwebp cannot decode
+                # EXR, and an 8-bit intermediary would lose precision or clamp
+                # values outside its range.
+                shutil.copyfile(src, tmp)
+            elif not have_cwebp:
                 # Copy the PNG bytes under the .webp name. Ugly, but it is what
                 # this line did for its whole life before v10 and it renders
                 # CORRECTLY — browsers sniff the content. Never fall back to
@@ -5211,10 +5306,13 @@ def extract_textures(todo, step, close=False):
             return False
 
     with ThreadPoolExecutor(max_workers=pool_size(CORES)) as pool:
-        for ok, (_, dst) in zip(pool.map(to_webp, jobs), jobs):
+        for ok, (path, _, dst) in zip(pool.map(to_webp, jobs), jobs):
             if ok:
+                texture_names[path] = os.path.basename(dst)
                 converted += 1
             else:
+                if dst.endswith(".exr"):
+                    raise RuntimeError(f"Failed to preserve float texture: {path}")
                 failed.append(f"{os.path.basename(dst)} (convert failed)")
     print(f"---   {step} {converted}/{len(todo)}", flush=True)
     progress(step, converted, len(todo))
@@ -5690,3 +5788,7 @@ else
   echo "      tar -xzf /tmp/cs2-models-glb.tar.gz -C 5stack-inventory-plugin/public/models/"
   echo "    then restart dev:ui (vite's watch doesn't rebuild on public/ changes)."
 fi
+
+# There is no next step to close stamp. Only finish it after the final output
+# operation succeeds, so a failed stamp or bundle cannot report completion.
+finish_step

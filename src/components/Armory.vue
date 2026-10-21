@@ -41,6 +41,8 @@ import {
 } from "../sortModes";
 import { useSortControl } from "../composables/useSortControl";
 import ItemName from "./ItemName.vue";
+import MusicPlayer from "./MusicPlayer.vue";
+import ItemArt from "./ItemArt.vue";
 import InfiniteSentinel from "./InfiniteSentinel.vue";
 import CatalogFilters, { type FacetAxis, type FacetOption } from "./CatalogFilters.vue";
 
@@ -782,10 +784,10 @@ const count = computed(() =>
                doesn't would otherwise size to the well's WIDTH and spill out of
                the band top and bottom. -->
           <div class="relative z-[2] grid h-[104px] w-[188px] flex-none place-items-center overflow-hidden">
-            <img
+            <ItemArt
               :key="hero.key"
-              :src="hero.image ?? undefined"
-              alt=""
+              :catalog="hero.skin?.type === 'pet' ? hero.skin : undefined"
+              :image="hero.image"
               class="animate-fade-in max-h-full max-w-full object-contain drop-shadow-[0_6px_18px_rgba(0,0,0,0.55)]"
             />
           </div>
@@ -953,11 +955,9 @@ const count = computed(() =>
                   title="In your inventory"
                 ><Check class="h-2.5 w-2.5" stroke-width="3" /></span>
                 <div :class="CARD_ART">
-                  <img
-                    :src="t.image ?? undefined"
-                    alt=""
-                    loading="lazy"
-                    decoding="async"
+                  <ItemArt
+                    :catalog="t.skin?.type === 'pet' ? t.skin : undefined"
+                    :image="t.image"
                     class="max-h-full max-w-full object-contain transition-transform duration-200 ease-out group-hover:scale-110"
                   />
                 </div>
@@ -971,6 +971,12 @@ const count = computed(() =>
                   v-else
                   class="relative z-[2] w-full truncate text-center text-f9 uppercase tracking-cs1 text-muted-foreground"
                 >{{ t.name }}</span>
+                <MusicPlayer
+                  v-if="t.skin?.audio"
+                  :src="t.skin.audio"
+                  compact
+                  class="relative z-[2] mt-1 w-full"
+                />
               </button>
             </div>
 
