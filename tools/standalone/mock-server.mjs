@@ -194,20 +194,22 @@ createServer(async (req, res) => {
       };
       if (!ext || !["albedo", "rm"].includes(q.kind) || ![1024, 2048, 4096].includes(id.cap))
         return status(res, 400, { error: "bad composite" });
-      // The backend derives the name from the identity; a client that names it
-      // differently would never hit, so the mock refuses it outright.
-      const want = `${store.compositeStem(id)}.${q.kind}.${ext}`;
-      if (file !== want) {
-        console.log(`[mock] composite KEY DRIFT: client ${file} vs backend ${want}`);
-        return status(res, 400, { error: `key drift: the backend names it ${want}` });
+      // The backend names the file itself: the stem from the identity, the
+      // extension from the bytes (Safari sends a PNG under a .webp name). A
+      // client whose STEM differs would never hit, so the mock refuses that
+      // outright where the backend only echoes its own name back.
+      const name = `${store.compositeStem(id)}.${q.kind}.${ext}`;
+      if (file.replace(/\.(webp|png)$/, "") !== name.replace(/\.(webp|png)$/, "")) {
+        console.log(`[mock] composite KEY DRIFT: client ${file} vs backend ${name}`);
+        return status(res, 400, { error: `key drift: the backend names it ${name}` });
       }
       if (!ownedByAnyone(id)) return status(res, 403, { error: "not your item" });
       const g = COMPOSITES.get(gen) ?? new Map();
       COMPOSITES.set(gen, g);
-      if (g.has(file)) return json(res, { ok: true, file, existed: true });
-      g.set(file, body);
-      console.log(`[mock] composite stored ${gen}/${file} ${(body.length / 1048576).toFixed(2)}MB`);
-      return json(res, { ok: true, file });
+      if (g.has(name)) return json(res, { ok: true, file: name, existed: true });
+      g.set(name, body);
+      console.log(`[mock] composite stored ${gen}/${name} ${(body.length / 1048576).toFixed(2)}MB`);
+      return json(res, { ok: true, file: name });
     }
     const cget = p.match(/^\/(?:api\/)?composites\/([^/]+)\/([^/]+)$/);
     if (cget) {

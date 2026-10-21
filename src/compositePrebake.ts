@@ -250,7 +250,14 @@ async function run(opts: { phones: boolean }) {
   if (verifyEnabled()) throw new Error("verify_on");
   // The generation needs the catalog's assetVersion. Without it nothing can be
   // looked up or stored, and a guess would file skins under the wrong extraction.
-  const gen = compositeGeneration();
+  // The catalog loads with the app, but a page opened straight on
+  // /admin/assets can be pressed before it lands, so give it a moment.
+  let gen = compositeGeneration();
+  for (let waited = 0; !gen && waited < 20000 && !stopRequested; waited += 250) {
+    await new Promise((r) => setTimeout(r, 250));
+    gen = compositeGeneration();
+  }
+  if (stopRequested) return;
   if (!gen) throw new Error("no_gen");
   const list = await fetchPrebakeList(gen);
   if (!list) {
