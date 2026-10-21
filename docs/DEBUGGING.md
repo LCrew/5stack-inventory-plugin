@@ -174,8 +174,13 @@ node tools/standalone/drive.mjs http://127.0.0.1:8787/ tools/standalone/steps.ex
 `mock-server.mjs` answers the signed-in endpoints itself and the knife/glove
 catalog from your working tree's `catalog.ts`; everything else is proxied.
 `drive.mjs` runs a JSON list of steps (JS to run, wait, screenshot) and prints
-console errors. Saves don't work (there's no session), and a "saving it failed"
-notice for card renders is expected.
+console errors. Saves don't work (there's no session), except item edits and
+card uploads, which the mock keeps. Cards go through the backend's own
+`cardStore.ts`, so they're stored and served as the real backend would.
+`CARDS_DIR=<dir>` keeps them between runs (as `inst-<id>.png|.webp`), and
+`MOCK_CARD_FORMATS=png` plays a backend from before WebP cards
+(`refuse-webp`: one that advertises WebP but refuses it); see
+[§4.6](#46-a-card-is-wrong-or-stale).
 
 ### 3.7 Data tools
 
@@ -348,6 +353,33 @@ bump one to force a re-bake after a change that alters stored art. A bad
 picture that the client did not flag as failed (the Safari Doppler cards) is
 already stored under the current key, so it needs **Clear renders** as well.
 
+**Which file a card is.** The key still ends in `.png`, but that is only its
+name: a card is stored as `<stem>.webp` or `<stem>.png`, and
+`/api/renders/<key>` (and nginx's `/renders/`) answers with the WebP if there
+is one, the PNG otherwise, each under its own Content-Type
+(`backend/src/cardStore.ts`). Check what you're getting with
+`curl -sI https://inventory-dev.fulm.eu/api/renders/<key> | grep -i content-type`.
+Anything that looks a card up by its key must go through `findCard`/`readCard`;
+a `stat` on the bare key misses every WebP card.
+
+How a card becomes WebP depends on who baked it:
+
+- Chrome and Firefox encode it themselves at quality 0.9 (`src/cardEncode.ts`),
+  checked by its magic bytes.
+- Safari can't: WebKit's `toBlob("image/webp")` silently hands back a PNG. It
+  uploads the PNG and the backend transcodes it with `cwebp -q 90 -sharp_yuv`.
+  A backend without `cwebp` (a bare dev run) stores the PNG.
+- A client only sends WebP when `/api/catalog` lists it in `cardFormats`. An
+  older backend doesn't, and 400s anything but a PNG, so it keeps getting PNGs.
+  If a WebP is refused anyway, the PNG follows and WebP is off for the session.
+
+Cards stored before this stay PNGs and keep being served; they become WebP when
+they're next baked (the next extraction re-keys them all). The quality was
+picked by measuring 16 bakes against their PNGs (the table is in
+`cardStore.ts`); re-run that before changing it. To test a pairing locally, run
+`tools/standalone` with `MOCK_CARD_FORMATS` ([§3.6](#36-the-real-ui-locally-toolsstandalone))
+and watch the mock's `card <id>: got … stored …` lines.
+
 ### 4.7 Something stutters
 
 Time the operation (`performance.now()` around it, or the `perf` HUD) before
@@ -461,6 +493,8 @@ made a correct shader look like it under-wore.
   which delete theirs.
 - **An attached charm's gravity is the camera's down**, not world −Y. Anything
   physical on a charm (cloth, liquid) must use `charmGravity`'s axis.
+- **Safari's canvas can't encode WebP.** `toBlob(cb, "image/webp")` returns a
+  PNG without an error. Check an encode by its magic bytes (`RIFF….WEBP`).
 - **Alpha is data in the composite inputs.** `masks.png` alpha is unused and 0,
   `ao.png` alpha is noPaint. Any loader for them must keep RGB under alpha 0,
   which Safari's image path does not do for a fully transparent file; go
