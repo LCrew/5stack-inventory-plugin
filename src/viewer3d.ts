@@ -5414,6 +5414,66 @@ async function buildViewer(
     if ((mesh as unknown as { isMesh?: boolean }).isMesh && !isGapMesh(mesh)) weaponMeshes.push(mesh);
   });
   /**
+   * FIRST PERSON: the surfaces everything is placed against, as they are DRAWN.
+   *
+   * A held weapon stays skinned (see "FIRST PERSON KEEPS THE SKELETON") so its
+   * parts can move, and its skeleton carries the inch→metre scale: the stored
+   * vertices are in inches and only the bones make them metres. Every probe
+   * below reads `geometry` + `matrixWorld` directly (the UV1 cut, DecalGeometry,
+   * the surface lookups), so on a live skin it measured a gun 39 times too big
+   * and cut every sticker two metres wide and three metres off — in the picture,
+   * simply gone.
+   *
+   * So in first person each skinned mesh is stood in for, in this list only, by
+   * an unrendered twin whose positions and normals are the skin as posed now
+   * (bind, plus the hidden props): the weapon never moves in this mode (see
+   * syncFpvSeat), so once is enough. The real meshes keep rendering and keep
+   * their skeleton; the twins share their material, name and userData.
+   */
+  if (fpvSpec) {
+    object.updateMatrixWorld(true);
+    const v = new THREE.Vector3();
+    const p = new THREE.Vector3();
+    const n = new THREE.Vector3();
+    for (let i = 0; i < weaponMeshes.length; i++) {
+      const skinned = weaponMeshes[i] as import("three").SkinnedMesh;
+      if (!skinned.isSkinnedMesh) continue;
+      const geom = skinned.geometry.clone();
+      const pos = geom.getAttribute("position");
+      const nrm = geom.getAttribute("normal");
+      const outP = new Float32Array(pos.count * 3);
+      const outN = nrm ? new Float32Array(nrm.count * 3) : null;
+      for (let k = 0; k < pos.count; k++) {
+        v.fromBufferAttribute(pos, k);
+        skinned.applyBoneTransform(k, p.copy(v));
+        outP[k * 3] = p.x;
+        outP[k * 3 + 1] = p.y;
+        outP[k * 3 + 2] = p.z;
+        if (nrm && outN) {
+          // A normal is a direction: skin a point one unit along it and take
+          // the difference, which carries the bones' rotation and not their
+          // translation.
+          skinned.applyBoneTransform(k, n.fromBufferAttribute(nrm, k).add(v));
+          n.sub(p).normalize();
+          outN[k * 3] = n.x;
+          outN[k * 3 + 1] = n.y;
+          outN[k * 3 + 2] = n.z;
+        }
+      }
+      geom.setAttribute("position", new THREE.BufferAttribute(outP, 3));
+      if (outN) geom.setAttribute("normal", new THREE.BufferAttribute(outN, 3));
+      geom.computeBoundingBox();
+      geom.computeBoundingSphere();
+      const twin = new THREE.Mesh(geom, skinned.material);
+      twin.name = skinned.name;
+      twin.userData = skinned.userData;
+      twin.matrixAutoUpdate = false;
+      twin.matrix.copy(skinned.matrixWorld);
+      twin.matrixWorld.copy(skinned.matrixWorld);
+      weaponMeshes[i] = twin;
+    }
+  }
+  /**
    * The subset that carries TEXCOORD_1 — i.e. the surfaces the game maps
    * stickers onto. A drag measures the pointer in UV1, so it must aim at these
    * and ONLY these: on a multi-mesh weapon the ray otherwise lands on a
@@ -6707,9 +6767,10 @@ async function buildViewer(
       if (live) lives.push(live);
     }
     if (!lives.length) return;
-    camera.updateMatrixWorld();
+    const cam = fpvEye ?? camera;
+    cam.updateMatrixWorld();
     const { eye } = holoTmp;
-    eye.copy(controls.target).applyMatrix4(camera.matrixWorldInverse);
+    eye.copy(controls.target).applyMatrix4(cam.matrixWorldInverse);
     eye.z += radius * HOLO_EYE_DIST;
     for (const live of lives) {
       live.uHoloLive.value = 1;
@@ -8023,6 +8084,43 @@ async function buildViewer(
     z: v.y / SRC_TO_M + charmBase[2] + CHARM_CAL.z,
   });
 
+  /**
+   * FIRST PERSON: from the pose the charm data was measured on to the pose the
+   * held weapon is in.
+   *
+   * The keychain point (and a stored charm offset) is model space at the ICON
+   * pose, the one the item view bakes. A held weapon stays skinned at BIND (see
+   * "FIRST PERSON KEEPS THE SKELETON"), where its `weapon` bone, and the whole
+   * body with it, sits elsewhere: on the USP-S 0.27m along the barrel. The
+   * recentre takes the body back to the origin either way, so a point measured
+   * on the icon pose landed that far from the gun, at the grip under the hand,
+   * and the charm vanished in first person. This maps it with the body: the
+   * bone at bind, after the bone at the icon pose undone. The icon pose is the
+   * pose clip's first key, the same clip the props are hidden from. Null in the
+   * item view, where the two poses are one.
+   */
+  const charmPoseFix = (() => {
+    if (!fpvSpec || !poseClip) return null;
+    const bone = object.getObjectByName("weapon");
+    if (!bone) return null;
+    const track = (prop: string) => poseClip.tracks.find((t) => t.name === `weapon.${prop}`);
+    const pt = track("position");
+    const qt = track("quaternion");
+    const st = track("scale");
+    if (!pt && !qt) return null;
+    object.updateMatrixWorld(true);
+    const at = new THREE.Vector3().copy(bone.position);
+    const turn = new THREE.Quaternion().copy(bone.quaternion);
+    const size = new THREE.Vector3().copy(bone.scale);
+    if (pt) at.fromArray(pt.values, 0);
+    if (qt) turn.fromArray(qt.values, 0);
+    if (st) size.fromArray(st.values, 0);
+    const icon = new THREE.Matrix4().compose(at, turn, size);
+    if (bone.parent) icon.premultiply(bone.parent.matrixWorld);
+    return new THREE.Matrix4().multiplyMatrices(bone.matrixWorld, icon.invert());
+  })();
+  const charmPoseUnfix = charmPoseFix ? charmPoseFix.clone().invert() : null;
+
   const charmAnchor = (() => {
     const a = (CHARM_ANCHORS as Record<string, { keychain: number[] } | undefined>)[model];
     if (!a || a.keychain.length !== 3) return null;
@@ -8031,7 +8129,8 @@ async function buildViewer(
     // Bone-relative and already in GLB metres — the base belongs to the game's
     // offset space only, so it must NOT be added here.
     const p = new THREE.Vector3(a.keychain[0], a.keychain[1], a.keychain[2]);
-    return p.sub(center);
+    p.sub(center);
+    return charmPoseFix ? p.applyMatrix4(charmPoseFix) : p;
   })();
 
   // The anchor CS2 gives us is a clip point, which on some weapons sits just
@@ -8880,7 +8979,7 @@ async function buildViewer(
     if (charmAnchor) {
       // Absolute, to match what the game consumes — undo the recentering to get
       // back into model space rather than measuring from the anchor.
-      const off = worldToOffset(p.clone().add(center));
+      const off = worldToOffset((charmPoseUnfix ? p.clone().applyMatrix4(charmPoseUnfix) : p.clone()).add(center));
       return { x: round(off.x, 3), y: round(off.y, 3), z: round(off.z, 3) };
     }
     // The length fraction spans the WHOLE usable body (t 0.05..0.95), not the
@@ -8914,7 +9013,9 @@ async function buildViewer(
     // is what an unplaced charm previews at.
     if (charmAnchor) {
       const placed = c.x != null || c.y != null || c.z != null;
-      return liftOutOfBody(placed ? offsetToWorld(c).sub(center) : charmAnchor.clone());
+      const stored = placed ? offsetToWorld(c).sub(center) : null;
+      if (stored && charmPoseFix) stored.applyMatrix4(charmPoseFix);
+      return liftOutOfBody(stored ?? charmAnchor.clone());
     }
     const t = clamp(0.5 + (c.x ?? 0) * 0.45, 0.05, 0.95);
     const l = cbox.min.getComponent(AXIS_L) + t * sizeL;
@@ -9298,9 +9399,18 @@ async function buildViewer(
    * in the game's inspect.
    */
   const gravityScratch = new Float32Array(3);
+  /** The first-person eye once there is one. Declared up here, not where it is
+   *  built, because the charm can settle before the mount gets that far. */
+  let fpvEye: import("three").Camera | null = null;
+  const eyeQ = new THREE.Quaternion();
+  /** World orientation of the camera being drawn with — the orbit camera, or
+   *  the first-person eye, which sits in a moving frame (syncFpvSeat). */
+  const eyeQuaternion = () => (fpvEye ? fpvEye.getWorldQuaternion(eyeQ) : eyeQ.copy(camera.quaternion));
   const gravityWorld = new THREE.Vector3();
   function charmGravity(sim: CharmSim) {
-    gravityWorld.set(0, -1, 0).applyQuaternion(camera.quaternion);
+    // The eye that is drawing: in first person that moves with the arms (see
+    // syncFpvSeat), so the charm swings as the gun comes up.
+    gravityWorld.set(0, -1, 0).applyQuaternion(eyeQuaternion());
     worldToCharmDir(sim.space!, gravityWorld.x, gravityWorld.y, gravityWorld.z, gravityScratch);
     return gravityScratch;
   }
@@ -9446,8 +9556,8 @@ async function buildViewer(
     // An epsilon, not exact inequality: OrbitControls' damping tail leaves the
     // quaternion twitching in the last float digits long after the view has
     // visually stopped, and waking on that would mean the charm never sleeps.
-    if (charmCamQ.angleTo(camera.quaternion) > 1e-4) {
-      charmCamQ.copy(camera.quaternion);
+    if (charmCamQ.angleTo(eyeQuaternion()) > 1e-4) {
+      charmCamQ.copy(eyeQuaternion());
       wakeCharmSim(sim);
       wakeCharm(); // keeps the perf HUD's settle timer honest
     }
@@ -9525,7 +9635,7 @@ async function buildViewer(
     // above the gun left the charm hanging down the screen while its liquid
     // thought it was being looked at from above, and the Butane Buddy flooded
     // to the brim. A charm shown on its own does not hang, and keeps world up.
-    const up = kind === "charm" ? WORLD_Y : lqCameraUp.set(0, 1, 0).applyQuaternion(camera.quaternion);
+    const up = kind === "charm" ? WORLD_Y : lqCameraUp.set(0, 1, 0).applyQuaternion(eyeQuaternion());
     tickCharmLiquid(THREE, root, up, dt);
   }
 
@@ -11648,9 +11758,14 @@ async function buildViewer(
   // the origin and nothing has to be framed or solved.
   let arms: ArmsRig | null = null;
   let fpvCamera: import("three").PerspectiveCamera | null = null;
-  /** Set only on the clip-driven path — see the two ways to hold it, below. */
-  let fpvSeat: import("three").Object3D | null = null;
+  /** What carries the ARMS AND THE EYE in first person — never the weapon.
+   *  See syncFpvSeat. */
+  let fpvFrame: import("three").Object3D | null = null;
+  /** The node whose world transform says where the clip holds the weapon: the
+   *  rig's `wpn` bone, or the hand on the fallback path. */
   let fpvWpn: import("three").Object3D | null = null;
+  /** What follows `fpvWpn` to the weapon's own frame: the attachment bone and
+   *  the object's transform undone (clip path), or the hand seat (fallback). */
   let fpvUnbake: import("three").Matrix4 | null = null;
   /** The auto-framed orientation. Yaw and pitch are offsets ON this. */
   let fpvBase: import("three").Quaternion | null = null;
@@ -11702,29 +11817,50 @@ async function buildViewer(
   const fpvTune = new THREE.Quaternion();
   const fpvEuler = new THREE.Euler();
   /**
-   * Place the weapon from the clip's own `wpn` track.
+   * Place the weapon from the clip's own `wpn` track — by moving everything
+   * ELSE.
    *
-   * A function rather than inline in the render loop because the framing pass
-   * has to step the clip and re-measure, and it must see the weapon where the
-   * loop would have put it.
+   * The weapon itself never moves in first person. Everything hung on it is
+   * stated in world space and measured once at mount, with the weapon at rest:
+   * a sticker is cut out of the body's world geometry and added to the scene,
+   * and the charm's pivot, cord and collision grid are world-space (see the
+   * inspect driver's "MOVING THE WEAPON IS NOT ON OFFER"). This used to carry
+   * the weapon off into the hands and left every sticker and the charm behind
+   * where it had stood, so in first person both were simply gone.
    *
-   * POSITION AND ROTATION ONLY — the scale is deliberately dropped. The two
-   * trees measure in different units and put the conversion in different
-   * places: the glove skeleton is authored in INCHES under a root that scales
-   * by 0.0254, so `wpn.matrixWorld` carries that factor, while the weapon's
-   * geometry is already in METRES because bakePose flattened the skin,
-   * conversion and all, into its vertices. Taking the whole matrix applied
-   * 0.0254 a second time and rendered a two-centimetre AUG — correctly placed,
-   * correctly oriented, and forty times too small.
+   * So the clip's placement is applied inverted, to the frame that holds the
+   * arms and the eye: where the clip says the weapon is RELATIVE to them is
+   * exactly preserved, which is the whole picture. The lamps and the
+   * environment take the same transform (placeFpvLights), so the light on the
+   * gun is what it was too, and the backdrop is pinned to the screen anyway.
+   *
+   * The scales cancel: `wpn` carries the glove skeleton's inch→metre 0.0254 and
+   * fpvUnbake the weapon bone's inverse 39.37 (see fpvUnbake).
    */
+  const fpvRel = new THREE.Matrix4();
+  const fpvLightQ = new THREE.Quaternion();
   function syncFpvSeat() {
-    if (!fpvSeat || !fpvWpn || !fpvUnbake) return;
-    fpvWpn.updateMatrixWorld(true);
-    // wpn -> (undo the weapon's own attachment bone) -> (undo the object's own
-    // transform). See fpvUnbake for what the middle term is and why the scales
-    // cancel to exactly 1.
-    fpvSeat.matrix.multiplyMatrices(fpvWpn.matrixWorld, fpvUnbake);
-    fpvSeat.updateMatrixWorld(true);
+    if (!fpvFrame || !fpvWpn || !fpvUnbake) return;
+    fpvFrame.updateMatrixWorld(true);
+    // Where the clip holds the weapon, in the frame's own space: wpn -> undo
+    // the weapon's attachment bone -> undo the object's own transform.
+    fpvRel.copy(fpvFrame.matrixWorld).invert().multiply(fpvWpn.matrixWorld).multiply(fpvUnbake);
+    // ...inverted, so the weapon stays at rest and the arms and eye come to it.
+    fpvFrame.matrix.copy(fpvRel).invert();
+    fpvFrame.updateMatrixWorld(true);
+    placeFpvLights(fpvFrame.matrix);
+  }
+  /** The lamps and the environment ride with the eye — see syncFpvSeat. Same
+   *  split as applyInspect: a directional lamp's position is only a direction
+   *  (its target is the origin), the spot is a real point. */
+  function placeFpvLights(m: import("three").Matrix4) {
+    m.decompose(fpvPos, fpvLightQ, fpvScale);
+    key.position.copy(keyBase).applyQuaternion(fpvLightQ);
+    rim.position.copy(rimBase).applyQuaternion(fpvLightQ);
+    spot.position.copy(spotBase).applyMatrix4(m);
+    spot.target.position.copy(spotTargetBase).applyMatrix4(m);
+    spot.target.updateMatrixWorld(true);
+    scene.environmentRotation.setFromQuaternion(envQuat.copy(fpvLightQ).multiply(envBase));
   }
 
   if (fpvSpec) {
@@ -11756,14 +11892,13 @@ async function buildViewer(
       // extraction has no clip for.
       const seatM = rig && !rig.wpn ? weaponSeat(THREE, object, hand) : null;
       if (rig && rig.wpn) {
-        // The weapon is placed each frame from the clip — see `driveWeapon`.
-        const seat = new THREE.Group();
-        seat.name = "fpv-seat";
-        seat.matrixAutoUpdate = false;
-        object.removeFromParent();
-        seat.add(object);
-        scene.add(seat);
-        scene.add(rig.root);
+        // The weapon is placed each frame from the clip — by moving this frame,
+        // which holds the arms and (below) the eye. See syncFpvSeat.
+        const frame = new THREE.Group();
+        frame.name = "fpv-frame";
+        frame.matrixAutoUpdate = false;
+        scene.add(frame);
+        frame.add(rig.root);
         if (spec.offset) rig.root.position.set(spec.offset.x, spec.offset.y, spec.offset.z);
         // THE HANDS WEAR THE EQUIPPED FINISH. Same compositor the glove item
         // view uses, pointed at the arms instead — a glove is a glove whichever
@@ -11820,7 +11955,7 @@ async function buildViewer(
         // The flash rides the clip's own muzzle bone.
         const tipBone = rig.root.getObjectByName("wpnTip");
         if (tipBone) flash = buildMuzzleFlash(THREE, scene, tipBone, rig.wpn, FPV_UP);
-        fpvSeat = seat;
+        fpvFrame = frame;
         fpvWpn = rig.wpn;
         /**
          * THE CLIP'S `wpn` DESCRIBES THE WEAPON'S OWN ATTACHMENT BONE, NOT ITS
@@ -11864,7 +11999,9 @@ async function buildViewer(
         // and says so outright — "simulates how the viewmodel looks in-game at
         // this ratio, independent of the browser window's shape".
         fpvCamera = new THREE.PerspectiveCamera(spec.fov ?? debugNumber("fpvfov", 54), FPV_ASPECT, 0.01, 100);
-        scene.add(fpvCamera);
+        // In the frame with the arms: the eye moves with them, the weapon stays.
+        frame.add(fpvCamera);
+        fpvEye = fpvCamera;
         // THE EYE IS THE ORIGIN, AND THE AXES ARE MEASURED — no framing solve.
         //
         // Composing the clip offline from its own rest pose and channels gives
@@ -11900,15 +12037,18 @@ async function buildViewer(
         // offsets, the charm pivot, the collision grid, every world-space probe.
         // Re-parenting it under a group whose matrix undoes the recentre leaves
         // all of them arithmetically untouched.
-        const seat = new THREE.Group();
-        seat.name = "fpv-seat";
-        seat.matrixAutoUpdate = false;
-        seat.matrix.copy(seatM);
-        object.removeFromParent();
-        seat.add(object);
-        rig.hand.add(seat);
+        // Same as the clip path: the weapon stays where it is and the frame
+        // holding the arms and the eye moves, here so the weapon lands on the
+        // hand through `seatM` (syncFpvSeat).
+        const frame = new THREE.Group();
+        frame.name = "fpv-frame";
+        frame.matrixAutoUpdate = false;
+        scene.add(frame);
         if (spec.offset) rig.root.position.set(spec.offset.x, spec.offset.y, spec.offset.z);
-        scene.add(rig.root);
+        frame.add(rig.root);
+        fpvFrame = frame;
+        fpvWpn = rig.hand;
+        fpvUnbake = seatM.clone();
         arms = rig;
         // Near plane is TIGHT: the weapon sits ~15cm from the eye, so the item
         // view's `radius / 100` would clip the muzzle clean off.
@@ -11916,7 +12056,8 @@ async function buildViewer(
         // At the origin, looking down -Z — three's default orientation, so no
         // lookAt is needed and none should be added: a lookAt would re-derive
         // the basis from a target and quietly reintroduce roll.
-        scene.add(fpvCamera);
+        frame.add(fpvCamera);
+        fpvEye = fpvCamera;
       } else {
         rig?.dispose();
         console.warn(

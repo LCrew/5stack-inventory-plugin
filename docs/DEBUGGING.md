@@ -782,6 +782,14 @@ the yield to a building viewer by sampling `window.__prefetch.stats()`
 - **A prefetched file loads from a `blob:` URL.** In devtools it shows as a
   blob: request; the real URL was fetched earlier by src/prefetchStore.ts, at
   low priority unless a press asked for it.
+- **The weapon never moves, first person included.** Stickers are cut in world
+  space and the charm's pivot, cord and collision grid are world-space, all
+  measured once at mount. First person moves the arms, the eye and the lamps
+  by the inverse of the clip's `wpn` placement (`syncFpvSeat`), and the held
+  weapon stays skinned at BIND, so the placement code reads skinned twins of
+  its meshes (`weaponMeshes`) and the charm's icon-pose anchor goes through
+  `charmPoseFix`. `window.__mount` on mount.html is the live handle, so
+  drive.mjs can call `setFpvAction("reload")` between shots.
 - **An attached charm's gravity is the camera's down**, not world −Y. Anything
   physical on a charm (cloth, liquid) must use `charmGravity`'s axis.
 - **Safari's canvas can't encode WebP.** `toBlob(cb, "image/webp")` returns a

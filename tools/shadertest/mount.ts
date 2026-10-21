@@ -34,6 +34,9 @@
 //                         diffing: the difference bbox IS the feature
 //   size=1400             host width in CSS px (height 9/14 of it)
 //   settle=3000           ms to wait after mount before the first shot
+//
+// The live viewer handle is window.__mount (setFpvAction, setStickers, …), for
+// driving it from tools/standalone/drive.mjs.
 //   pre=/materials/….json mount the same model with THIS paint first and
 //                         dispose it — for state leaking from one item to the
 //                         next (shared caches, reused shader materials)
@@ -131,6 +134,10 @@ async function shoot(va: number, plain: boolean) {
       // A standalone sticker/patch: model=__sticker&kind=sticker&decal=/images/….webp
       decal: q.get("decal") ? { image: q.get("decal")!, wear: num("decalwear", 0) } : null,
     } as never);
+    // The live handle, for a driver script: e.g. drive.mjs calling
+    // window.__mount.setFpvAction("reload") between shots (with t=0,60 so the
+    // viewer stays up).
+    (window as unknown as { __mount?: unknown }).__mount = handle;
     await new Promise((r) => setTimeout(r, settle));
     let last = 0;
     for (const t of plain ? [times[0]] : times) {
