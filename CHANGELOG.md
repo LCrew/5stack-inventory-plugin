@@ -32,6 +32,7 @@ The 3D model extraction is now at pipeline version 38; run it once to get every 
 
 ### Features
 
+- **Loading in the scene**: while a 3D model loads, the pane already shows the chosen lighting preset's backdrop, the CS2 haze or the map photograph, so the item appears in place instead of the whole scene popping in with it. The studio presets, which have no backdrop, keep the card behind.
 - **CS2 lighting preset (new default)**: neutral daylight and the main menu's blue-grey haze, measured against in-game inspect screenshots. Items no longer come out pink-tinted and dull.
 - **CS2 scene presets**: Ancient (night), Italy and Italy (alley) place the item in front of a blurred in-game screenshot of the map. The same image lights the item's reflections.
 - **Knife StatTrak counter**: the kill count is scratched into the blade as in game, at each knife's exact spot from the game's own attachment data. The digits use the game's own cut-out texture and stay sharp however close you zoom.

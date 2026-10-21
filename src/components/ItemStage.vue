@@ -26,6 +26,8 @@ import { ACTION_ICON, ACTION_ICON_BOX, ACTION_ICON_VIEWBOX } from "../weaponActi
 import { glowStyle } from "../itemVisuals";
 import type { InspectTransport } from "../viewer3d";
 import type { StageKey } from "../composables/useViewerStage";
+import { choiceValue, choicesVersion } from "../devFlags";
+import { loadingBackdrop, viewerEnvironment } from "../viewerEnvironments";
 
 const props = withDefaults(
   defineProps<{
@@ -165,6 +167,13 @@ const chromeBL = computed(() => (props.bleed ? (isCompact.value ? "bottom-3 left
 const chromeBR = computed(() => (props.bleed ? (isCompact.value ? "bottom-3 right-4" : "bottom-4 right-8") : "bottom-2 right-4"));
 const chromeBC = computed(() => (props.bleed ? (isCompact.value ? "bottom-3" : "bottom-4") : "bottom-2"));
 
+/** The chosen rig's backdrop, painted under the loading spinner (null for the
+ *  studio rigs, which draw none). Re-read when the Lighting choice changes. */
+const loadingBg = computed(() => {
+  void choicesVersion.value;
+  return loadingBackdrop(viewerEnvironment(choiceValue("env")));
+});
+
 const REPORT_LINK =
   "text-f9 uppercase tracking-cs2 text-muted-foreground/45 underline decoration-dotted underline-offset-2 transition-colors hover:text-muted-foreground";
 </script>
@@ -207,8 +216,15 @@ const REPORT_LINK =
     <Transition enter-active-class="transition-opacity duration-150" leave-active-class="transition-opacity duration-200" leave-to-class="opacity-0">
       <img v-if="is3d && frozen" :src="frozen" alt="" class="pointer-events-none absolute inset-0 z-[3] h-full w-full object-contain" />
     </Transition>
-    <div v-if="is3d && busy && !frozen" class="absolute inset-0 z-[3] grid place-items-center">
-      <div class="flex flex-col items-center gap-3 text-muted-foreground">
+    <div
+      v-if="is3d && busy && !frozen"
+      class="absolute inset-0 z-[3] grid place-items-center"
+      :style="loadingBg ? { background: loadingBg } : undefined"
+    >
+      <div
+        class="flex flex-col items-center gap-3"
+        :class="loadingBg ? 'text-white/85 [text-shadow:0_1px_2px_rgba(0,0,0,0.45)]' : 'text-muted-foreground'"
+      >
         <Loader2 class="h-6 w-6 animate-spin text-[color:var(--acc)]" />
         <span class="text-f11 uppercase tracking-cs2">Loading 3D model…</span>
       </div>

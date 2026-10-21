@@ -289,6 +289,25 @@ export const VIEWER_ENVIRONMENTS: ViewerEnvironment[] = [
 void mapEnvironment;
 
 /**
+ * What the 3D pane shows while a model loads: the backdrop the viewer is about
+ * to draw, so the item appears in the scene instead of the scene popping in
+ * with it. CSS, because the viewer has nothing on screen yet.
+ *
+ * CS2's haze is SAMPLED off a live render, top to bottom: it is painted under
+ * the rig's exposure (see getDaylight), so its authored stops are not what
+ * reaches the screen. A map scene shows its own photograph, already blurred.
+ * The studio rigs draw no backdrop at all, so null: the card shows through,
+ * exactly as it does once the model is up.
+ */
+export function loadingBackdrop(env: ViewerEnvironment): string | null {
+  if (env.backdrop) return `center / cover no-repeat url("${env.backdrop.image}")`;
+  if (env.daylight) {
+    return "linear-gradient(180deg, #737e85 0%, #8a9399 20%, #a1aaae 42%, #9d9e9b 60%, #87857f 80%, #706b62 100%)";
+  }
+  return null;
+}
+
+/**
  * Resolve a stored key, falling back to the canonical rig.
  *
  * Total on purpose: the value comes out of localStorage, so a key from a build
