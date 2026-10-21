@@ -7,6 +7,12 @@
 #   ./scripts/dev-backend.sh            # install, or re-apply after a change
 #   ./scripts/dev-backend.sh update     # restart onto the newest :dev image
 #   ./scripts/dev-backend.sh remove     # delete everything this created
+#   ./scripts/dev-backend.sh assets on  # serve the dev host's models, art and
+#                                       # music from the dev backend (opt-in)
+#   ./scripts/dev-backend.sh assets off # back to the installed frontend
+#
+# `assets` only changes where the DEV host (inventory-dev.<domain>) gets those
+# files from; see docs/CACHING.md. Re-running the install keeps whichever it is.
 #
 # It asks nothing: like plugin.sh, it reads the installed plugin instead — its
 # database connection, its panel domains, its ingress class and whether it
@@ -56,8 +62,25 @@ case "${1:-install}" in
     exit 0
     ;;
   install) ;;
-  *) die "usage: $0 [install|update|remove]" ;;
+  assets)
+    case "${2:-}" in
+      on | off) assets="$2" ;;
+      *) die "usage: $0 assets on|off" ;;
+    esac
+    kc get ingress inventory-dev >/dev/null 2>&1 || die "The dev backend is not installed yet. Run $0 first."
+    ;;
+  *) die "usage: $0 [install|update|remove|assets on|off]" ;;
 esac
+mode="${1:-install}"
+# Where the dev host's asset paths go. A plain re-install keeps what is there,
+# so `assets on` survives an update of the manifests; a first install is off.
+if [[ -z "${assets:-}" ]]; then
+  assets=off
+  if kc get ingress inventory-dev -o jsonpath='{.spec.rules[0].http.paths[*].path}' 2>/dev/null |
+    tr ' ' '\n' | grep -qx /models; then
+    assets=on
+  fi
+fi
 
 # ---- What the live backend runs with -------------------------------------------
 # Read off the live DEPLOYMENT and INGRESS rather than guessed: kustomize
@@ -82,6 +105,71 @@ DOMAIN="${DOMAIN:-inventory-dev.${live_domain#*.}}"
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
+
+# ---- The ingress, rendered the same way by an install and by `assets` --------
+class=$(kc get ingress inventory-api -o jsonpath='{.spec.ingressClassName}' 2>/dev/null || true)
+class="${class:-nginx}"
+live_tls=$(kc get ingress inventory-api -o jsonpath='{.spec.tls[0].secretName}' 2>/dev/null || true)
+render_ingress() {
+  # #__TLS__: when the live plugin terminates TLS in the cluster, this host
+  # needs a certificate too (made below, from the same issuer).
+  # #__ASSETS__: with `assets on`, the mount-backed paths on this host go to the
+  # dev backend's own asset routes. Prefix paths, so /models covers
+  # /models/ak47.glb but not /modelsfoo; the longest match wins, so they beat `/`.
+  sed -e "s|__DOMAIN__|$DOMAIN|g" -e "s|__CLASS__|$class|" "$REPO_DIR/k8s/dev/ingress.yaml" |
+    awk -v d="$DOMAIN" -v tls="$live_tls" -v assets="$assets" '
+      /^[ \t]*#__TLS__[ \t]*$/ {
+        if (tls != "") { print "  tls:"; print "    - hosts:"; print "        - " d; print "      secretName: inventory-dev-ssl" }
+        next
+      }
+      /^[ \t]*#__ASSETS__[ \t]*$/ {
+        if (assets == "on") {
+          n = split("/models /paints /images /music /anims", p, " ")
+          for (i = 1; i <= n; i++) {
+            print "          - backend:"
+            print "              service:"
+            print "                name: inventory-dev-backend"
+            print "                port:"
+            print "                  number: 3000"
+            print "            path: " p[i]
+            print "            pathType: Prefix"
+          }
+        }
+        next
+      }
+      { print }' >"$tmp/ingress.yaml"
+}
+
+if [[ "$mode" == assets ]]; then
+  if [[ "$assets" == on ]]; then
+    # Only a dev backend that has its asset routes can take these paths over: an
+    # older one has no /anims route, so first person would stand still. A miss
+    # tells them apart without needing any file to exist — the new route answers
+    # one with Timing-Allow-Origin, and an old backend has no such route at all.
+    say "Checking the dev backend can serve assets"
+    kc exec deploy/inventory-dev-backend -- node -e '
+      fetch("http://127.0.0.1:3000/anims/dev-backend-probe.json")
+        .then((r) => process.exit(r.headers.get("timing-allow-origin") ? 0 : 1), () => process.exit(1))' ||
+      die "This dev backend is too old to serve assets. Run '$0 update' once the dev-backend build is green, then '$0 assets on' again."
+  fi
+  render_ingress
+  kc apply -f "$tmp/ingress.yaml"
+  if [[ "$assets" == on ]]; then
+    cat <<EOF
+
+$DOMAIN now serves /models, /paints, /images, /music and /anims from the dev
+backend: the same files off the same mount, with this fork's caching and
+compression. The installed plugin is unchanged. Check it with:
+
+  curl -sI -H 'Accept-Encoding: gzip' https://$DOMAIN/models/ak47.glb | grep -i -e content-encoding -e etag
+
+(expect "content-encoding: gzip" and an etag). To go back: $0 assets off
+EOF
+  else
+    say "Off: $DOMAIN gets its models, art and music from the installed frontend again."
+  fi
+  exit 0
+fi
 
 : >"$tmp/config.env"
 if [[ -n "$cm" ]]; then
@@ -123,12 +211,11 @@ kc create secret generic inventory-dev-secrets --from-literal=DATABASE_URL="$db"
   kc apply -f -
 
 # ---- Manifests -----------------------------------------------------------------
-class=$(kc get ingress inventory-api -o jsonpath='{.spec.ingressClassName}' 2>/dev/null || true)
-class="${class:-nginx}"
-live_tls=$(kc get ingress inventory-api -o jsonpath='{.spec.tls[0].secretName}' 2>/dev/null || true)
-
 sed -e "s|__IMAGE__|$IMAGE|" "$REPO_DIR/k8s/dev/backend.yaml" >"$tmp/backend.yaml"
-sed -e "s|__DOMAIN__|$DOMAIN|g" -e "s|__CLASS__|$class|" "$REPO_DIR/k8s/dev/ingress.yaml" >"$tmp/ingress.yaml"
+render_ingress
+if [[ "$assets" == on ]]; then
+  say "Assets: /models, /paints, /images, /music, /anims from the dev backend (assets on)"
+fi
 
 if [[ -n "$live_tls" ]]; then
   # The live plugin terminates TLS in the cluster, so this host needs a
@@ -137,10 +224,6 @@ if [[ -n "$live_tls" ]]; then
   issuer_kind=$(kc get certificate inventory-ssl -o jsonpath='{.spec.issuerRef.kind}' 2>/dev/null || true)
   sed -e "s|__DOMAIN__|$DOMAIN|" -e "s|__ISSUER__|${issuer:-5stack-issuer}|" \
     -e "s|__ISSUER_KIND__|${issuer_kind:-Issuer}|" "$REPO_DIR/k8s/dev/certificate.yaml" >"$tmp/certificate.yaml"
-  awk -v d="$DOMAIN" '
-    /#__TLS__/ { print "  tls:"; print "    - hosts:"; print "        - " d; print "      secretName: inventory-dev-ssl"; next }
-    { print }' "$tmp/ingress.yaml" >"$tmp/ingress.tls.yaml"
-  mv "$tmp/ingress.tls.yaml" "$tmp/ingress.yaml"
   say "TLS: in-cluster (certificate from ${issuer:-5stack-issuer})"
 else
   say "TLS: terminated in front of the cluster (Cloudflare / reverse proxy), no certificate"
