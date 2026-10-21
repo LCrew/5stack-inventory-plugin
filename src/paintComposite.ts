@@ -791,6 +791,12 @@ export interface WeaponInputs {
    *  .exr (RGBA16161616F), not .png — always take the filename from meta.json. */
   position?: string;
   surface?: string;
+  /** 2048 copies of the inputs above that are larger (extraction v38+, meta.json
+   *  `textures2048`; only HD gun bodies have any). compositePaint swaps them in
+   *  when it composites at 2048 or less, where a 4096 input is read at its 2048
+   *  mip anyway: ~6MB instead of ~35MB for an AK-47's color + metalness, and
+   *  measured identical output within a level. Absent on older mounts. */
+  at2048?: Partial<Pick<WeaponInputs, "ao" | "masks" | "color" | "metalness">>;
   weaponLength?: number;
   uvScale?: number;
   separateChannels?: boolean;
@@ -846,10 +852,19 @@ export function loadWeaponInputs(model: string, legacy = false): Promise<WeaponI
         // are fixed while an extraction rewrites what is behind them.
         const res = await fetch(withAssetVersion(`${getAssetOrigin()}/models/${encodeURIComponent(d)}/meta.json`));
         if (!res.ok || (res.headers.get("content-type") ?? "").includes("text/html")) return null;
-        const meta = (await res.json()) as WeaponInputs & { textures?: Record<string, string> };
+        const meta = (await res.json()) as WeaponInputs & {
+          textures?: Record<string, string>;
+          textures2048?: Record<string, string>;
+        };
         const base = `${getAssetOrigin()}/models/${encodeURIComponent(d)}/`;
         const rel = (p?: string) => (p ? withAssetVersion(base + p) : undefined);
+        // Only the keys that HAVE a copy: compositePaint spreads this over the
+        // full set, and an undefined `ao` would erase the real one.
+        const small = meta.textures2048 ?? {};
+        const at2048: WeaponInputs["at2048"] = {};
+        for (const k of ["ao", "masks", "color", "metalness"] as const) if (small[k]) at2048[k] = rel(small[k]);
         return {
+          at2048: Object.keys(at2048).length ? at2048 : undefined,
           ao: rel(meta.textures?.ao),
           masks: rel(meta.textures?.masks),
           color: rel(meta.textures?.color),
@@ -2099,6 +2114,13 @@ export async function compositePaint(
   // eye cannot use mid-gesture. The full-size composite still runs when the
   // drag stops, so nothing ships at proxy resolution.
   const sizeCap = compositeSizeCap(def, opts.maxSize);
+  // The weapon's own inputs at the resolution this composite can use. See
+  // WeaponInputs.at2048: at a cap of 2048 or less the GPU would sample a 4096
+  // input at its 2048 mip, so the 2048 copy is the same texels for a quarter of
+  // the download. Only the four paint-UV maps have copies; everything else is
+  // the full set unchanged.
+  const inputs: WeaponInputs | null | undefined =
+    opts.weapon?.at2048 && sizeCap <= 2048 ? { ...opts.weapon, ...opts.weapon.at2048 } : opts.weapon;
   const key = `${def.pattern ?? "-"}|${def.overlay ?? "-"}|${def.style}|${wear.toFixed(4)}|${seed}|${wkey}|d${opts.debug ?? 0}|${def.caseHardening ? `ch${def.caseHardeningRamp ?? "-"}${def.chRampOffset}` : ""}|a${def.patternAddrH}_${def.patternAddrV}|c${sizeCap}`;
   const cache = cacheFor(renderer);
   const hit = opts.reference || opts.forcePort ? undefined : cache.get(key);
@@ -2189,11 +2211,11 @@ export async function compositePaint(
     (def.masksSkinSpecific && (def.overrideDefaultMasks || (def.caseHardening && def.style === 8))
       ? await urlOf(def.masks)
       : null) ??
-      opts.weapon?.masks ??
+      inputs?.masks ??
       (await urlOf(def.masks)),
-    opts.weapon?.ao ?? urlOf(def.ao),
-    opts.weapon?.color ?? urlOf(def.baseColor),
-    opts.weapon?.metalness ?? urlOf(def.baseRM),
+    inputs?.ao ?? urlOf(def.ao),
+    inputs?.color ?? urlOf(def.baseColor),
+    inputs?.metalness ?? urlOf(def.baseRM),
     urlOf(def.paintRoughnessTex),
     urlOf(def.paintMetalnessTex),
     urlOf(def.overlay),
@@ -2626,7 +2648,8 @@ export async function compositePaint(
       await opts.reference({
         ...valveInputs,
         renderer,
-        weapon: opts.weapon,
+        // The set actually composited from, so the reference reads the same texels.
+        weapon: inputs,
         seed,
         size,
         quad: quadGeom!,

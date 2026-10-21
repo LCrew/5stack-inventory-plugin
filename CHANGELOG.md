@@ -1,7 +1,7 @@
 # Changelog
 
 Changes in the LCrew fork of `lukepolo/5stack-inventory-plugin`, all made on 2026-10-20.
-The 3D model extraction is now at pipeline version 37; run it once to get every asset listed below.
+The 3D model extraction is now at pipeline version 38; run it once to get every asset listed below.
 
 ## Crafting & Editing
 
@@ -77,6 +77,7 @@ The 3D model extraction is now at pipeline version 37; run it once to get every 
 ### Features
 
 - **Compressed models and data**: the plugin's web server compresses 3D models, animations and other data files, and sends the extraction's ready-made compressed copies when they exist. An AK-47's model goes from 3.3 MB to 1.1 MB on the wire, and its inspect animation from 273 KB to 32 KB.
+- **Lighter HD skin downloads**: HD gun finishes load their weapon textures at 2048 instead of 4096 pixels where the skin is drawn at 2048 anyway, so an AK-47 skin fetches about 10MB instead of 35MB with no visible difference. Spray-paint and airbrushed finishes keep the full-size textures on desktop, where they are drawn at 4096.
 
 ### Bug Fixes
 
@@ -91,6 +92,7 @@ The 3D model extraction is now at pipeline version 37; run it once to get every 
 - **v34, sticker masks**: each weapon body's sticker mask is extracted, which is what hides stickers under modelled parts.
 - **v35, charm detail textures**: each charm material's detail layer and its placement are recorded, and the texture is extracted.
 - **v37, MVP anthems**: each music kit's round-MVP anthem is extracted beside its menu theme, with its own manifest.
+- **v38, lighter assets**: composite inputs larger than 2048 pixels get a 2048 copy beside the original, and every model and data file gets a gzip copy. No existing file changes, so older clients keep loading what they always did.
 - **v36, StatTrak art and knife data**: the knife digit texture is extracted with its cut-out channel intact. Every knife's attachment points and bone chain are written out as the source for knife counter and name tag placement.
 - **C4 model**: the extraction publishes the C4 model with its sticker slots and charm surfaces.
 
