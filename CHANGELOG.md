@@ -62,6 +62,7 @@ The 3D model extraction is now at pipeline version 38; run it once to get every 
 
 ### Features
 
+- **True sizes on the models mount**: Asset Cache lists the compressed copies and the 2048 px input copies in their own rows and gives the mount's size without them. Rows whose files have a compressed copy also say what they cost to download, such as the models' "sent as" size.
 - **Glove model cards**: the eight bare glove models get cards baked from their 3D model, kept in the shared card store.
 - **Smaller cards**: new cards are stored as WebP, about a tenth of the size of the PNG they replace, so the inventory grid loads much faster with no visible difference. Cards already stored keep showing as they are, and cards baked in Safari are converted by the server.
 - **Pre-bake paint composites**: Asset Cache has a button that composites every painted weapon and knife in anyone's inventory and saves it to the shared store, with progress, a stop button and the skins that failed. Run it once after an extraction, from a desktop browser, and nobody has to download a weapon's 20–40 MB of inputs to open a skin; card bakes skip them too.

@@ -5594,6 +5594,10 @@ async function migrateLegacyTypeCfgs(
 // That is exactly what happened once. They are reported here but NOT clearable;
 // re-running the extraction is the way to rebuild them.
 type DirStat = { files: number; bytes: number };
+/** A bucket also says what it costs to SEND when some of its files have a
+ *  precompressed `.gz` sibling (extraction v38): each such file counts at its
+ *  `.gz` size. Absent when nothing in the bucket has one. */
+type BucketStat = DirStat & { sentBytes?: number };
 
 /**
  * Walk a tree once, bucketing every file by what it IS.
@@ -5606,10 +5610,14 @@ type DirStat = { files: number; bytes: number };
 async function dirStats(
   dir: string,
   classify?: (rel: string) => string | null,
-): Promise<DirStat & { buckets: Record<string, DirStat> }> {
+): Promise<DirStat & { buckets: Record<string, BucketStat> }> {
   let files = 0;
   let bytes = 0;
-  const buckets: Record<string, DirStat> = {};
+  const buckets: Record<string, BucketStat> = {};
+  // Every classified file's size and bucket, so the `.gz` siblings can be
+  // matched up once the walk is done (a sibling can be listed before or after
+  // its original).
+  const seen = new Map<string, { size: number; key: string }>();
   async function walk(d: string, rel: string) {
     let entries;
     try {
@@ -5630,11 +5638,18 @@ async function dirStats(
           const b = (buckets[key] ??= { files: 0, bytes: 0 });
           b.files++;
           b.bytes += size;
+          seen.set(childRel, { size, key });
         }
       }
     }
   }
   await walk(dir, "");
+  for (const [rel, { size, key }] of seen) {
+    const gz = rel.endsWith(".gz") ? undefined : seen.get(`${rel}.gz`);
+    if (!gz) continue;
+    const b = buckets[key];
+    b.sentBytes = (b.sentBytes ?? b.bytes) - size + gz.size;
+  }
   return { files, bytes, buckets };
 }
 
@@ -5651,12 +5666,20 @@ async function dirStats(
  * row that read as if it were a few hundred MB of GLBs.
  */
 function classifyModelFile(rel: string): string | null {
+  const base = rel.split("/").pop() ?? "";
+  // Copies the extraction adds BESIDE an original (v38), counted on their own
+  // so the rows above show what the mount holds rather than what it holds
+  // twice: gzip copies the servers send instead of a model or a JSON file
+  // (they used to land in "anchors & markup" and tripled it), and the 2048
+  // copies of the largest composite inputs.
+  if (base.endsWith(".gz")) return "compressedCopies";
   // Agents keep their archive path (agents/models/<faction>/<name>.glb).
   if (rel.startsWith("agents/")) return "agents";
+  const inInputs = /(^|\/)[^/]+\.inputs(\.hd)?\//.test(rel);
+  if (inInputs && /\.2048\.png$/.test(base)) return "inputs2048";
   // Per-weapon paint compositor sources — by far the largest bucket, and the
   // one an operator low on disk most wants to see.
-  if (/(^|\/)[^/]+\.inputs(\.hd)?\//.test(rel)) return "compositeInputs";
-  const base = rel.split("/").pop() ?? "";
+  if (inInputs) return "compositeInputs";
   if (base.startsWith("kc_") && base.endsWith(".glb")) return "charms";
   if (base.endsWith(".glb")) return "meshes"; // weapons, knives, gloves, modules
   if (base.endsWith(".webp") || base.endsWith(".png")) return "modelTextures";

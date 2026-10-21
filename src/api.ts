@@ -970,6 +970,10 @@ export const fetchSteamSync = () =>
 
 // Admin: cached-asset stats + clearing (renders / paints on the mount).
 export type DirStat = { files: number; bytes: number };
+/** A breakdown part. `sentBytes`: what its files cost to send, counting each
+ *  one that has a precompressed `.gz` copy at that copy's size (absent when
+ *  none do, and on backends from before extraction v38). */
+export type PartStat = DirStat & { sentBytes?: number };
 /**
  * Which slice of a mount a `parts` entry describes. Every one of these is a
  * subdivision of `models` or `paints` above — the totals stay authoritative, so
@@ -983,6 +987,8 @@ export type CachePart =
   | "compositeInputs" // <weapon>.inputs[.hd] — the paint compositor's sources
   | "modelTextures" // the flat texture pool the GLBs reference
   | "modelMeta" // anchors, sticker markup, the version stamp
+  | "inputs2048" // the 2048 copies of the largest composite inputs (v38)
+  | "compressedCopies" // the .gz copies the servers send instead (v38)
   | "paintMaterials" // the finish JSON
   | "paintTextures"; // everything the finish JSON points at
 
@@ -996,7 +1002,7 @@ export type CacheStats = {
    *  can be surprised by; absent on a mount extracted before v28. */
   music?: DirStat;
   /** Per-kind breakdown of `models` and `paints`. Absent on older backends. */
-  parts?: Partial<Record<CachePart, DirStat>>;
+  parts?: Partial<Record<CachePart, PartStat>>;
 };
 export const fetchCacheStats = () => request<CacheStats>("/admin/cache");
 
