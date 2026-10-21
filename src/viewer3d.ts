@@ -88,8 +88,8 @@ export type ThreeBundle = {
   DecalGeometry: typeof import("three/examples/jsm/geometries/DecalGeometry.js").DecalGeometry;
   RoomEnvironment: typeof import("three/examples/jsm/environments/RoomEnvironment.js").RoomEnvironment;
   cloneSkeleton: typeof import("three/examples/jsm/utils/SkeletonUtils.js").clone;
-  /** The lighting environment, or null if it could not be fetched — see loadThree. */
-  hdr: import("three").DataTexture | null;
+  /** Parses the studio HDRI — see loadStudioHdr. */
+  RGBELoader: typeof import("three/examples/jsm/loaders/RGBELoader.js").RGBELoader;
   EffectComposer: typeof import("three/examples/jsm/postprocessing/EffectComposer.js").EffectComposer;
   RenderPass: typeof import("three/examples/jsm/postprocessing/RenderPass.js").RenderPass;
   UnrealBloomPass: typeof import("three/examples/jsm/postprocessing/UnrealBloomPass.js").UnrealBloomPass;
@@ -214,16 +214,8 @@ function loadThree(): Promise<ThreeBundle> {
     DecalGeometry: decal.DecalGeometry,
     RoomEnvironment: env.RoomEnvironment,
     cloneSkeleton: skel.clone,
-    // THE LIGHTING ENVIRONMENT. Loaded here because getSharedGL is synchronous
-    // and this is not — and it has to exist before the first PMREM, or the very
-    // first mount of a session would light against the fallback and every later
-    // one against the HDRI.
-    //
-    // NULL ON FAILURE, never a throw: the URL is resolved by the bundler and this
-    // ships as a FEDERATED REMOTE, so it is loaded from the panel's origin rather
-    // than its own. If that ever resolves wrong, the viewer must fall back to
-    // RoomEnvironment and keep working rather than refusing to render anything.
-    hdr: await new rgbe.RGBELoader().loadAsync(HDR_URL).catch(() => null),
+    // The HDRI itself is NOT fetched here any more — see loadStudioHdr.
+    RGBELoader: rgbe.RGBELoader,
     EffectComposer: comp.EffectComposer,
     RenderPass: rp.RenderPass,
     UnrealBloomPass: bloom.UnrealBloomPass,
@@ -231,6 +223,57 @@ function loadThree(): Promise<ThreeBundle> {
   }));
   return threePromise;
 }
+
+/**
+ * THE STUDIO LIGHTING ENVIRONMENT (venice_sunset), fetched only by a rig that
+ * lights with it.
+ *
+ * It used to ride inside loadThree, so every first 3D view waited for 1.4MB of
+ * HDRI after three itself had arrived, and only then started on its GLB. The
+ * default live rig (CS2 daylight) lights by its own painted sky and never
+ * looks at it; the photographed CS2 scenes light by their photograph. Only the
+ * studio rigs (Studio, Showcase, Warm, Dark), and with them every card bake,
+ * reflect it. So it is asked for by the mount that needs it (rigUsesStudioEnv),
+ * BEFORE that mount awaits three, and downloads alongside three and the GLB.
+ *
+ * The bytes are fetched directly so the download does not wait for three's
+ * chunk; RGBELoader then parses them off a blob URL, which keeps its decode
+ * path (half-float DataTexture, its own filters) exactly what it always was.
+ *
+ * NULL ON FAILURE, never a throw: the URL is resolved by the bundler and this
+ * ships as a FEDERATED REMOTE, so it is loaded from the panel's origin rather
+ * than its own. If that ever resolves wrong, the viewer must fall back to
+ * RoomEnvironment and keep working rather than refusing to render anything.
+ */
+let studioHdrPromise: Promise<import("three").DataTexture | null> | null = null;
+function loadStudioHdr(): Promise<import("three").DataTexture | null> {
+  studioHdrPromise ??= (async () => {
+    const bytes = fetch(HDR_URL)
+      .then((r) => (r.ok ? r.blob() : null))
+      .catch(() => null);
+    const [{ RGBELoader }, blob] = await Promise.all([loadThree(), bytes]);
+    if (!blob) return null;
+    const url = URL.createObjectURL(blob);
+    try {
+      return await new RGBELoader().loadAsync(url);
+    } catch {
+      return null;
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  })();
+  return studioHdrPromise;
+}
+
+/** Whether a rig reflects the studio HDRI at mount — see loadStudioHdr. The
+ *  daylight rig has its own sky and a photographed scene its photograph (it
+ *  falls back to the HDRI only if the photograph fails, see buildViewer). */
+const rigUsesStudioEnv = (rig: ViewerEnvironment) => !rig.daylight && !rig.backdrop;
+
+/** The rig a mount opens under. One expression for the two places that need
+ *  it: the HDRI prefetch at the top of buildViewer, and the rig itself. */
+const mountRig = (opts?: ViewerOpts) =>
+  viewerEnvironment(opts?.still ? (getBakeEnvironment() ?? BAKE_ENVIRONMENT) : debugChoice("env"));
 
 // Model availability moved to ./modelAvailability. It is asked on paths that
 // never mount anything — a slot's context menu, the card-art backfill walking
@@ -260,7 +303,10 @@ export { hasModel, hasModelSync, modelUrlFor } from "./modelAvailability";
  */
 interface SharedGL {
   renderer: import("three").WebGLRenderer;
-  env: import("three").Texture;
+  /** The studio rigs' prefiltered HDRI — built on first use, see getStudioEnv. */
+  env?: Promise<import("three").Texture>;
+  /** The same, once it has resolved: a live rig switch applies it synchronously. */
+  envReady?: import("three").Texture;
   /** The daylight rig's sky and backdrop — built on first use, see getDaylight. */
   daylight?: { env: import("three").Texture; plate: import("three").Texture };
   /** Reflections built from a backdrop photograph, by its URL — see getBackdropEnv. */
@@ -443,11 +489,7 @@ function loadPlate(THREE: ThreeBundle["THREE"], url: string): Promise<import("th
   return p;
 }
 
-function getSharedGL(
-  THREE: ThreeBundle["THREE"],
-  RoomEnvironment: ThreeBundle["RoomEnvironment"],
-  hdr?: ThreeBundle["hdr"],
-): SharedGL {
+function getSharedGL(THREE: ThreeBundle["THREE"]): SharedGL {
   if (sharedGL) return sharedGL;
   const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
   /**
@@ -470,23 +512,6 @@ function getSharedGL(
   // the frame is "bright". A rig may override it — drawFrame applies each
   // viewer's own before every frame (ViewerEnvironment.exposure).
   renderer.toneMappingExposure = BASE_EXPOSURE;
-  // Image-based studio lighting carries the shading (composited metal/rough
-  // maps need real reflections); directionals only shape highlights.
-  const pmrem = new THREE.PMREMGenerator(renderer);
-  // venice_sunset_1k, which is what csgoskins light with — and METAL IS NOTHING
-  // BUT THIS. A metalness map only decides how much of the environment a surface
-  // mirrors; RoomEnvironment is a flat neutral box, so a correctly-metallic
-  // chrome case rendered against it still comes out flat grey. Recovering the
-  // metalness from g_tColorA.a did not make Butane Buddy's lighter look like
-  // steel until there was a sky and a ground for it to reflect.
-  //
-  // RoomEnvironment stays as the fallback: a failed fetch must degrade to the
-  // old look, not to a black scene.
-  const env = hdr
-    ? pmrem.fromEquirectangular(hdr).texture
-    : pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-  hdr?.dispose();
-  pmrem.dispose();
   // Losing the shared context takes every viewer with it rather than one, so it
   // is latched here and every live viewer is told. The next mount rebuilds it.
   renderer.domElement.addEventListener("webglcontextlost", (e) => {
@@ -497,7 +522,42 @@ function getSharedGL(
     sharedGL = null;
     for (const cb of [...contextLostSubscribers]) cb();
   });
-  return (sharedGL = { renderer, env });
+  return (sharedGL = { renderer });
+}
+
+/**
+ * The studio rigs' environment, prefiltered once per context.
+ *
+ * Async because the HDRI is fetched on first need (loadStudioHdr), and AWAITED
+ * by every mount that lights with it, so no mount ever renders against the
+ * fallback while the HDRI is still on its way and the next one against the HDRI.
+ */
+function getStudioEnv(
+  THREE: ThreeBundle["THREE"],
+  RoomEnvironment: ThreeBundle["RoomEnvironment"],
+  gl: SharedGL,
+): Promise<import("three").Texture> {
+  gl.env ??= loadStudioHdr().then((hdr) => {
+    // Image-based studio lighting carries the shading (composited metal/rough
+    // maps need real reflections); directionals only shape highlights.
+    const pmrem = new THREE.PMREMGenerator(gl.renderer);
+    // venice_sunset_1k, which is what csgoskins light with — and METAL IS NOTHING
+    // BUT THIS. A metalness map only decides how much of the environment a surface
+    // mirrors; RoomEnvironment is a flat neutral box, so a correctly-metallic
+    // chrome case rendered against it still comes out flat grey. Recovering the
+    // metalness from g_tColorA.a did not make Butane Buddy's lighter look like
+    // steel until there was a sky and a ground for it to reflect.
+    //
+    // RoomEnvironment stays as the fallback: a failed fetch must degrade to the
+    // old look, not to a black scene.
+    const env = hdr
+      ? pmrem.fromEquirectangular(hdr).texture
+      : pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+    hdr?.dispose();
+    pmrem.dispose();
+    return (gl.envReady = env);
+  });
+  return gl.env;
 }
 /** Live viewers wanting to know the shared context died under them. */
 const contextLostSubscribers = new Set<() => void>();
@@ -2177,8 +2237,8 @@ function releaseViewer() {
 export async function withSharedRenderer<T>(
   fn: (three: ThreeBundle["THREE"], renderer: import("three").WebGLRenderer) => Promise<T>,
 ): Promise<T> {
-  const { THREE, RoomEnvironment, hdr } = await loadThree();
-  const { renderer } = getSharedGL(THREE, RoomEnvironment, hdr);
+  const { THREE } = await loadThree();
+  const { renderer } = getSharedGL(THREE);
   try {
     return await fn(THREE, renderer);
   } finally {
@@ -3385,7 +3445,10 @@ async function buildViewer(
   mounted: { view?: HTMLCanvasElement } = {},
 ): Promise<ViewerHandle> {
   const mt = mountTimer();
-  const { THREE, OrbitControls, DecalGeometry, RoomEnvironment, cloneSkeleton, hdr,
+  // A studio rig (every card bake among them) starts its HDRI download now, so
+  // it arrives alongside three and the GLB instead of after them.
+  if (rigUsesStudioEnv(mountRig(opts))) void loadStudioHdr();
+  const { THREE, OrbitControls, DecalGeometry, RoomEnvironment, cloneSkeleton,
     EffectComposer, RenderPass, UnrealBloomPass, OutputPass } = await loadThree();
   mt.mark("three");
   throwIfAborted(signal);
@@ -3447,7 +3510,11 @@ async function buildViewer(
   // download isn't wasted either way.
   throwIfAborted(signal);
 
-  const { renderer, env: envTex } = getSharedGL(THREE, RoomEnvironment, hdr);
+  const gl = getSharedGL(THREE);
+  const { renderer } = gl;
+  // The studio rigs' HDRI, once this viewer has it — fetched only for a rig that
+  // reflects it (see the rig below and setEnvironment), so it is often null.
+  let envTex = gl.envReady ?? null;
   // This viewer's own visible surface. The shared renderer draws into its single
   // offscreen canvas; each frame is then blitted here. Keeping a real canvas per
   // viewer means layout, sizing, pointer events and OrbitControls all work
@@ -3534,7 +3601,7 @@ async function buildViewer(
   // except the re-read itself.
   // A bake follows the SERVER's rig when it names one: the cards land in its
   // store, so it alone decides how they are lit (Catalog.bakeEnvironment).
-  const rig = viewerEnvironment(opts?.still ? (getBakeEnvironment() ?? BAKE_ENVIRONMENT) : debugChoice("env"));
+  const rig = mountRig(opts);
   const L = { ...rig.lighting, ...(opts?.lighting ?? {}) };
   // Which preset those numbers came from, so a live re-light can skip the frames
   // where nothing changed — the poll runs every frame and the answer is the same
@@ -3550,6 +3617,12 @@ async function buildViewer(
   // shipped with the bundle, cached after the first viewer.
   const mountPhoto = rig.backdrop ? await loadPlate(THREE, rig.backdrop.image) : null;
   if (mountPhoto && rig.backdrop) scene.environment = getBackdropEnv(THREE, renderer, rig.backdrop.image, mountPhoto);
+  // The studio HDRI is awaited the same way, for the same reason: a studio rig
+  // (every card bake) or a scene whose photograph did not load lights by it.
+  // Its download started at the top of this build — see loadStudioHdr.
+  if (rigUsesStudioEnv(rig) || (rig.backdrop && !mountPhoto)) {
+    scene.environment = envTex = await getStudioEnv(THREE, RoomEnvironment, gl);
+  }
   let exposureNow = rig.exposure ?? BASE_EXPOSURE;
   scene.environmentIntensity = L.env;
   // Theirs too: the HDRI is a real place, so which way it faces decides where the
@@ -12739,8 +12812,10 @@ async function buildViewer(
         });
       }
     } else if (next.backdrop) {
-      // The studio sky until the photograph lands, then the scene's own.
-      scene.environment = envTex;
+      // The studio sky until the photograph lands, then the scene's own. (A
+      // viewer that never needed the studio sky keeps its current light for
+      // that beat rather than fetching the HDRI to show it for one.)
+      if (envTex) scene.environment = envTex;
       setBackdrop(null, false);
       applyPhotoBackdrop(next);
     } else if (next.daylight) {
@@ -12748,7 +12823,15 @@ async function buildViewer(
       scene.environment = day.env;
       setBackdrop(day.plate, true);
     } else {
-      scene.environment = envTex;
+      // A studio rig picked on a viewer that opened under another one: the
+      // HDRI may not have been fetched yet. Same arrival check as the map rigs.
+      if (envTex) scene.environment = envTex;
+      else {
+        void getStudioEnv(THREE, RoomEnvironment, gl).then((env) => {
+          envTex = env;
+          if (!disposed && rigKey === next.key) scene.environment = env;
+        });
+      }
       setBackdrop(null, false);
     }
     const lit = { ...next.lighting, ...(opts?.lighting ?? {}) };
