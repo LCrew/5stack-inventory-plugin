@@ -68,6 +68,7 @@ The 3D model extraction is now at pipeline version 38; run it once to get every 
 
 ### Bug Fixes
 
+- Switching "Verify composites" off in the Developer tab left it on, so that browser compared paint composites with the shared store but never saved any, and the pre-bake refused to run. Off now means off.
 - Editing an item's stickers or charm now re-renders its card. Card files were named only by wear, pattern and StatTrak, so moving, swapping or scratching a sticker kept the old picture until the cache was cleared.
 - A card whose paint failed to load, or which came out black, is retried instead of stored. This caused the Driver Gloves card to be black.
 - Paint composites saved to the shared store before the Safari fix are no longer used, since Safari could have stored a bare weapon for a Doppler there.

@@ -114,7 +114,10 @@ export function stickyFlag(name: string): boolean {
     const q = new URLSearchParams(location.search).get(name);
     if (q === "1") localStorage.setItem(key, "1");
     if (q === "0") localStorage.removeItem(key);
-    return !!localStorage.getItem(key);
+    // "1" only. The Developer tab's switches (devFlags.ts setFlag) store OFF as
+    // "0", which `!!getItem` read as ON: a flag switched on and off again there
+    // stayed on here for good.
+    return localStorage.getItem(key) === "1";
   } catch {
     return false;
   }
