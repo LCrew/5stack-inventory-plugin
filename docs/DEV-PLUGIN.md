@@ -53,6 +53,15 @@ Same steps as any plugin
 an **Inventory (dev)** tab on player profiles. Clear the **Player Profile Tab**
 label in the form if you don't want that.
 
+## Is my change live?
+
+⚙ **Plugin Settings** shows, under its title, "This page: build of …": the
+build the open page is running, stamped into the bundle at build time. When the
+server has a newer one it says so; reload. `build-info.json` on Pages is what
+the server has, which an old page cannot tell you on its own. The dev-plugin
+action takes about two minutes, and Pages can serve the previous entry file for
+up to ten more.
+
 ## Making a change
 
 ```bash
@@ -158,7 +167,9 @@ database instead.
    it back to the installed host returns the dev copy to the installed backend.
 
 Updating after a push: `./scripts/dev-backend.sh update` (once the
-**dev-backend** run is green). It restarts the dev backend, which ends an
+**dev-backend** run is green). After a pull that changes `k8s/dev/`, run
+`./scripts/dev-backend.sh` (no argument) first: `update` only restarts the pods
+and never re-applies the manifest. It restarts the dev backend, which ends an
 extraction **the dev backend itself** started (the page then says
 "Interrupted"); a run the installed plugin is doing carries on. Removing:
 `./scripts/dev-backend.sh remove`.

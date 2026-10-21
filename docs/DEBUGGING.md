@@ -158,7 +158,8 @@ registry is `src/devFlags.ts`.
 | `pivotdot` | a dot at the point an orbit drag rotates around |
 | `dualside` | the Dual Berettas laid out parallel instead of in the icon's tent (the layout the viewer had before 2026-10-21) |
 | `notwist` | first-person arms without the forearm twist solver, to tell whether the solver is what is wringing an arm |
-| `fpvfov` | first-person field of view in degrees (default 54, CS2's viewmodel_fov 68 converted); a wide one finds what is just off screen |
+| `fpvfov` | first-person field of view for guns, in degrees (default 54, CS2's viewmodel_fov 68 converted); a wide one finds what is just off screen |
+| `fpvknifefov`, `fpvknifepitch` | the knife camera's own field of view (46) and tilt (−3°); knives ignore every other first-person dial |
 | `perf` | per-frame timing HUD |
 | `inspectanim` | the idle inspect motion (also gates the holo drift) |
 | `compositelog` | every composite store lookup: generation, stem, `HIT`/`MISS`, uploads (not in the HUD) |
@@ -798,10 +799,14 @@ weapon no longer has, so the C4's old reload and shot go too.
 **Which buttons show.** First person offers Fire, Reload, Inspect and Deploy
 only where `anims/index.json` lists the action, less what `CANNOT` in
 `src/viewmodelClip.ts` rules out: the C4 neither fires nor reloads, and the
-Zeus fires but recharges. Knives have no fire or reload clip, so they get
-neither. The edit view decides "held" from `craftHolding`, the sticky toggle
-AND an item that can be held; an agent opened after a rifle used to inherit
-the rifle's buttons.
+Zeus fires but recharges. A knife's Fire is its left-click slash: the
+extractor files `light_miss1_*` as `fire` and `light_miss2_*` as `fire2`
+(no gun folder has either), and the viewer alternates the two under "fire",
+as the game does, with no muzzle flash. Knives have no reload. The right-click
+stab (`heavy_miss1_*`) is not extracted yet: it needs a button and an icon,
+and the game's knife glyph is not served from `/anims/icons/`. The edit view
+decides "held" from `craftHolding`, the sticky toggle AND an item that can be
+held; an agent opened after a rifle used to inherit the rifle's buttons.
 
 **Rare inspects.** `lookat02_*` and `lookat03_*` are extracted as `inspect2`
 and `inspect3`. Pressing Inspect during an inspect steps to the weapon's next
@@ -815,18 +820,29 @@ rule, where an inspect never interrupts itself. These have them:
 | C4, Butterfly Knife | `inspect2`, `inspect3` |
 | Survival (`canis`), Paracord (`cord`), Classic (`css`), Falchion, Nomad (`outdoor`), Skeleton, Stiletto, Ursus, Talon (`widowmaker`) | `inspect2` |
 
-They appear after `step viewmodel-anims` and a `CLIP_SCHEMA` bump
-([DEV-PLUGIN.md](DEV-PLUGIN.md#two-backends-one-models-folder)).
+They appear after `step viewmodel-anims`; the clips are keyed on the index's
+`_built` time, so a page load picks them up
+([DEV-PLUGIN.md](DEV-PLUGIN.md#two-backends-one-models-folder)). A rare inspect
+TURNS THE WEAPON IN THE HAND — the Deagle's spin, the C4's toss — through
+`weapon_offset`, which the next paragraph covers; before that, the hands went
+through the motion around a weapon that never moved.
 
-**What moves the weapon's parts.** A gun's magazine, bolt and trigger come from
-its GLB's own `reload`, `shoot` and `draw` clips (`PART_CLIP`). Knives and
-dual-wield rigs take the viewmodel clip's `prop` tracks instead (`fpvProps`):
-a knife has no part clips, and the Dual Berettas' pistols are carried into the
-hands by `weapon_hand_l`/`weapon_hand_r`, which only the prop tracks pose. Before
-that, both pistols stayed at bind, 20 inches apart and out of frame, and showed
-only during a reload or a shot. A dual rig's GLB clips keep only their scale
-tracks (the magazine hidden for the swap), so two clips never average on one
-bone. Turning off frustum culling was tried first and changed nothing.
+**What moves the weapon's parts.** Two sources, chosen per action by
+`propBones` in `src/viewer3d.ts`:
+
+| Weapon | Prop tracks (the viewmodel clip's own skeleton tracks) | GLB part clips (`PART_CLIP`: reload, shoot, draw) |
+| --- | --- | --- |
+| knives, dual rigs (`fpvProps`) | all of them, every action | scale tracks only |
+| every other weapon | `weapon_offset` always; everything on an action with no part clip (the inspects) | as authored, minus `weapon`/`weapon_offset` |
+
+A knife has no part clips, and the Dual Berettas' pistols are carried into the
+hands by `weapon_hand_l`/`weapon_hand_r`, which only the prop tracks pose.
+Before that, both pistols stayed at bind, 20 inches apart and out of frame, and
+showed only during a reload or a shot. Two clips on one bone average into
+neither, hence the scale-only part clips there. `weapon_offset` is identity in
+every plain clip; the rare inspects key it (and the Deagle's also its slide,
+magazine and trigger). Turning off frustum culling was tried first for the Dual
+Berettas and changed nothing.
 
 **Attachments on a held weapon.** Everything is placed once against the weapon
 at mount (see the gotcha "The weapon never moves"), and each kind has its own
@@ -837,7 +853,16 @@ bridge from the item view's pose to the held one:
 | stickers | cut against skinned twins of the meshes (`weaponMeshes`) |
 | charm | its icon-pose anchor through `charmPoseFix` |
 | StatTrak module, name tag | `liveFrames`: bakePose's attachment frames, measured off the live skeleton (`moduleFrames`); without them `placeAttachedModule` fell back to `anchor.pos` and the C4's label hung in the air |
-| a dual rig's stickers and charm hook | `followDualParts`: each takes its pistol's motion since the twins, every frame |
+| stickers and the charm hook, through a clip | `followDualParts`: each takes its carrier bone's motion since the twins, every frame — a dual rig's pistol, every other weapon's `weapon_offset` |
+| StatTrak module, name tag, through a clip | attached to the carrier bone when held (`bone` from the anchor file, else `weapon_offset`) |
+
+Two Dual Berettas specifics. An UNPLACED charm hangs from `weapon_r`'s
+`keychain` attachment (`dualKeychainPoint`): the gun has no entry in
+`charmAnchors.json` because the extractor measures those against
+`weapon_offset`, and the fallback hung it from the left pistol. And a plate on
+its own bone reads along that bone as the pose turned it — the name tag
+applies `weapon_r`'s clip rotation, or it read 65 degrees off the barrel in
+the tent and stuck out sideways.
 
 To check a module, compare `window.__mount.probeNameplate()` in the item view
 and held (`mount.html?…&nametag=x` with and without `arms=`). Matching `flat`
@@ -845,10 +870,29 @@ and `gapMm` mean it sits on the body the same way; on 2026-10-21 the C4, AK-47,
 Deagle and Karambit matched exactly. A plate riding a bone (the Butterfly's)
 reports bone-local numbers, so check that one by eye.
 
+**The knife camera.** Knives take none of the gun dials (yaw, pitch, the eye
+offsets, the push and the lens shift): they keep the clip's own eye, tilted by
+`fpvknifepitch` (−3°, a nudge above the reference), with their own field of
+view `fpvknifefov` (46, about CS2's default `viewmodel_fov` 60; guns keep
+`fpvfov` 54). Checked against CS2's held preview (Inventory → inspect →
+held, 1920×1080): the Butterfly's blade tip at 41% across / 58% down against
+the game's 41% / 66%, the Karambit's hands within a few percent. The gun dials
+had lifted both hands to mid-frame with the forearms in shot.
+
 **Driving it.** `drive.mjs` with steps that call
 `window.__mount.setFpvAction("inspect")` and take a shot every second shows a
-clip frame by frame. `&fpvfov=95` widens the view to find something just off
+clip frame by frame; call it twice for the rare inspect. `&fpvfov=95` (or
+`&fpvknifefov=…` for a knife) widens the view to find something just off
 screen; `&nameplateprobe=1` draws the plate's anchor.
+
+**When the app and mount.html disagree,** find which files the app actually
+fetched before anything else:
+`performance.getEntriesByType("resource").filter(e => /anims\//.test(e.name))`
+in a `drive.mjs` step on tools/standalone. That is how the C4 bug that
+survived every fix turned out to be the app fetching from
+`https://skins.5stack.gg` (the asset CDN, see
+[DEV-PLUGIN.md](DEV-PLUGIN.md#two-backends-one-models-folder)) while every
+check had looked at the dev host.
 
 **Known and left alone:** on a few inspects (the AWP's) bare upper arm shows
 beside an agent's sleeve. The sleeve is weighted almost entirely to
@@ -880,6 +924,15 @@ beyond the sleeve's end, changed nothing visible.
   right glove's palm; `backOfRightHand` gives `arm_lower_R` a half turn about
   the hand's own axis before the bake. Card bakes only: the live viewer plays
   `inspect_loop`.
+- **The page tells you which build it runs.** ⚙ Plugin Settings shows "This
+  page: build of …" (stamped into the bundle at build time) and says when the
+  server has a newer one. If a fix seems missing, read that line before
+  anything else; the deployed files can be checked with
+  `curl https://lcrew.github.io/5stack-inventory-plugin/build-info.json`.
+- **A backend can hand the app another asset host.** `/api/catalog` returns
+  `assetOrigin`; when it is `https://skins.5stack.gg`, every model, texture and
+  clip comes from upstream's CDN, not this mount. The dev backend is pinned to
+  its own mount (`INVENTORY_ASSET_CDN=off`).
 - **A debug switch has to be in the registry.** `debugFlag` stores `?name=1`
   but answers from `src/devFlags.ts`, so a name missing there reads its
   default however the URL is set. `dualside` shipped that way for an hour.
