@@ -63,6 +63,7 @@ The 3D model extraction is now at pipeline version 37; run it once to get every 
 ### Features
 
 - **Glove model cards**: the eight bare glove models get cards baked from their 3D model, kept in the shared card store.
+- **Pre-bake paint composites**: Asset Cache has a button that composites every painted weapon and knife in anyone's inventory and saves it to the shared store, with progress, a stop button and the skins that failed. Run it once after an extraction, from a desktop browser, and nobody has to download a weapon's 20–40 MB of inputs to open a skin; card bakes skip them too.
 
 ### Bug Fixes
 
@@ -95,6 +96,7 @@ The 3D model extraction is now at pipeline version 37; run it once to get every 
 - **Base model on listings**: knife and glove catalog listings carry their base model's id, name and image.
 - **Sticker masks endpoint**: the sticker bounds endpoint returns each weapon body's sticker mask.
 - **Bake lighting**: the catalog reports which lighting the server bakes cards under. Charm shading data includes detail textures.
+- **Composite pre-bake list**: `GET /api/admin/composites/prebake` lists every distinct weapon and knife composite people own, and which are already stored. Administrators can upload composites for items anyone owns, not only their own.
 
 ## Dev Tooling & Deployment
 
@@ -106,6 +108,7 @@ The 3D model extraction is now at pipeline version 37; run it once to get every 
 - **Test tools**: `mount.html` renders any item with any options from the URL, `tools/standalone` runs the real UI against a fake inventory, and `glb-info`/`knife-anchors` read and apply the game's model data.
 - **Safari test runner**: `shoot-webkit.mjs` renders the same test pages in Safari's engine (WebKit) headlessly, for bugs that only Safari shows.
 - **Live camera drags**: `drag.mjs` turns the camera with the mouse after a viewer has loaded and screenshots each step, for bugs that only appear once the view moves.
+- **Composite store in the standalone mock**: `tools/standalone/mock-server.mjs` answers the pre-bake list from the fake inventory, accepts composite uploads after checking their names the way the backend does, and serves them back.
 
 ### Removed
 
