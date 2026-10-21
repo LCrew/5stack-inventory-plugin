@@ -76,8 +76,10 @@ import {
 import { createViewerCursor, type CursorMode } from "./viewerCursor";
 // Bundled, not fetched from anyone's CDN: CC0 from Poly Haven, see
 // src/assets/README.md. `?url` so Vite emits it as an asset and hands back a
-// base-correct URL instead of trying to parse 1.4MB of Radiance HDR as a module.
-import HDR_URL from "./assets/venice_sunset_1k.hdr?url";
+// base-correct URL instead of trying to parse Radiance HDR as a module.
+// Half the 1k original's resolution, and widened back on load: see
+// upsampleStudioHdr for why that, and not the file as it is.
+import HDR_URL from "./assets/venice_sunset_512.hdr?url";
 
 export { loadPaintDef, type PaintDef } from "./paintComposite";
 
@@ -251,11 +253,11 @@ function loadStudioHdr(): Promise<import("three").DataTexture | null> {
     const bytes = fetch(HDR_URL)
       .then((r) => (r.ok ? r.blob() : null))
       .catch(() => null);
-    const [{ RGBELoader }, blob] = await Promise.all([loadThree(), bytes]);
+    const [{ THREE, RGBELoader }, blob] = await Promise.all([loadThree(), bytes]);
     if (!blob) return null;
     const url = URL.createObjectURL(blob);
     try {
-      return await new RGBELoader().loadAsync(url);
+      return upsampleStudioHdr(THREE, await new RGBELoader().loadAsync(url));
     } catch {
       return null;
     } finally {
@@ -263,6 +265,69 @@ function loadStudioHdr(): Promise<import("three").DataTexture | null> {
     }
   })();
   return studioHdrPromise;
+}
+
+/**
+ * The width the studio HDRI is prefiltered at: the 1k original's.
+ *
+ * PMREMGenerator sizes its cube from the SOURCE (width / 4, rounded down to a
+ * power of two), so the 512-wide file as shipped would prefilter into a 128
+ * cube instead of 256 and shift every roughness level, not only the sharpest.
+ * Measured on card bakes against the 1k file: used as is, the glove came out
+ * with 6.9% of its pixels more than 2 levels off (99th percentile 7); widened
+ * back to 1024 first, the worst of a Doppler knife, a foil sticker, a matte AK
+ * and a glove was mean 0.06 levels, 99th percentile 1 level, 0.02% of pixels
+ * more than 2 off (isolated texels at the glint's soft edge), in Chrome and in
+ * WebKit alike. The detail the half-size file lost is only the sun's sharpest
+ * texels, which the prefilter spreads anyway; it is 371kB where the 1k one was
+ * 1.4MB. Method: docs/DEBUGGING.md §4.12.
+ */
+const STUDIO_HDR_WIDTH = 1024;
+
+/**
+ * Bilinear resize of the decoded HDRI (half-float RGBA) to STUDIO_HDR_WIDTH,
+ * in place on the loader's texture so its type, filters and orientation stay
+ * exactly the loader's. Longitude wraps, as the panorama does; latitude clamps
+ * at the poles. Once per session, ~20ms.
+ */
+function upsampleStudioHdr(THREE: ThreeBundle["THREE"], tex: import("three").DataTexture): import("three").DataTexture {
+  const { width: w, height: h, data } = tex.image as { width: number; height: number; data: Uint16Array };
+  if (w >= STUDIO_HDR_WIDTH || !(data instanceof Uint16Array)) return tex;
+  const { fromHalfFloat, toHalfFloat } = THREE.DataUtils;
+  const W = STUDIO_HDR_WIDTH;
+  const H = Math.round((h * W) / w);
+  const src = new Float32Array(w * h * 4);
+  for (let i = 0; i < src.length; i++) src[i] = fromHalfFloat(data[i]);
+  const out = new Uint16Array(W * H * 4);
+  const one = toHalfFloat(1);
+  for (let y = 0; y < H; y++) {
+    const sy = ((y + 0.5) * h) / H - 0.5;
+    const y0 = Math.floor(sy);
+    const ty = sy - y0;
+    const r0 = Math.min(Math.max(y0, 0), h - 1) * w;
+    const r1 = Math.min(Math.max(y0 + 1, 0), h - 1) * w;
+    for (let x = 0; x < W; x++) {
+      const sx = ((x + 0.5) * w) / W - 0.5;
+      const x0 = Math.floor(sx);
+      const tx = sx - x0;
+      const c0 = ((x0 % w) + w) % w;
+      const c1 = (x0 + 1) % w;
+      const a = (r0 + c0) * 4;
+      const b = (r0 + c1) * 4;
+      const c = (r1 + c0) * 4;
+      const d = (r1 + c1) * 4;
+      const o = (y * W + x) * 4;
+      for (let k = 0; k < 3; k++) {
+        const top = src[a + k] + (src[b + k] - src[a + k]) * tx;
+        const bot = src[c + k] + (src[d + k] - src[c + k]) * tx;
+        out[o + k] = toHalfFloat(top + (bot - top) * ty);
+      }
+      out[o + 3] = one;
+    }
+  }
+  tex.image = { data: out, width: W, height: H };
+  tex.needsUpdate = true;
+  return tex;
 }
 
 /** Whether a rig reflects the studio HDRI at mount — see loadStudioHdr. The
@@ -541,7 +606,7 @@ function getStudioEnv(
     // Image-based studio lighting carries the shading (composited metal/rough
     // maps need real reflections); directionals only shape highlights.
     const pmrem = new THREE.PMREMGenerator(gl.renderer);
-    // venice_sunset_1k, which is what csgoskins light with — and METAL IS NOTHING
+    // venice_sunset, which is what csgoskins light with — and METAL IS NOTHING
     // BUT THIS. A metalness map only decides how much of the environment a surface
     // mirrors; RoomEnvironment is a flat neutral box, so a correctly-metallic
     // chrome case rendered against it still comes out flat grey. Recovering the
