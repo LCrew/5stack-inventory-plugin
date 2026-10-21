@@ -41,6 +41,8 @@ from your machine (`https://inventory-dev.fulm.eu/...` for the dev copy).
 | `models/sticker-masks.json`, `models/<key>.stickermask.{hd,legacy}.webp` | where a sticker may show, per body (R channel, UV0) | open the webp; the R channel is the mask |
 | `models/stattrak-art.json`, `models/stattrak/knife_digits_color.webp` | the knife digit atlas with its real alpha cut-out | the alpha channel is the scratch shape |
 | `models/extract-version.json` | pipeline version, CS2 build, per-step durations | `curl` |
+| `models/<key>.inputs[.hd]/meta.json` | a weapon's composite inputs; `textures2048` names the 2048 copies of the ones over 2048 (v38+, HD guns only) | `curl` |
+| `models/**/*.{glb,json}.gz` | gzip copies the servers send instead (v38+); deleted at the start of every extraction, rewritten by its last step | `curl -H 'Accept-Encoding: gzip' -I` |
 | `paints/materials/<name>.vmat.json` | a sticker's, charm's or paint's compiled material (`m_shaderName`, `m_intParams`, `m_floatParams`, `m_textureParams`, dynamic expressions) | `curl` + `python3 -m json.tool` |
 | `paints/textures/<name>.webp` | the textures those materials name | download and inspect channel by channel |
 | `/api/catalog/sticker-bounds/<model>` | sticker slots **per body** (`mesh: body_hd/body_legacy`, offset, scale), bounds, masks, charm quads | `curl` |
@@ -371,7 +373,9 @@ Add an extraction step to `scripts/extract-models.sh`:
    - Encode with `cwebp -exact -lossless` (keeps RGB under alpha 0). Keep raw
      dumps on the mount so a parser fix doesn't need another run.
 4. The node has `python3` but no imaging library. Read PNGs with `zlib` (see
-   `png_alpha_range` in the stattrak-art step).
+   `png_alpha_range` in the stattrak-art step). For per-pixel work over whole
+   images use Node instead (typed arrays, zlib on a thread pool):
+   `scripts/lighten-assets.mjs` has an 8-bit PNG decoder and encoder.
 5. Test the step's Python locally before shipping. Pull the heredoc into a file,
    then run its functions on a downloaded sample (the C4's attachment dump, a
    generated RGBA PNG). `bash -n scripts/extract-models.sh` checks the shell.
@@ -455,6 +459,52 @@ scratch map as its R channel BEFORE resizing: its alpha is 0, Pillow
 premultiplies RGBA on resize, and the scratches silently become all zero. That
 made a correct shader look like it under-wore.
 
+### 4.12 Making an asset smaller without changing what renders
+
+`scripts/lighten-assets.mjs` (steps `inputs-2048` and `precompress`, v38) adds
+lighter copies beside the originals and never replaces one: the installed plugin
+shares the mount and is an older client. Before adding another such copy, measure
+it the way these were:
+
+1. **Compare the render targets, not screenshots.** A throwaway rig page
+   (`tools/shadertest/zz-*.ts`, §3.4) composites the same skin twice and passes
+   `reference` to `compositePaint`, whose callback receives the raw `albedoRT` and
+   `rmRT`. Read both with `readRenderTargetPixels` and report mean and max
+   absolute difference and the share of pixels more than 2 levels off, for the
+   albedo and for roughness (G) and metalness (B) separately. Run it in Chrome
+   AND WebKit (Safari decodes the inputs in JS, `src/rawPng.ts`).
+2. **Pick skins that exercise the inputs.** Legacy finishes, knives and Dopplers
+   use bundles that are all 2048 or smaller, so they only prove the harness
+   (exactly 0). The 4096 inputs are on HD gun bodies: case hardening (Five-SeveN
+   | Heat Treated), gunsmith style 8 (Glock-18 | AXIA), custom paints, and a
+   projected style at cap 2048 (`maxSize`).
+3. **Then the whole viewer.** Render `mount.html` against a local models dir
+   with and without the copies (`MODELS_DIR`, see `tools/shadertest/vite.config.ts`)
+   and diff the PNGs.
+
+Results on 2026-10-21. 2048 copies at cap 2048 (and 1024): every skin within 2
+levels, 0% of pixels over 2, mean under 0.12 in every channel, in both
+browsers. The full viewer differed in 11 (Chrome) and 3 (WebKit) of 2.8M pixels,
+specular sparkles on bare metal. The copies match a numpy reference within 1
+level and keep the RGB under zero alpha: 83% of the AK-47's `color.png` has
+alpha 0 and colour underneath.
+
+Two candidates were measured and REJECTED:
+
+- **The grunge texture** (`gun_grunge_psd_f3419fed_ca3c5c93.webp`, 7.5MB,
+  shared by every paint). Lossy WebP keeps its alpha lossless, and that alpha
+  is most of the file: q98 saves only 31% and moved AK-47 | Case Hardened's
+  metalness by up to 14 levels (1.7% of pixels over 2). A 1024 copy saves 64% and
+  moved up to 29% of pixels by more than 2. It stays lossless at 2048.
+- **EXT_meshopt_compression for the GLBs.** Lossless is possible (no
+  quantisation, no filters, index sequences rather than triangles, so not even a
+  triangle's indices rotate): 15 models came back identical through three's
+  decoder, every attribute, index, skin and animation track. But it only
+  repacks the float bytes gzip already packs: 8 models were 8.12MB as `.gz` and
+  7.95MB as meshopt + gzip, 2% less, for a second copy of every GLB and a
+  decoder in the client. Its usual 5-10x comes from quantising, which moves
+  vertices.
+
 ## 5. Gotchas
 
 - **Disk.** Headless Chrome profiles are large; use the runners in this repo,
@@ -465,6 +515,13 @@ made a correct shader look like it under-wore.
   `ao.png` alpha is noPaint. Any loader for them must keep RGB under alpha 0,
   which Safari's image path does not do for a fully transparent file; go
   through `loadRawPngTexture` (src/rawPng.ts).
+- **A `.gz` beside a mount file is sent instead of it**, and nginx never checks
+  that the two still match. The extraction deletes every `.gz` before its first
+  step and `precompress` writes them back last. Anything else that rewrites a
+  file under `/models` must delete that file's `.gz`.
+- **Composite inputs come in two sizes** from v38. At a cap of 2048 or less the
+  compositor reads the `textures2048` copies, so when chasing an input texel,
+  look at the `.2048.png` too.
 - **Headless WebGL** needs `--use-angle=swiftshader --enable-unsafe-swiftshader`;
   without them every render is blank and looks like a shader bug.
 - **The live path needs an on-screen host.** An off-screen host can be treated
