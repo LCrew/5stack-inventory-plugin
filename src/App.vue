@@ -169,7 +169,7 @@ import { isCompact, isCoarse, reducedMotion } from "./responsive";
 import { revealInScroller, scrollFade, scrollPanelToTop } from "./dom";
 import { hasModel, hasModelSync } from "./modelAvailability";
 import { INCOMPLETE } from "./viewerSentinel";
-import { prefetchViewer3d, snapshotModel, viewersIdle, viewerStats } from "./viewer3dLazy";
+import { snapshotModel, viewersIdle, viewerStats } from "./viewer3dLazy";
 import type { CameraState, ViewerHandle, ViewerKind, StickerPlacement, CharmPlacement } from "./viewer3d";
 import { resolveViewerModel, resolveViewerModelSync, type ViewerTarget } from "./viewerModel";
 import "./style.css";
@@ -7566,9 +7566,8 @@ const { staleBuild, reloadPage } = useBuildCheck();
 onMounted(() => {
   window.addEventListener("keydown", onGlobalKey);
   load();
-  // Idle-time fetch of the viewer chunk, so the first item opened doesn't pay
-  // for it — see prefetchViewer3d.
-  prefetchViewer3d();
+  // No idle-time fetch of the viewer chunk: the first 3D view fetches it and
+  // three together instead — see the top of ./viewer3dLazy.
   // Admin app load asks the panel where the invsim cvars stand — that answer is
   // what lights the gear badge before /admin is ever opened. Read-only: this
   // used to write three of the operator's server configs as a side effect.
