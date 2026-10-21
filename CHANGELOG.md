@@ -158,5 +158,6 @@ The 3D model extraction is now at pipeline version 38; run it once to get every 
 
 ### Bug Fixes
 
+- The dev copy's 3D Models page said "Interrupted" all through an extraction the installed plugin was running on the shared models folder (it starts one by itself after a CS2 update), and Re-extract would have cleared that run's lock and started a second one over it. It now shows that run as running, with its progress and log and a note saying whose it is, and refuses to start another.
 - The headless render runner (`shoot.mjs`) now deletes its temporary Chrome profile and finishes as soon as the page is done. Leftover profiles had grown to several gigabytes.
 - The hot-swap dev server answered a refresh on any page below the plugin (such as `/admin`) with an error instead of the app.

@@ -5967,11 +5967,55 @@ const IDLE_STATE: ExtractState = {
 let extractChild: ChildProcess | null = null;
 let extractLog: string[] = [];
 
+/**
+ * A run in ANOTHER POD on this same models folder.
+ *
+ * The dev backend (k8s/dev) shares the mount with the installed plugin's, and
+ * the installed one starts a run by itself after a CS2 update. Its process is
+ * invisible from here — pids are per pod — so "running in the file, no child
+ * here" read as a killed run: the panel said Interrupted throughout a live
+ * extraction, and the Start button would have cleared its lock and begun a
+ * second run over the top of it. The run's FILES are visible, though: the
+ * backend that spawned it streams the log as the script writes, and the script
+ * rewrites its progress file as it goes. The lock still there and either file
+ * touched recently is a live run somewhere; a killed one stops touching them.
+ */
+const RUN_FRESH_MS = 10 * 60_000;
+async function runningElsewhere(): Promise<boolean> {
+  if (extractChild) return false;
+  if (!(await fs.stat(EXTRACT_LOCK_FILE).catch(() => null))) return false;
+  const now = Date.now();
+  for (const f of [EXTRACT_LOG_FILE, EXTRACT_PROGRESS_FILE]) {
+    const st = await fs.stat(f).catch(() => null);
+    if (st && now - st.mtimeMs < RUN_FRESH_MS) return true;
+  }
+  return false;
+}
+/** The last lines of the run log on disk — the tail a run in another pod never
+ *  puts in this process's memory. */
+async function extractLogTail(): Promise<string> {
+  try {
+    const fh = await fs.open(EXTRACT_LOG_FILE, "r");
+    try {
+      const { size } = await fh.stat();
+      const len = Math.min(size, 64 * 1024);
+      const buf = Buffer.alloc(len);
+      await fh.read(buf, 0, len, size - len);
+      return buf.toString("utf8").split("\n").filter((l) => l.trim()).slice(-EXTRACT_LOG_LINES).join("\n");
+    } finally {
+      await fh.close();
+    }
+  } catch {
+    return "";
+  }
+}
+
 async function readExtractState(): Promise<ExtractState> {
   try {
     const raw = await fs.readFile(EXTRACT_STATE_FILE, "utf8");
     const parsed = { ...IDLE_STATE, ...(JSON.parse(raw) as Partial<ExtractState>) };
     if (parsed.state === "running" && !extractChild) {
+      if (await runningElsewhere()) return parsed;
       return { ...parsed, state: "interrupted", error: "The backend restarted while extraction was running." };
     }
     return parsed;
@@ -6228,7 +6272,9 @@ async function liveExtractionPid(): Promise<number | null> {
     // No /proc (non-Linux dev box): fall back to trusting the pid, since the
     // pod-restart collision this guards against can't happen there anyway.
     if (cmdline && !cmdline.includes("extract-models")) {
-      await fs.rm(EXTRACT_LOCK_FILE, { force: true }).catch(() => {});
+      // Not ours — but it may be another pod's live run, whose pid means
+      // nothing here. Its lock is not ours to clear either.
+      if (!(await runningElsewhere())) await fs.rm(EXTRACT_LOCK_FILE, { force: true }).catch(() => {});
       return null;
     }
     return pid;
@@ -6237,6 +6283,8 @@ async function liveExtractionPid(): Promise<number | null> {
   }
 }
 
+const ELSEWHERE_ERROR =
+  "An extraction is already running in another backend on this models folder — the installed plugin's starts one by itself after a CS2 update. Wait for it to finish.";
 /** Create the lock exclusively. Returns why it failed rather than throwing, and
  *  clears a lock whose owner is gone so a killed run can't wedge this forever. */
 async function acquireExtractLock(): Promise<{ ok: true } | { ok: false; error: string }> {
@@ -6253,6 +6301,9 @@ async function acquireExtractLock(): Promise<{ ok: true } | { ok: false; error: 
       const owner = await liveExtractionPid();
       if (owner !== null) {
         return { ok: false, error: `Extraction is already running (pid ${owner}).` };
+      }
+      if (await runningElsewhere()) {
+        return { ok: false, error: ELSEWHERE_ERROR };
       }
       // Owner is gone — a killed run, or a pod restart that left the file
       // behind. Clear it here rather than relying on liveExtractionPid, which
@@ -6407,9 +6458,12 @@ app.get("/api/admin/extract-models", async (request, reply) => {
   if (denied) return reply.status(denied.code).send({ error: denied.error });
   const stored = await readExtractState();
   // A run can be owned by a process we replaced, so "is it running" is the lock,
-  // not just our own child handle.
-  const live = extractChild != null || (await liveExtractionPid()) !== null;
-  const status = live ? { ...stored, state: "running" as const, log: extractLog.join("\n") } : stored;
+  // not just our own child handle — or by another pod on the same mount.
+  const elsewhere = await runningElsewhere();
+  const live = extractChild != null || elsewhere || (await liveExtractionPid()) !== null;
+  const status = live
+    ? { ...stored, state: "running" as const, log: elsewhere ? await extractLogTail() : extractLog.join("\n") }
+    : stored;
   const logBytes = await fs.stat(EXTRACT_LOG_FILE).then((s) => s.size, () => 0);
   const progress = live ? await readExtractProgress() : null;
   return {
@@ -6417,6 +6471,7 @@ app.get("/api/admin/extract-models", async (request, reply) => {
     ...status,
     logBytes,
     progress,
+    elsewhere,
     blocked: live ? null : await cs2InstallProblem(),
     autoExtractWaiting: autoExtract.waiting(),
     workers: await extractWorkerInfo(),

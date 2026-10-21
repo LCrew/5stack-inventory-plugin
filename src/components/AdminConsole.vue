@@ -2089,7 +2089,13 @@ const BTN_DANGER =
                   <!-- Ahead of "Never run": pressing the button can't help until
                        the install is there, and the backend log was the only
                        place that said so. -->
-                  <template v-if="extractStatus.blocked">
+                  <!-- Whose run it is, when it is not this backend's. Without it the
+                       page read "Interrupted" through the installed plugin's own
+                       run after a CS2 update, with nothing to say one was going. -->
+                  <span v-if="extractLive && extractStatus.elsewhere" class="block font-medium text-[hsl(var(--tac-amber))]">
+                    Running in the installed plugin's backend, which shares this models folder and starts a run by itself after a CS2 update. The progress here is read from its files.
+                  </span>
+                  <template v-else-if="extractStatus.blocked">
                     <span class="block font-medium text-destructive">{{ extractStatus.blocked }}</span>
                     <span v-if="extractStatus.autoExtractWaiting" class="block text-muted-foreground">
                       Extraction starts by itself once it's ready — checked every 5 minutes.

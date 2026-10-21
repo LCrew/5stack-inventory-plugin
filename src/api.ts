@@ -1379,6 +1379,10 @@ export interface ExtractStatus {
    *  older backends. */
   blocked?: string | null;
   autoExtractWaiting?: boolean;
+  /** The run is in ANOTHER backend on the same models folder — the installed
+   *  plugin's beside the dev one — read from its files. Absent on older
+   *  backends. */
+  elsewhere?: boolean;
   /** Wall-clock of the last successful run, and the per-step breakdown of it.
    *  Null on mounts stamped before v5 — "unknown", not zero. */
   lastRunSeconds?: number | null;
