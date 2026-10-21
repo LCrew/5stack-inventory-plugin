@@ -18,11 +18,19 @@
 //     stickers?: [{ id, x?, y?, r?, w? }] }
 // and item ids come from cs2-lib (see backend/src/catalog.ts getItemIdByName).
 // MOCK_LOADOUT is the /api/loadout answer, inline JSON (default []).
+// MOCK_CARDS=stub answers every instance card with a 1x1 PNG, so the card
+// backfill never runs. Use it to time a COLD 3D open: a backfill bake loads the
+// same GLB and composite into the viewer's caches, and the open you then time
+// finds them already there.
 //
 // Editing an item (POST /api/inventory/<id>) is answered here and applied to
 // the in-memory inventory, so Save -> card re-bake can be tested; other writes
 // are proxied to a backend that will refuse them without a session. Card
-// uploads are accepted and dropped.
+// uploads are accepted and dropped. With MOCK_COMPOSITES=keep, paint composite
+// uploads are kept in memory and served back from /api/composites/: the first
+// open of a skin stores it, and a later browser session against the same server
+// gets a store HIT (the real backend's store, which this cannot write to, is
+// still read for anything not kept here).
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { extname, join, resolve, dirname } from "node:path";
@@ -56,6 +64,12 @@ const INVENTORY = seed.map((e, n) => ({
 }));
 
 const CARDS = new Map();
+const COMPOSITES = new Map();
+// 1x1 transparent PNG — see MOCK_CARDS.
+const STUB_PNG = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+  "base64",
+);
 const MIME = {
   ".html": "text/html",
   ".js": "text/javascript",
@@ -116,6 +130,23 @@ createServer(async (req, res) => {
     if (card && CARDS.has(card[1])) {
       res.writeHead(200, { "content-type": "image/png" });
       return res.end(CARDS.get(card[1]));
+    }
+    if (card && process.env.MOCK_CARDS === "stub") {
+      res.writeHead(200, { "content-type": "image/png" });
+      return res.end(STUB_PNG);
+    }
+    // Composite store, in memory: written by an interactive viewer on a miss,
+    // read back by the next mount of the same skin.
+    const comp = process.env.MOCK_COMPOSITES === "keep" && p.match(/^\/api\/composites?\/([^/]+)\/([^/]+)$/);
+    if (comp && req.method === "POST") {
+      const chunks = [];
+      for await (const c of req) chunks.push(c);
+      COMPOSITES.set(`${comp[1]}/${comp[2]}`, Buffer.concat(chunks));
+      return json(res, { file: decodeURIComponent(comp[2]) });
+    }
+    if (comp && COMPOSITES.has(`${comp[1]}/${comp[2]}`)) {
+      res.writeHead(200, { "content-type": comp[2].endsWith(".png") ? "image/png" : "image/webp" });
+      return res.end(COMPOSITES.get(`${comp[1]}/${comp[2]}`));
     }
     if (p === "/api/loadout") return json(res, LOADOUT);
     if (p === "/api/inventory") return json(res, INVENTORY);
