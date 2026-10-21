@@ -8823,23 +8823,46 @@ if (MDEBUG) {
                   leave-active-class="transition duration-100 ease-in"
                   leave-to-class="opacity-0 scale-105"
                 >
-                  <div :key="selected" class="grid h-full w-full min-h-0 place-items-center">
+                  <!-- With the music kit's players under it, the art takes the row
+                       that is LEFT (minmax(0,1fr)) and shrinks to it: at its own
+                       height it pushed the players off the bottom of the stage
+                       whenever the sheet was open. -->
+                  <div
+                    :key="selected"
+                    class="grid h-full w-full min-h-0 place-items-center"
+                    :class="(focusRow?.item?.audio || focusRow?.item?.mvpAudio) && 'grid-rows-[minmax(0,1fr)_auto] gap-3'"
+                  >
                     <ItemArt
                       :inst="isSpecial(selected) ? null : cellInstance(selected)"
                       :image="isSpecial(selected) ? specialImage(selected) : cellImage(selected)"
-                      :class="cn('w-[min(64%,520px)] object-contain animate-float motion-reduce:animate-none', !isSkinned(focusRow) && 'opacity-50')"
+                      :class="cn('max-h-full min-h-0 w-[min(64%,520px)] object-contain animate-float motion-reduce:animate-none', !isSkinned(focusRow) && 'opacity-50')"
                       style="filter: drop-shadow(0 22px 30px rgba(0,0,0,0.55))"
                     />
                     <!-- A second grid row under the art, and only for a music kit.
                          This stage has no 3D for one (isNo3d), so the flat icon was
                          the entire focus view of an item whose whole content is a
                          sound. Wider than the tile's copy because there is room:
-                         this is the screen you land on to study one item. -->
-                    <MusicPlayer
-                      v-if="focusRow?.item?.audio"
-                      :src="focusRow.item.audio"
-                      class="w-[min(80%,420px)]"
-                    />
+                         this is the screen you land on to study one item.
+                         Both tracks, labelled, the way the editor lays them out:
+                         one bare bar left the round-MVP anthem out entirely and
+                         said nothing about which song was playing. -->
+                    <div
+                      v-if="focusRow?.item?.audio || focusRow?.item?.mvpAudio"
+                      class="flex w-[min(80%,420px)] flex-col gap-2"
+                    >
+                      <div class="flex items-center justify-between">
+                        <span class="text-f10 uppercase tracking-cs1 text-muted-foreground">{{ tr('inventory.music.preview', 'Preview') }}</span>
+                        <MusicVolume wide />
+                      </div>
+                      <div v-if="focusRow.item.audio" class="flex items-center gap-2">
+                        <span class="w-16 flex-none text-f10 uppercase tracking-cs1 text-muted-foreground">{{ tr('inventory.music.full_song', 'Full song') }}</span>
+                        <MusicPlayer :src="focusRow.item.audio" :volume="false" class="min-w-0 flex-1" />
+                      </div>
+                      <div v-if="focusRow.item.mvpAudio" class="flex items-center gap-2">
+                        <span class="w-16 flex-none text-f10 uppercase tracking-cs1 text-muted-foreground">{{ tr('inventory.music.mvp', 'MVP') }}</span>
+                        <MusicPlayer :src="focusRow.item.mvpAudio" :volume="false" class="min-w-0 flex-1" />
+                      </div>
+                    </div>
                   </div>
                 </Transition>
               </template>

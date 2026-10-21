@@ -3938,6 +3938,44 @@ async function buildViewer(
     opts?.firstPerson ??
     (!opts?.still && kind === "weapon" && debugText("fpv") ? { arms: debugText("fpv")! } : null);
 
+  /**
+   * THE CARD SHOWS BOTH GLOVES FROM THE BACK.
+   *
+   * `tools_preview_pose` holds the hands flat and apart, but mirrored the wrong
+   * way for a card: the left shows its back and the right its PALM, so every
+   * glove card had one hand with the finish and one with the plain inside of
+   * the glove — the emblem, the print and the knuckle armour all on one side.
+   * A half turn of the right hand about its own axis (wrist to middle finger)
+   * brings its back round to face the same way as the left's, thumbs inward,
+   * the way the game's own glove icons stand. Turned at `arm_lower_R`, so the
+   * cuff and both forearm twists go with the hand as one piece and nothing
+   * stretches; the wrist stays where it was.
+   *
+   * Card bakes only: the live viewer plays `inspect_loop`, which turns the hands
+   * over by itself.
+   */
+  function backOfRightHand() {
+    const lower = object.getObjectByName("arm_lower_R");
+    const hand = object.getObjectByName("hand_R");
+    const tip = object.getObjectByName("finger_middle_0_R") ?? object.getObjectByName("finger_middle_meta_R");
+    if (!lower?.parent || !hand || !tip) return;
+    object.updateMatrixWorld(true);
+    const at = hand.getWorldPosition(new THREE.Vector3());
+    const axis = tip.getWorldPosition(new THREE.Vector3()).sub(at);
+    if (axis.lengthSq() < 1e-12) return;
+    const turn = new THREE.Matrix4()
+      .makeTranslation(at.x, at.y, at.z)
+      .multiply(new THREE.Matrix4().makeRotationAxis(axis.normalize(), Math.PI))
+      .multiply(new THREE.Matrix4().makeTranslation(-at.x, -at.y, -at.z));
+    // world' = turn * world, back into the parent's space.
+    const local = new THREE.Matrix4()
+      .copy(lower.parent.matrixWorld)
+      .invert()
+      .multiply(turn)
+      .multiply(lower.matrixWorld);
+    local.decompose(lower.position, lower.quaternion, lower.scale);
+    object.updateMatrixWorld(true);
+  }
   if (poseClip && !fpvSpec) {
     const clip = poseClip;
     const mixer = new THREE.AnimationMixer(object);
@@ -3946,6 +3984,7 @@ async function buildViewer(
     // not the posed vertex positions — see flattenToBindPose for why baking the
     // pose into the geometry breaks every coordinate we hand to the game.
     mixer.update(0);
+    if (kind === "glove" && opts?.still) backOfRightHand();
   } else if (poseClip && fpvSpec) {
     // FIRST PERSON KEEPS THE SKELETON, AT BIND.
     //

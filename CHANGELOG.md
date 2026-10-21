@@ -13,6 +13,7 @@ The 3D model extraction is now at pipeline version 38; run it once to get every 
 - **Knives and gloves grouped by model**: the knife and glove Craft tabs open on one card per model, such as Butterfly Knife or Bloodhound Gloves, with a finish count. Finish cards carry the grey model label and the price, like owned cards.
 - **Leaner Replace list**: Replace lists only the base weapons that can take the slot on that side and aren't already in the loadout.
 - **Reorder stickers**: drag sticker tiles onto each other, or use the ‹ › buttons, to change slot order, which decides which sticker is drawn on top. A moved sticker stays where it was on the weapon.
+- **Music kit preview in the focus view**: the focus view plays both tracks, labelled Full song and MVP, with one volume control above them, the same way the editor does. It showed one unlabelled player and no MVP anthem.
 - **Music kit preview in the editor**: Edit on a music kit plays the full song and, separately, its round-MVP anthem, each with play/pause and seek. One volume control sits above both and shares the level with every other player.
 - **One volume bar per music kit list**: the music kit sheet's Owned and Craft tabs have a single volume control in the toolbar instead of a slider on every card.
 - **Agent pose and motion in the sidebar**: an agent's pose (Ready, Stand, Open) moved from the top-left corner of the 3D view into the right-hand column, like the pet's controls. A new Motion setting makes the agent breathe and look around (Idle), move through all three poses in turn (Cycle), or hold still for placing patches (Still).
@@ -79,6 +80,7 @@ The 3D model extraction is now at pipeline version 38; run it once to get every 
 
 ### Bug Fixes
 
+- Glove cards showed the right glove palm-up: the pose the card is baked from turns the left hand's back to the camera and the right hand's palm. Both gloves now show their backs, thumbs inward, as the game's glove icons do. Stored glove cards keep the old picture until ⚙ → Asset Cache → Clear renders.
 - Switching "Verify composites" off in the Developer tab left it on, so that browser compared paint composites with the shared store but never saved any, and the pre-bake refused to run. Off now means off.
 - Editing an item's stickers or charm now re-renders its card. Card files were named only by wear, pattern and StatTrak, so moving, swapping or scratching a sticker kept the old picture until the cache was cleared.
 - A card whose paint failed to load, or which came out black, is retried instead of stored. This caused the Driver Gloves card to be black.
