@@ -26,6 +26,9 @@
 //   va=0,1.57             camera orbit angles (radians), one shot each
 //   ve=0.8                raise the camera this many radians (look down)
 //   charm=/images/….webp  hang a charm (charmseed= its pattern)
+//   arms=sporty_gloves    first person in these arms, as the app mounts it
+//                         (armspm= the glove finish, armswear= armsseed=,
+//                         sleeve=agents/models/ctm_sas/ctm_sas the agent)
 //   t=0,1.5,3             seconds after load to shoot, per angle (live only)
 //   still=0               the LIVE viewer (render loop, holo drift, inspect
 //                         idle) instead of the card/bake path (default 1)
@@ -133,6 +136,14 @@ async function shoot(va: number, plain: boolean) {
       charmSurfaces: bounds.charmQuads,
       // A standalone sticker/patch: model=__sticker&kind=sticker&decal=/images/….webp
       decal: q.get("decal") ? { image: q.get("decal")!, wear: num("decalwear", 0) } : null,
+      firstPerson: q.get("arms")
+        ? {
+            arms: q.get("arms")!,
+            action: "idle",
+            armsPaint: q.get("armspm") ? { material: q.get("armspm")!, wear: num("armswear", 0.1), seed: num("armsseed", 1) } : null,
+            sleeve: q.get("sleeve"),
+          }
+        : undefined,
     } as never);
     // The live handle, for a driver script: e.g. drive.mjs calling
     // window.__mount.setFpvAction("reload") between shots (with t=0,60 so the

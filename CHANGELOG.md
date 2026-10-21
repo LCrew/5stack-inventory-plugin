@@ -46,6 +46,7 @@ The 3D model extraction is now at pipeline version 38; run it once to get every 
 
 ### Bug Fixes
 
+- In first person the agent's sleeve wore the equipped glove's finish up to the elbow. Only the gloves take the finish now, and the sleeve keeps the agent's own look.
 - Stickers and charms disappeared in first person. They stay on the gun now, hidden only where the hand covers them, and a charm swings as the gun moves through reloads and shots.
 - In Safari, Doppler, Gamma Doppler, Marble Fade and other region-painted finishes showed the bare weapon on 23 models, including the Bayonet, Butterfly Knife, M9 Bayonet and AWP. Safari empties a fully transparent image on its way to the GPU, which is how those models' paint-region masks are stored, so Safari now decodes them byte-exact itself.
 - The Butane Buddy's liquid filled the whole ball once the camera was turned to look down at the gun. It now settles against the same gravity the charm hangs by, so the fill stays level and sloshes as you turn the gun.

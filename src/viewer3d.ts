@@ -11708,8 +11708,15 @@ async function buildViewer(
         const mesh = n as import("three").Mesh;
         if (!(mesh as unknown as { isMesh?: boolean }).isMesh) return;
         const mat = mesh.material as import("three").MeshStandardMaterial;
-        // Skin is not painted — the finish has no say over the forearm.
-        if (!mat || /bare_arm/i.test(mat.name ?? "")) return;
+        // THE GLOVE ONLY. Every glove material in the arm models is
+        // `glove_<model>_<side>` (glove_sporty_left, glove_hardknuckle_black…);
+        // the skin is `bare_arm_*`, and the agent's grafted sleeve keeps the
+        // agent's own (sleeve_ctm_sas, tm_leet_v2_body_variantg). This used to
+        // paint everything but the skin, so the sleeve wore the glove's finish
+        // up to the elbow, and since the sleeve's material is the cached agent
+        // model's own, the agent wore it too. Matched positively, and the
+        // sleeve mesh is skipped by name as well.
+        if (!mat || !/^glove_/i.test(mat.name ?? "") || /firstperson_sleeves/i.test(mesh.name ?? "")) return;
         mat.map = comp.albedo;
         mat.color.setScalar(1);
         mat.roughnessMap = comp.rm;
