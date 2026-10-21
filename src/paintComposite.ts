@@ -1939,7 +1939,10 @@ export interface CompositeResult {
 // killed. Halving to 1k quarters the cost, and at phone screen sizes the
 // detail difference isn't visible anyway.
 const COARSE_POINTER = typeof matchMedia !== "undefined" && matchMedia("(pointer: coarse)").matches;
-const MAX_COMPOSITE_SIZE = COARSE_POINTER ? 1024 : 2048;
+/** What a coarse-pointer device (a phone) caps every composite at, whatever the
+ *  style. Exported so the admin pre-bake can bake phone copies from a desktop. */
+export const PHONE_COMPOSITE_SIZE = 1024;
+const MAX_COMPOSITE_SIZE = COARSE_POINTER ? PHONE_COMPOSITE_SIZE : 2048;
 // Projected styles (2 spraypaint, 5 anodized airbrushed) build the pattern from a
 // triplanar projection of the 1024 position map. The flame/spray graphic is
 // high-frequency, and at 2048 the projection undersamples it — Deagle | Blaze's
@@ -1947,7 +1950,7 @@ const MAX_COMPOSITE_SIZE = COARSE_POINTER ? 1024 : 2048;
 // 4096 (matching its 4096 color/metalness inputs; the position map is natively
 // 1024 for the game too, so resolution here is the atlas, not the input). Match
 // it on desktop; coarse-pointer devices stay at 1024 for memory.
-const MAX_COMPOSITE_SIZE_PROJECTED = COARSE_POINTER ? 1024 : 4096;
+const MAX_COMPOSITE_SIZE_PROJECTED = COARSE_POINTER ? PHONE_COMPOSITE_SIZE : 4096;
 
 type CacheEntry = { result: Omit<CompositeResult, "release">; refs: number; dispose: () => void };
 type RendererCache = Map<string, CacheEntry>;
@@ -2026,6 +2029,18 @@ export interface CompositeReferenceCtx extends ValveInputs {
   makeRT: (srgb: boolean) => import("three").WebGLRenderTarget;
 }
 
+/**
+ * The resolution cap a composite of `def` is made and STORED at on this device
+ * (`maxSize`: see compositePaint). It is part of the shared store's key
+ * (CompositeIdentity.cap), so anything that names a stored composite without
+ * rendering it, like the admin pre-bake in compositePrebake.ts, must ask here
+ * rather than repeat the constants, or it bakes files no viewer looks up.
+ */
+export function compositeSizeCap(def: PaintDef, maxSize?: number): number {
+  const wantsProjection = def.style === 2 || def.style === 5;
+  return Math.min(wantsProjection ? MAX_COMPOSITE_SIZE_PROJECTED : MAX_COMPOSITE_SIZE, maxSize ?? Infinity);
+}
+
 export async function compositePaint(
   three: THREE,
   renderer: import("three").WebGLRenderer,
@@ -2083,10 +2098,7 @@ export async function compositePaint(
   // projected skin is sixteen times the pixels of a 1024² one for an answer the
   // eye cannot use mid-gesture. The full-size composite still runs when the
   // drag stops, so nothing ships at proxy resolution.
-  const sizeCap = Math.min(
-    wantsProjection ? MAX_COMPOSITE_SIZE_PROJECTED : MAX_COMPOSITE_SIZE,
-    opts.maxSize ?? Infinity,
-  );
+  const sizeCap = compositeSizeCap(def, opts.maxSize);
   const key = `${def.pattern ?? "-"}|${def.overlay ?? "-"}|${def.style}|${wear.toFixed(4)}|${seed}|${wkey}|d${opts.debug ?? 0}|${def.caseHardening ? `ch${def.caseHardeningRamp ?? "-"}${def.chRampOffset}` : ""}|a${def.patternAddrH}_${def.patternAddrV}|c${sizeCap}`;
   const cache = cacheFor(renderer);
   const hit = opts.reference || opts.forcePort ? undefined : cache.get(key);

@@ -64,6 +64,7 @@ The 3D model extraction is now at pipeline version 37; run it once to get every 
 
 - **Glove model cards**: the eight bare glove models get cards baked from their 3D model, kept in the shared card store.
 - **Smaller cards**: new cards are stored as WebP, about a tenth of the size of the PNG they replace, so the inventory grid loads much faster with no visible difference. Cards already stored keep showing as they are, and cards baked in Safari are converted by the server.
+- **Pre-bake paint composites**: Asset Cache has a button that composites every painted weapon and knife in anyone's inventory and saves it to the shared store, with progress, a stop button and the skins that failed. Run it once after an extraction, from a desktop browser, and nobody has to download a weapon's 20–40 MB of inputs to open a skin; card bakes skip them too.
 
 ### Bug Fixes
 
@@ -103,6 +104,7 @@ The 3D model extraction is now at pipeline version 37; run it once to get every 
 - **Sticker masks endpoint**: the sticker bounds endpoint returns each weapon body's sticker mask.
 - **Bake lighting**: the catalog reports which lighting the server bakes cards under. Charm shading data includes detail textures.
 - **WebP cards**: card uploads accept WebP as well as PNG, checked by their magic bytes, and a PNG upload is converted to WebP when `cwebp` is installed. The catalog lists the accepted formats as `cardFormats`, and a card is served in whichever format is stored, under the same `.png` URL.
+- **Composite pre-bake list**: `GET /api/admin/composites/prebake` lists every distinct weapon and knife composite people own, and which are already stored. Administrators can upload composites for items anyone owns, not only their own.
 
 ## Dev Tooling & Deployment
 
@@ -117,6 +119,7 @@ The 3D model extraction is now at pipeline version 37; run it once to get every 
 - **Dev copy asset route (opt-in)**: `scripts/dev-backend.sh assets on` serves the dev copy's models, item art and music from the dev backend, so this fork's caching and compression can be tried without touching the installed plugin. `assets off` puts it back.
 - **Caching guide**: `docs/CACHING.md` explains how files are cached and compressed, how to check it, and how to add an optional Cloudflare cache rule safely.
 - **Card store in the mock server**: `tools/standalone` keeps baked cards (`CARDS_DIR` saves them between runs) and can play a backend from before WebP cards (`MOCK_CARD_FORMATS=png`).
+- **Composite store in the standalone mock**: `tools/standalone/mock-server.mjs` answers the pre-bake list from the fake inventory, accepts composite uploads after checking their names the way the backend does, and serves them back.
 
 ### Removed
 

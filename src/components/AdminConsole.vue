@@ -23,6 +23,7 @@ import {
   RefreshCw,
 } from "lucide-vue-next";
 import SkinTests from "./SkinTests.vue";
+import CompositePrebake from "./CompositePrebake.vue";
 import ValveParity from "./ValveParity.vue";
 import { FLAGS, activeFlags, flagValue, flagsVersion, setFlag } from "../devFlags";
 import {
@@ -1231,6 +1232,13 @@ const BTN_DANGER =
                   clearing them is only for reclaiming disk now rather than later.
                 </p>
               </div>
+
+              <!-- Fill the composite store for everything people own, from this
+                   browser. See src/compositePrebake.ts. -->
+              <CompositePrebake
+                @notify="(m: string, k: 'error' | 'success') => emit('notify', m, k)"
+                @stored="refreshCacheStats"
+              />
 
               <div class="space-y-2">
                 <p class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">

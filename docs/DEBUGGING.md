@@ -173,6 +173,9 @@ node tools/standalone/drive.mjs http://127.0.0.1:8787/ tools/standalone/steps.ex
 
 `mock-server.mjs` answers the signed-in endpoints itself and the knife/glove
 catalog from your working tree's `catalog.ts`; everything else is proxied.
+It also keeps its own in-memory composite store (uploads, reads, the admin
+pre-bake list) so a pre-bake can be run end to end without touching a real
+store; see [§4.13](#413-pre-baking-the-composite-store).
 `drive.mjs` runs a JSON list of steps (JS to run, wait, screenshot) and prints
 console errors. Saves don't work (there's no session), except item edits and
 card uploads, which the mock keeps. Cards go through the backend's own
@@ -518,6 +521,60 @@ The rules are in [CACHING.md](CACHING.md); this is how to tell which one broke.
 
 `npm run check:assets` covers the shared Node logic (ETags, 304s, `.gz`
 freshness, ranges, HEAD).
+
+### 4.13 Pre-baking the composite store
+
+**Asset Cache → Pre-bake paint composites** composites every weapon and knife
+skin anyone owns in the admin's browser and uploads it, so no viewer or card
+bake has to fetch that weapon's composite inputs. Card bakes read the store
+but never write it, so without a pre-bake the store only holds what someone
+opened in 3D. Run it after every extraction: `EXTRACT_VERSION` is in the
+composite generation, so a new extraction starts an empty store.
+
+How it fits together:
+
+- `GET /api/admin/composites/prebake?gen=<gen>` (backend/src/compositeStore.ts,
+  `compositeWorkList`) returns the distinct `(model, legacy, material, wear,
+  seed)` tuples over `owned_items`, wear rounded to 4 places and missing
+  wear/seed read as 0 exactly as the viewer does, plus the stems already in
+  that generation's directory. Gloves are left out: their compositor never
+  touches this store. An old backend answers 404 and the button says so.
+- `src/compositePrebake.ts` names each stem with `compositeKey` and the cap
+  from `compositeSizeCap` (2048, 4096 for projected styles; optional 1024
+  phone copies), skips the stored ones, and calls `compositePaint` with the
+  viewer's `persist` identity and `persistWrite: true`, one skin at a time on
+  its own WebGL renderer. It waits for each upload (`compositeStoreOutcome`),
+  frees the render targets and evicts inputs the next skin doesn't need.
+- The upload route lets an administrator store a tuple anyone owns (checked
+  with `compositeWorkList` again); everyone else can only store their own.
+
+To check it:
+
+- `?compositelog=1` logs every lookup, upload and refusal (`[composite] …`).
+  A `key drift` line means `compositeKey` and `compositeStem` disagree, and
+  nothing will ever hit. Only the stem and kind count: Safari's canvas can't
+  encode WebP and sends a PNG under the `.webp` name, and the backend names
+  the file by its bytes (transcoding to WebP when ImageMagick is there), so a
+  different extension is expected.
+- Run it twice. The second run must report everything as already stored. A
+  skin that bakes again every time is being stored under a name viewers
+  don't look up.
+- Then open a baked skin with `?compositelog=1`: the viewer (and a card bake)
+  must log `HIT` for the same stem. On 2026-10-21, AK-47 | First Class
+  (0.3653) and Bayonet | Doppler (0.0072, #674) baked 4 composites in
+  Chrome (17 s, swiftshader) and WebKit (5 s); both later runs skipped all 4,
+  card bakes hit both stems, and `?compositeverify=1` in the editor found
+  the stored pairs byte-identical to a fresh render.
+- Locally, against the mock: build with `VITE_INVENTORY_API`, start
+  `mock-server.mjs` with an inventory that has the items you care about, open
+  `/admin/assets?compositelog=1` and press the button (`drive.mjs` can click
+  `[data-test=prebake-start]`). The mock rejects any upload whose filename is
+  not the backend's stem, and `GET /__mock/composites` lists what landed.
+  `MOCK_PREBAKE=0` plays an old backend.
+- To prove a stored pair is bit-identical to a fresh render, open the skin with
+  `?compositeverify=1` ([§4.9](#49-it-works-in-chrome-but-not-in-safari)
+  explains why that matters for Safari). The pre-bake refuses to run while it
+  is on, since verification compares instead of storing.
 
 ## 5. Gotchas
 

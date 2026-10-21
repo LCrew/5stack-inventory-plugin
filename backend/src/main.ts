@@ -39,6 +39,7 @@ import {
 } from "./stickerMarkup.ts";
 import { patchSlotsFor, warmPatchSlots } from "./agentPatchSlots.ts";
 import { GRID_SLOT_IDS, GRID_SLOTS, resolveGrid } from "./loadoutGrid.ts";
+import { compositeStem, compositeWear, compositeWorkList, storedStems, type OwnedPaintRow } from "./compositeStore.ts";
 import {
   CARD_FILE_RE,
   CARD_FORMATS,
@@ -1158,30 +1159,40 @@ app.get("/api/share/unfurl", async (request, reply) => {
 });
 
 // ---- Composite store routes ---------------------------------------------------
-// Filename builder. MUST agree with compositeKey() in src/compositeStore.ts.
-//
-// Unlike renderKeyForRow, a disagreement here is harmless: the backend derives
-// the name from the identity it verified, so a drift means clients simply never
-// hit the cache. It can never serve one skin's pixels under another's name.
-// The POST response echoes the derived name so a mismatch shows up in the
-// client console instead of silently costing every hit.
-const safeSeg = (s: string) => s.replace(/[^A-Za-z0-9._-]+/g, "_").replace(/^_+|_+$/g, "");
-function compositeStem(id: {
-  model: string; legacy: boolean; material: string; wear: number; seed: number; cap: number;
-}) {
-  return [
-    safeSeg(id.model),
-    id.legacy ? "legacy" : "hd",
-    safeSeg(id.material.replace(/\.(vcompmat|vmat)\.json$/i, "")),
-    Math.min(Math.max(id.wear, 0), 1).toFixed(4),
-    Math.max(0, Math.trunc(id.seed)),
-    `c${id.cap}`,
-  ].join("__");
-}
+// The filename builder (compositeStem) lives in ./compositeStore.ts beside the
+// pre-bake work list, so both name a skin the same way and the standalone mock
+// can import them. It MUST agree with compositeKey() in src/compositeStore.ts.
 // Only the caps the client can actually composite at (see MAX_COMPOSITE_SIZE and
 // MAX_COMPOSITE_SIZE_PROJECTED). Bounded so a client cannot invent an unlimited
 // number of variants of the same skin.
 const COMPOSITE_CAPS = new Set([1024, 2048, 4096]);
+
+type CompositeClaim = { model: string; legacy: boolean; material: string; wear: number; seed: number };
+/** Does this user own an item that composites to this tuple? The wear/seed pair
+ *  is effectively unique per instance, so it is matched first in SQL. */
+async function ownedBy(steamId: string, c: CompositeClaim): Promise<boolean> {
+  const { rows } = await pool.query(
+    `SELECT item_id FROM inventory.owned_items
+      WHERE steam_id = $1 AND seed = $2 AND ROUND(wear::numeric, 4) = ROUND($3::numeric, 4)`,
+    [steamId, c.seed, c.wear],
+  );
+  return getItemsByIds(rows.map((r: { item_id: number }) => Number(r.item_id))).some(
+    (i) => i.model === c.model && i.paintMaterial === c.material && !!i.legacyPaint === c.legacy,
+  );
+}
+/** Does ANYONE own one? Matched by compositeWorkList, i.e. exactly as the
+ *  pre-bake list named it (missing wear/seed read as 0, the viewer's default). */
+async function ownedByAnyone(c: CompositeClaim): Promise<boolean> {
+  const { rows } = await pool.query<OwnedPaintRow>(
+    `SELECT item_id, wear, seed FROM inventory.owned_items WHERE COALESCE(seed, 0) = $1`,
+    [c.seed],
+  );
+  const wear = compositeWear(c.wear);
+  return compositeWorkList(rows).some(
+    (e) =>
+      e.model === c.model && e.material === c.material && e.legacy === c.legacy && compositeWear(e.wear) === wear,
+  );
+}
 
 // Fastify's default bodyLimit is 1MB, which silently 413s every composite
 // before the handler ever runs — a lossless 2k pair is a few MB and a 4k
@@ -1234,14 +1245,16 @@ app.post<{ Params: { gen: string; file: string } }>("/api/composite/:gen/:file",
   // actually owns: the wear/seed pair is effectively unique per instance, so
   // this bounds the blast radius of a doctored client to its own items rather
   // than to every viewer of that skin.
-  const { rows } = await pool.query(
-    `SELECT item_id FROM inventory.owned_items
-      WHERE steam_id = $1 AND seed = $2 AND ROUND(wear::numeric, 4) = ROUND($3::numeric, 4)`,
-    [identity.steamId, seed, wear],
-  );
-  const owns = getItemsByIds(rows.map((r: { item_id: number }) => Number(r.item_id))).some(
-    (i) => i.model === model && i.paintMaterial === material && !!i.legacyPaint === legacy,
-  );
+  //
+  // An administrator is the exception, for the pre-bake (Asset Cache ->
+  // Pre-bake composites): their browser composites skins OTHER people own, so
+  // for them the bound is "someone on this instance owns it". That is checked
+  // with the same function that built the admin's work list, so whatever the
+  // list offered is accepted here, null wear/seed rows included.
+  const owns =
+    identity.role === "administrator"
+      ? await ownedByAnyone({ model, legacy, material, wear, seed })
+      : await ownedBy(identity.steamId, { model, legacy, material, wear, seed });
   if (!owns) return reply.status(403).send({ error: "not your item" });
 
   const stem = compositeStem({ model, legacy, material, wear, seed, cap });
@@ -1334,6 +1347,26 @@ for (const route of ["/api/composites/:gen/:file", "/composites/:gen/:file"]) {
     }
   });
 }
+
+// The pre-bake work list (admins): every distinct weapon/knife composite anyone
+// owns, and — given the client's generation — which of them are already stored.
+// The admin's browser composites the rest one at a time and uploads them
+// through the route above. See src/compositePrebake.ts.
+//
+// Only the cap-less identity comes from here. The cap depends on the finish's
+// style and the device (compositeSizeCap in src/paintComposite.ts), so the
+// client names the final stem with the same compositeKey the viewer uses.
+// `stored` is null without a usable `gen`; an old backend has no route at all,
+// and the panel disables the button on that 404, saying why.
+app.get<{ Querystring: { gen?: string } }>("/api/admin/composites/prebake", async (request, reply) => {
+  const denied = await requireAdmin(request);
+  if (denied) return reply.status(denied.code).send({ error: denied.error });
+  const { rows } = await pool.query<OwnedPaintRow>(`SELECT item_id, wear, seed FROM inventory.owned_items`);
+  const items = compositeWorkList(rows);
+  const dir = request.query.gen ? compositeDir(request.query.gen) : null;
+  const stored = dir ? storedStems(await fs.readdir(dir).catch(() => [] as string[]), items) : null;
+  return { items, stored };
+});
 
 // Trim the whole composites tree to COMPOSITE_CACHE_BYTES, least-recently-used
 // first, across EVERY generation.

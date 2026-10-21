@@ -24,9 +24,20 @@
 // are proxied to a backend that will refuse them without a session. Card
 // uploads are kept and served back (see the card store below: CARDS_DIR,
 // MOCK_CARD_FORMATS).
+//
+// The shared COMPOSITE STORE is answered here too, in memory and isolated from
+// the real backend's: uploads (POST /api/composite/...) are checked the way the
+// backend checks them (the filename must be the stem backend/src/compositeStore.ts
+// derives from the identity, and someone in MOCK_INVENTORY must own it), then
+// kept, and reads (/api/composites/...) serve only what was uploaded. The admin
+// pre-bake's work list (/api/admin/composites/prebake) comes from MOCK_INVENTORY
+// through the backend's own compositeWorkList, and /api/admin/cache gets fake
+// sizes so the Asset Cache tab renders. GET /__mock/composites lists what is
+// stored. MOCK_PREBAKE=0 answers the work list 404, like a backend that
+// predates it; MOCK_ADMIN=0 answers every admin route 403.
 import { createServer } from "node:http";
 import { rmSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { extname, join, resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -34,6 +45,7 @@ import { fileURLToPath } from "node:url";
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const cat = await import(join(REPO, "backend/src/catalog.ts"));
 const { cardFormatOf, CARD_FORMATS, findCard, readCard, storeCard } = await import(join(REPO, "backend/src/cardStore.ts"));
+const store = await import(join(REPO, "backend/src/compositeStore.ts"));
 const DIST = process.argv[2];
 if (!DIST) {
   console.error("usage: node --experimental-strip-types tools/standalone/mock-server.mjs <dist dir>");
@@ -75,6 +87,32 @@ await mkdir(CARDS_DIR, { recursive: true });
 //                PNG uploads stored as they come, WebP refused (400)
 //   refuse-webp  one that advertises WebP but refuses it anyway
 const CARD_MODE = process.env.MOCK_CARD_FORMATS ?? "";
+/** gen -> Map<file, Buffer>: the in-memory composite store. */
+const COMPOSITES = new Map();
+const ADMIN = process.env.MOCK_ADMIN !== "0";
+const PREBAKE = process.env.MOCK_PREBAKE !== "0";
+const readBody = async (req) => {
+  const chunks = [];
+  for await (const c of req) chunks.push(c);
+  return Buffer.concat(chunks);
+};
+const status = (res, code, body) => {
+  res.writeHead(code, { "content-type": "application/json" });
+  res.end(JSON.stringify(body));
+};
+// The same identity check the backend's upload route makes (as an admin):
+// someone in the inventory owns an item that composites to this tuple.
+const ownedByAnyone = (id) =>
+  store
+    .compositeWorkList(INVENTORY)
+    .some(
+      (e) =>
+        e.model === id.model &&
+        e.legacy === id.legacy &&
+        e.material === id.material &&
+        store.compositeWear(e.wear) === store.compositeWear(id.wear) &&
+        e.seed === id.seed,
+    );
 const MIME = {
   ".html": "text/html",
   ".js": "text/javascript",
@@ -161,6 +199,70 @@ createServer(async (req, res) => {
     if (stored) {
       res.writeHead(200, { "content-type": stored.type });
       return res.end(stored.body);
+    }
+    // ---- composite store (see the header) ----
+    if (p.startsWith("/api/admin/") && !ADMIN) return status(res, 403, { error: "Only administrators can manage caches." });
+    if (p === "/api/admin/composites/prebake") {
+      if (!PREBAKE) return status(res, 404, { message: `Route GET:${p} not found`, error: "Not Found", statusCode: 404 });
+      const items = store.compositeWorkList(INVENTORY);
+      const gen = url.searchParams.get("gen");
+      const stored = gen ? store.storedStems([...(COMPOSITES.get(gen)?.keys() ?? [])], items) : null;
+      return json(res, { items, stored });
+    }
+    if (p === "/api/admin/cache") {
+      let files = 0;
+      let bytes = 0;
+      for (const g of COMPOSITES.values()) for (const b of g.values()) (files++, (bytes += b.length));
+      const z = { files: 0, bytes: 0 };
+      const cards = (await readdir(CARDS_DIR).catch(() => [])).length;
+      return json(res, { renders: { files: cards, bytes: 0 }, paints: z, images: z, models: z, composites: { files, bytes }, music: z, parts: {} });
+    }
+    if (p === "/__mock/composites") {
+      const out = [];
+      for (const [gen, g] of COMPOSITES) for (const [file, b] of g) out.push({ gen, file, bytes: b.length });
+      return json(res, out);
+    }
+    const cup = req.method === "POST" && p.match(/^\/api\/composite\/([^/]+)\/([^/]+)$/);
+    if (cup) {
+      const gen = decodeURIComponent(cup[1]);
+      const file = decodeURIComponent(cup[2]);
+      const q = Object.fromEntries(url.searchParams);
+      const body = await readBody(req);
+      const magic = body.subarray(0, 4).toString("latin1");
+      const ext = magic === "\x89PNG" ? "png" : magic === "RIFF" && body.subarray(8, 12).toString("latin1") === "WEBP" ? "webp" : null;
+      const id = {
+        model: q.model ?? "",
+        legacy: q.legacy === "1",
+        material: q.material ?? "",
+        wear: Number(q.wear),
+        seed: Number(q.seed),
+        cap: Number(q.cap),
+      };
+      if (!ext || !["albedo", "rm"].includes(q.kind) || ![1024, 2048, 4096].includes(id.cap))
+        return status(res, 400, { error: "bad composite" });
+      // The backend names the file itself: the stem from the identity, the
+      // extension from the bytes (Safari sends a PNG under a .webp name). A
+      // client whose STEM differs would never hit, so the mock refuses that
+      // outright where the backend only echoes its own name back.
+      const name = `${store.compositeStem(id)}.${q.kind}.${ext}`;
+      if (file.replace(/\.(webp|png)$/, "") !== name.replace(/\.(webp|png)$/, "")) {
+        console.log(`[mock] composite KEY DRIFT: client ${file} vs backend ${name}`);
+        return status(res, 400, { error: `key drift: the backend names it ${name}` });
+      }
+      if (!ownedByAnyone(id)) return status(res, 403, { error: "not your item" });
+      const g = COMPOSITES.get(gen) ?? new Map();
+      COMPOSITES.set(gen, g);
+      if (g.has(name)) return json(res, { ok: true, file: name, existed: true });
+      g.set(name, body);
+      console.log(`[mock] composite stored ${gen}/${name} ${(body.length / 1048576).toFixed(2)}MB`);
+      return json(res, { ok: true, file: name });
+    }
+    const cget = p.match(/^\/(?:api\/)?composites\/([^/]+)\/([^/]+)$/);
+    if (cget) {
+      const b = COMPOSITES.get(decodeURIComponent(cget[1]))?.get(decodeURIComponent(cget[2]));
+      if (!b) return status(res, 404, { error: "not found" });
+      res.writeHead(200, { "content-type": cget[2].endsWith(".webp") ? "image/webp" : "image/png" });
+      return res.end(req.method === "HEAD" ? undefined : b);
     }
     if (p === "/api/loadout") return json(res, LOADOUT);
     if (p === "/api/inventory") return json(res, INVENTORY);
