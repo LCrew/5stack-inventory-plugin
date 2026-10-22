@@ -10,8 +10,11 @@ name: dev-backend
 
 on:
   push:
+    # The dev copy follows ONE branch: `experimental` while untested features
+    # are tried there (docs/DEV-PLUGIN.md, "Which branch the dev copy runs").
+    # Pages only deploys from branches the github-pages environment allows.
     branches:
-      - "main"
+      - "experimental"
     paths:
       - "backend/**"
       - "scripts/**"
