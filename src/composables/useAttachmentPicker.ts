@@ -39,7 +39,7 @@ import {
 import type { FacetAxis } from "../components/CatalogFilters.vue";
 import { SEARCH_DEBOUNCE_MS } from "./useDebouncedSearch";
 import { usePersistedNumber } from "./usePersistedRef";
-import { MAX_PER_GROUPING, readLibrary, type SavedCraft } from "../stickerCraftsModel";
+import { MAX_PER_GROUPING, loadLibrary, type SavedCraft } from "../stickerCraftsModel";
 import { useSortControl } from "./useSortControl";
 
 export const PICKER_PAGE = 120;
@@ -163,6 +163,8 @@ export function useAttachmentPicker(opts: AttachmentPickerOptions) {
    * writes them there). Only the ones a weapon can take — five stickers at most.
    */
   const pickerCrafts = ref<SavedCraft[]>([]);
+  /** The crafts are kept on the account, so the shelf arrives a moment late. */
+  const pickerCraftsLoading = ref(false);
   const pickerCraftRows = computed(() => {
     const q = pickerQuery.value.trim().toLowerCase();
     return q
@@ -418,7 +420,19 @@ export function useAttachmentPicker(opts: AttachmentPickerOptions) {
 
   function openPicker(kind: "sticker" | "charm" | "patch", slot = 0) {
     picker.value = { kind, slot };
-    pickerCrafts.value = kind === "sticker" ? readLibrary().filter((c) => c.stickers.length <= MAX_PER_GROUPING) : [];
+    pickerCrafts.value = [];
+    pickerCraftsLoading.value = kind === "sticker";
+    if (kind === "sticker") {
+      const opened = picker.value;
+      loadLibrary()
+        .then((list) => {
+          if (picker.value === opened) pickerCrafts.value = list.filter((c) => c.stickers.length <= MAX_PER_GROUPING);
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (picker.value === opened) pickerCraftsLoading.value = false;
+        });
+    }
     // Always opens on the catalog. Owned is the narrower shelf and is often
     // empty, and a picker that opened on "no results" would read as broken.
     pickerSource.value = "all";
@@ -470,6 +484,7 @@ export function useAttachmentPicker(opts: AttachmentPickerOptions) {
     pickerRows,
     pickerOwned,
     pickerCrafts,
+    pickerCraftsLoading,
     pickerCraftRows,
     pickerNoun,
     attachCardSize,

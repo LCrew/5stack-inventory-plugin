@@ -1643,3 +1643,49 @@ export const activatePreset = (id: string) =>
     method: "POST",
     body: "{}",
   });
+
+// ---- Sticker Crafts (the LCrew fork's sticker board) ------------------------
+// Stored per account (backend/src/stickerCrafts.ts), so the mat, the saved
+// crafts and the crafts placed on items follow you across browsers. The
+// documents' shapes belong to src/stickerCraftsModel.ts, which also decides
+// what to do with a backend that predates this storage.
+
+/**
+ * The board and the saved crafts. Null when this backend has no Sticker Crafts
+ * storage yet (an older image answers 404); a network or sign-in failure throws.
+ * Read through the asset walk like every other response, so a sticker image
+ * stored as `/images/…` comes back on this deployment's origin and version.
+ */
+export async function fetchStickerCrafts(): Promise<{ board: unknown; crafts: unknown[] } | null> {
+  const response = await fetch(`${API_BASE}/api/sticker-crafts`, { credentials: "include" });
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(`Sticker Crafts didn't load (${response.status}).`);
+  return resolveAssetPaths(await response.json()) as { board: unknown; crafts: unknown[] };
+}
+export const saveStickerBoard = (board: object) =>
+  request<{ ok: true }>("/sticker-crafts/board", { method: "PUT", body: JSON.stringify(board) });
+export const saveStickerCraft = (craft: { id: string }) =>
+  request<{ ok: true }>(`/sticker-crafts/crafts/${encodeURIComponent(craft.id)}`, {
+    method: "PUT",
+    body: JSON.stringify(craft),
+  });
+export const deleteStickerCraft = (id: string) =>
+  request<{ ok: true }>(`/sticker-crafts/crafts/${encodeURIComponent(id)}`, { method: "DELETE" });
+
+/** The craft placed on one owned item: its body, null for none, or undefined
+ *  when this backend has no Sticker Crafts storage. */
+export async function fetchItemCraftGroup(itemId: number | string): Promise<unknown | null | undefined> {
+  const response = await fetch(`${API_BASE}/api/sticker-crafts/groups/${encodeURIComponent(String(itemId))}`, {
+    credentials: "include",
+  });
+  if (response.status === 404) return undefined;
+  if (!response.ok) throw new Error(`Sticker Crafts didn't load (${response.status}).`);
+  return ((await response.json()) as { group: unknown }).group ?? null;
+}
+export const saveItemCraftGroup = (itemId: number | string, group: object) =>
+  request<{ ok: true }>(`/sticker-crafts/groups/${encodeURIComponent(String(itemId))}`, {
+    method: "PUT",
+    body: JSON.stringify(group),
+  });
+export const deleteItemCraftGroup = (itemId: number | string) =>
+  request<{ ok: true }>(`/sticker-crafts/groups/${encodeURIComponent(String(itemId))}`, { method: "DELETE" });

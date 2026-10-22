@@ -437,3 +437,22 @@ CREATE TABLE IF NOT EXISTS inventory.wishlist (
   created_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (steam_id, item_id)
 );
+
+-- STICKER CRAFTS (the LCrew fork's sticker board): the caller's mat, their saved
+-- crafts, and the crafts placed on their items, kept here so they follow the
+-- account across browsers and devices. One row per document — `kind` says which
+-- ('board' under doc_key '', 'craft' under the craft's id, 'group' under the
+-- item's instance id) and `body` is the client's document as sent, size-capped
+-- on the way in (stickerCrafts.ts). jsonb rather than columns because the shape
+-- is the client's and still moving, and nothing queries its contents.
+--
+-- The installed plugin shares this database and never reads or writes this
+-- table; it is created here, idempotently, like every other.
+CREATE TABLE IF NOT EXISTS inventory.sticker_crafts (
+  steam_id bigint NOT NULL,
+  kind text NOT NULL,
+  doc_key text NOT NULL,
+  body jsonb NOT NULL,
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (steam_id, kind, doc_key)
+);

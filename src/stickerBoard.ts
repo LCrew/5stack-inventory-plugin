@@ -99,6 +99,11 @@ function studioEnv(THREE: typeof ThreeNS) {
   panel(90, 30, 1.25, [0, 26, 48]);
   panel(90, 30, 1.35, [-48, 26, 0]);
   panel(90, 30, 1.35, [48, 26, 0]);
+  // And one gentle lamp overhead, OFF the centre (toward the top-right of the
+  // mat), so a foil or a holo has something bright to catch as it turns. Off
+  // centre is what keeps it from being the old glare: straight up from the mat
+  // misses it, and only stickers on that side of the Top view pick up a glint.
+  panel(22, 22, 1.6, [12, 55, -10]);
   return env;
 }
 
@@ -250,6 +255,10 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
       lamp.position.set(x * 30, 26, z * 30);
       s.add(lamp);
     }
+    // The overhead lamp's direct share, as off-centre as its softbox.
+    const overhead = new THREE.DirectionalLight(0xffffff, 0.35);
+    overhead.position.set(12, 55, -10);
+    s.add(overhead);
     s.add(new THREE.HemisphereLight(0xeef6f2, 0x1a2a24, 0.55));
     const slab = new THREE.Mesh(slabGeom, [edgeMat, edgeMat, topMat, edgeMat, edgeMat, edgeMat]);
     slab.position.y = -0.15;

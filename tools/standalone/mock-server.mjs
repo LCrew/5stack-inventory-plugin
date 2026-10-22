@@ -97,6 +97,8 @@ const CARD_MODE = process.env.MOCK_CARD_FORMATS ?? "";
 /** gen -> Map<file, Buffer>: the in-memory composite store. */
 const COMPOSITES = new Map();
 const ADMIN = process.env.MOCK_ADMIN !== "0";
+/** Sticker Crafts storage (backend/src/stickerCrafts.ts), in memory for one run. */
+const CRAFTS = { board: null, crafts: new Map(), groups: new Map() };
 const PREBAKE = process.env.MOCK_PREBAKE !== "0";
 const readBody = async (req) => {
   const chunks = [];
@@ -298,6 +300,34 @@ createServer(async (req, res) => {
     if (card && process.env.MOCK_CARDS === "stub") {
       res.writeHead(200, { "content-type": "image/png" });
       return res.end(STUB_PNG);
+    }
+    // Sticker Crafts storage, answered here so the board can be tried without a
+    // backend that has it. MOCK_CRAFTS=off answers 404, as a backend from
+    // before it does — the client then keeps everything in the browser.
+    if (p.startsWith("/api/sticker-crafts")) {
+      if (process.env.MOCK_CRAFTS === "off") return status(res, 404, { error: "not found" });
+      const body = req.method === "PUT" ? JSON.parse((await readBody(req)).toString() || "{}") : null;
+      if (p === "/api/sticker-crafts" && req.method === "GET") {
+        return json(res, { board: CRAFTS.board, crafts: [...CRAFTS.crafts.values()] });
+      }
+      if (p === "/api/sticker-crafts/board" && req.method === "PUT") {
+        CRAFTS.board = body;
+        return json(res, { ok: true });
+      }
+      const c = p.match(/^\/api\/sticker-crafts\/crafts\/([^/]+)$/);
+      if (c) {
+        if (req.method === "PUT") CRAFTS.crafts.set(c[1], body);
+        else CRAFTS.crafts.delete(c[1]);
+        return json(res, { ok: true });
+      }
+      const g = p.match(/^\/api\/sticker-crafts\/groups\/(\d+)$/);
+      if (g) {
+        if (req.method === "GET") return json(res, { group: CRAFTS.groups.get(g[1]) ?? null });
+        if (req.method === "PUT") CRAFTS.groups.set(g[1], body);
+        else CRAFTS.groups.delete(g[1]);
+        return json(res, { ok: true });
+      }
+      return status(res, 404, { error: "not found" });
     }
     if (p === "/api/loadout") return json(res, LOADOUT);
     if (p === "/api/inventory") return json(res, INVENTORY);

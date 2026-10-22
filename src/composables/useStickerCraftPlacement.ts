@@ -11,9 +11,9 @@
 // in 3D carries the others, and turning one (Shift-drag, or a two-finger twist)
 // turns the lot about it. Ungroup lets them move one at a time for fine
 // adjustments; Group binds them again as they now stand. The group outlives the
-// edit: Save records it against the item in this browser's storage, and opening
-// the item again brings it back as long as those slots still hold those
-// stickers. Removing or replacing one, or reordering the slots, ends it. The
+// edit: Save records it against the item on the account (stickerCraftsModel),
+// and opening the item again — on any device — brings it back as long as those
+// slots still hold those stickers. Removing or replacing one, or reordering the slots, ends it. The
 // game knows nothing of any of this — it only ever sees five placed stickers.
 //
 // UNITS. A craft is measured on the board in footprints: STICKER_CM is one
@@ -26,7 +26,7 @@
 // Positions turn with the art, about the craft's centre.
 import { computed, ref, watch, type Ref } from "vue";
 import { fetchStickerGeometry, type StickerBounds, type StickerSlot } from "../api";
-import { STICKER_CM, readJson, writeJson, type SavedCraft } from "../stickerCraftsModel";
+import { STICKER_CM, loadItemGroup, saveItemGroup, type SavedCraft } from "../stickerCraftsModel";
 import type { StickerPlacement, ViewerHandle } from "../viewer3d";
 
 /** The shape of one of the craft form's sticker slots — App's `Attach`. */
@@ -69,10 +69,6 @@ export interface CraftGroup {
   linked: boolean;
 }
 
-/** Groups saved with an item, by instance id. Ids, not images: an image URL
- *  carries the extraction version and changes under a re-extraction. */
-const ON_ITEMS_KEY = "cs2inv.stickerCrafts.onItems";
-type SavedGroup = { name: string; slots: number[]; ids: number[]; linked: boolean };
 
 const round4 = (v: number) => Math.round(v * 1e4) / 1e4;
 /** ±180, in the game's half-degree steps. */
@@ -324,13 +320,17 @@ export function useStickerCraftPlacement(o: {
     group.value = groupFromForm(c, g.frame, g.members.map((m) => m.slot), g.name, true);
   }
 
-  /** Record the group (or its absence) against the item a save just wrote. */
+  /**
+   * Record the group (or its absence) against the item a save just wrote.
+   * Sticker ids, not images, identify the members: an image URL carries the
+   * extraction version and changes under a re-extraction.
+   */
   function persist(id: number | string) {
-    const all = ((readJson(ON_ITEMS_KEY) as Record<string, SavedGroup> | null) ?? {});
     const g = group.value;
-    if (g) all[String(id)] = { name: g.name, slots: g.members.map((m) => m.slot), ids: g.members.map((m) => m.id), linked: g.linked };
-    else delete all[String(id)];
-    writeJson(ON_ITEMS_KEY, all);
+    void saveItemGroup(
+      id,
+      g ? { name: g.name, slots: g.members.map((m) => m.slot), ids: g.members.map((m) => m.id), linked: g.linked } : null,
+    );
   }
 
   /** Slots the waiting craft will fill, and slots of the placed group. */
@@ -356,12 +356,12 @@ export function useStickerCraftPlacement(o: {
     const id = o.instanceId();
     if (!c || restoreFor !== c || id == null || !o.model()) return;
     restoreFor = null;
-    const saved = (readJson(ON_ITEMS_KEY) as Record<string, SavedGroup> | null)?.[String(id)];
-    if (!saved || !Array.isArray(saved.slots) || !Array.isArray(saved.ids)) return;
+    const saved = await loadItemGroup(id);
+    if (!saved || o.craft.value !== c) return;
     if (!saved.slots.every((s, i) => c.stickers[s]?.id === saved.ids[i])) return;
     const frame = await frameFor(c);
     if (o.craft.value !== c || !frame) return;
-    group.value = groupFromForm(c, frame, saved.slots, String(saved.name ?? "Sticker craft"), saved.linked !== false);
+    group.value = groupFromForm(c, frame, saved.slots, saved.name, saved.linked);
   }
   watch(
     () => o.craft.value,

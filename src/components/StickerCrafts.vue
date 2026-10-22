@@ -13,10 +13,11 @@
 // one fixed square too and CS2 has no sticker size. That is what lets a layout
 // made here land on any gun the way it looks here.
 //
-// EXPERIMENTAL. State lives here and in localStorage only. The 3D board
-// (stickerBoard.ts) is a renderer that is handed the list on every change and
-// reports the pointer.
-import { computed, inject, onBeforeUnmount, onMounted, ref, shallowRef, toRaw, toRef, watch } from "vue";
+// EXPERIMENTAL. State lives here and on the account (stickerCraftsModel decides
+// where; a backend without the storage falls back to this browser). The 3D
+// board (stickerBoard.ts) is a renderer that is handed the list on every change
+// and reports the pointer.
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, toRaw, toRef, watch } from "vue";
 import {
   BookmarkPlus,
   BringToFront,
@@ -40,19 +41,19 @@ import type { InventoryItem } from "../api";
 import { useAttachmentPicker, type PickerRow } from "../composables/useAttachmentPicker";
 import { usePersistedBool } from "../composables/usePersistedRef";
 import {
-  BOARD_KEY,
   GRID_H,
   GRID_W,
   MAX_ON_BOARD,
   MAX_PER_GROUPING,
   PREVIEW_VERSION,
-  cleanSticker,
-  readJson,
-  readLibrary,
-  writeJson,
-  writeLibrary,
+  deleteCraft,
+  loadStickerCrafts,
+  saveBoard as storeBoard,
+  saveCraft as storeCraft,
   type BoardSticker,
+  type CraftsHome,
   type CraftSticker,
+  type Grouping,
   type SavedCraft,
 } from "../stickerCraftsModel";
 import type { StickerBoard } from "../stickerBoard";
@@ -69,9 +70,6 @@ const props = defineProps<{
 
 const tr = inject<(k: string, f: string) => string>("tr", (_k, f) => f);
 
-/** A named set of stickers that move and turn as one. */
-type Grouping = { id: string; name: string };
-
 /** Snap step for dragging, in cm, and for turning, in degrees. */
 const SNAP_CM = 0.5;
 const SNAP_DEG = 5;
@@ -82,40 +80,83 @@ const newId = () =>
     : Math.random().toString(36).slice(2) + Date.now().toString(36);
 
 // ---- state ------------------------------------------------------------------
-const stored = readJson(BOARD_KEY) as { stickers?: unknown[]; groups?: unknown[] } | null;
-const groups = ref<Grouping[]>(
-  (Array.isArray(stored?.groups) ? stored.groups : [])
-    .filter((g): g is Grouping => !!g && typeof (g as Grouping).id === "string")
-    .map((g) => ({ id: g.id, name: typeof g.name === "string" ? g.name : "Group" })),
-);
-const stickers = ref<BoardSticker[]>(
-  (Array.isArray(stored?.stickers) ? stored.stickers : []).flatMap((raw) => {
-    const s = cleanSticker(raw);
-    if (!s) return [];
-    const r = raw as Partial<BoardSticker>;
-    const group = typeof r.group === "string" && groups.value.some((g) => g.id === r.group) ? r.group : null;
-    return [{ ...s, uid: typeof r.uid === "string" ? r.uid : newId(), group }];
-  }),
-);
-const library = ref<SavedCraft[]>(readLibrary());
+const groups = ref<Grouping[]>([]);
+const stickers = ref<BoardSticker[]>([]);
+const library = ref<SavedCraft[]>([]);
 const selected = ref<Set<string>>(new Set());
 const snap = usePersistedBool("cs2inv.stickerCrafts.snap", true);
 const boardView = ref<"angled" | "top">("angled");
 
+// ---- storage ----------------------------------------------------------------
+/**
+ * Loaded from the account yet. NOTHING is saved before it is: an empty mat
+ * written up before the real one had arrived would replace it, on every device.
+ */
+const loaded = ref(false);
+const loadError = ref<string | null>(null);
+/** Where this session keeps things — see stickerCraftsModel. */
+const home = ref<CraftsHome>("server");
+/** The account copy, as far as this page knows. */
+const sync = ref<"idle" | "saving" | "saved" | "error">("idle");
+let writing = 0;
+/** A write failed since the last time everything was saved. */
+let failed = false;
+async function track(write: Promise<unknown>) {
+  writing++;
+  sync.value = "saving";
+  try {
+    await write;
+  } catch {
+    failed = true;
+  }
+  if (--writing > 0) return;
+  sync.value = failed ? "error" : "saved";
+  failed = false;
+}
+async function loadAll() {
+  loadError.value = null;
+  try {
+    const got = await loadStickerCrafts();
+    home.value = got.home;
+    groups.value = got.board.groups;
+    stickers.value = got.board.stickers;
+    library.value = got.library;
+    normalize();
+  } catch (e) {
+    loadError.value = e instanceof Error ? e.message : String(e);
+    return;
+  }
+  // After the watchers have seen the loaded state, so loading is not a change
+  // to be saved straight back.
+  await nextTick();
+  loaded.value = true;
+  void backfillPreviews();
+}
+
 // A drag writes a position per pointer move; saving each one would be a
-// localStorage write per frame. A short debounce lands the last one.
+// request per frame. A short debounce sends the last one.
 let saveTimer: ReturnType<typeof setTimeout> | undefined;
-const saveBoard = () => writeJson(BOARD_KEY, { stickers: stickers.value, groups: groups.value });
+let boardDirty = false;
+function flushBoard() {
+  clearTimeout(saveTimer);
+  if (!boardDirty || !loaded.value) return;
+  boardDirty = false;
+  void track(storeBoard(home.value, { stickers: stickers.value, groups: groups.value }));
+}
 watch(
   [stickers, groups],
   () => {
+    if (!loaded.value) return;
+    boardDirty = true;
     clearTimeout(saveTimer);
-    saveTimer = setTimeout(saveBoard, 300);
+    saveTimer = setTimeout(flushBoard, 600);
   },
   { deep: true },
 );
-// Not debounced: the weapon picker reads the library straight out of storage.
-watch(library, () => writeLibrary(library.value), { deep: true });
+/** One craft written after it changed — saved, renamed, or given its picture. */
+const persistCraft = (c: SavedCraft) => {
+  if (loaded.value) void track(storeCraft(home.value, c, library.value));
+};
 
 // ---- draw order -------------------------------------------------------------------
 /**
@@ -144,7 +185,6 @@ function unitsOf(list: BoardSticker[]): Unit[] {
 }
 const flatten = (units: Unit[]) => units.flatMap((u) => (u.kind === "one" ? [u.s] : u.members));
 const normalize = () => (stickers.value = flatten(unitsOf(stickers.value)));
-normalize();
 
 // ---- derived ------------------------------------------------------------------
 const byUid = (uid: string) => stickers.value.find((s) => s.uid === uid);
@@ -441,6 +481,7 @@ async function renderPreview(id: string) {
     if (now) {
       now.preview = url;
       now.previewV = PREVIEW_VERSION;
+      persistCraft(now);
     }
   } catch {
     /* no preview is a plainer card, not an error */
@@ -465,6 +506,7 @@ function saveSelection() {
     })),
   };
   library.value = [entry, ...library.value];
+  persistCraft(entry);
   void renderPreview(entry.id);
 }
 /** Lay a saved craft down in the middle of the mat, as a grouping again. */
@@ -483,7 +525,9 @@ function placeSaved(entry: SavedCraft) {
   selected.value = new Set(made.map((s) => s.uid));
 }
 function renameSaved(entry: SavedCraft, name: string) {
-  if (name.trim()) entry.name = name.trim().slice(0, 40);
+  if (!name.trim()) return;
+  entry.name = name.trim().slice(0, 40);
+  persistCraft(entry);
 }
 // Deleting a saved craft, or taking a grouping off the mat, can't be walked
 // back either: the first press arms the button for a few seconds, the second
@@ -505,6 +549,7 @@ function pressAgain(key: string): boolean {
 function deleteSaved(id: string) {
   if (!pressAgain("lib:" + id)) return;
   library.value = library.value.filter((e) => e.id !== id);
+  if (loaded.value) void track(deleteCraft(home.value, id, library.value));
 }
 /** The trash button under Selection: a whole grouping in it asks twice. */
 function removeSelectionAsked() {
@@ -628,18 +673,35 @@ onMounted(async () => {
     }
     board.value = b;
     b.sync(toRaw(stickers.value).map((s) => toRaw(s)), toRaw(selected.value));
-    // Crafts saved before previews existed, or drawn in an older look, get a
-    // fresh one now, one at a time. The old picture stays up until it lands.
-    for (const e of library.value.filter((x) => !x.preview || x.previewV !== PREVIEW_VERSION).map((x) => x.id)) {
-      if (board.value !== b) break;
-      await renderPreview(e);
-    }
+    void backfillPreviews();
   } catch (e) {
     boardError.value = e instanceof Error ? e.message : String(e);
   } finally {
     boardLoading.value = false;
   }
 });
+
+/**
+ * Crafts saved before previews existed, or drawn in an older look, get a fresh
+ * one, one at a time. Needs both the board (to draw) and the library (to know
+ * what), whichever arrives second starts it. The old picture stays up until
+ * the new one lands.
+ */
+let backfilling = false;
+async function backfillPreviews() {
+  const b = board.value;
+  if (!b || !loaded.value || backfilling) return;
+  backfilling = true;
+  try {
+    for (const e of library.value.filter((x) => !x.preview || x.previewV !== PREVIEW_VERSION).map((x) => x.id)) {
+      if (board.value !== b) break;
+      await renderPreview(e);
+    }
+  } finally {
+    backfilling = false;
+  }
+}
+void loadAll();
 
 // ---- keyboard ---------------------------------------------------------------------------
 function onKey(e: KeyboardEvent) {
@@ -692,11 +754,10 @@ onBeforeUnmount(() => {
   window.removeEventListener("pointermove", rowMove);
   window.removeEventListener("pointerup", rowUp);
   window.removeEventListener("pointercancel", rowUp);
-  clearTimeout(saveTimer);
   clearTimeout(clearTimer);
   clearTimeout(armTimer);
-  // Land a save that was still waiting on its debounce.
-  saveBoard();
+  // Send a save that was still waiting on its debounce.
+  flushBoard();
   board.value?.dispose();
   board.value = null;
 });
@@ -729,6 +790,20 @@ const FIELD =
       <span v-if="!compact" class="flex-none font-mono text-f10 text-muted-foreground/70">
         {{ stickers.length }} {{ stickers.length === 1 ? "sticker" : "stickers" }}<template v-if="groups.length"> · {{ groups.length }} {{ groups.length === 1 ? "group" : "groups" }}</template>
       </span>
+      <!-- Where it is kept, and whether the last change got there. The account
+           is the normal case and only speaks up while saving or on a failure;
+           a backend without the storage says so for as long as it lasts. -->
+      <span
+        v-if="loaded && home === 'local'"
+        class="flex-none rounded border border-[#e0a24a]/50 px-1.5 py-0.5 text-f8 uppercase tracking-cs1 text-[#e0a24a]"
+        title="This backend can't keep Sticker Crafts on your account yet, so they're saved in this browser only. Updating the dev backend fixes it."
+      >{{ tr("inventory.stickerCrafts.localOnly", "This browser only") }}</span>
+      <span
+        v-else-if="loaded && sync !== 'idle'"
+        class="flex-none text-f9 uppercase tracking-cs1"
+        :class="sync === 'error' ? 'text-destructive' : 'text-muted-foreground/70'"
+        :title="sync === 'error' ? 'The last change did not reach the server. The next change will try again.' : 'Kept on your account — the same on every browser and device'"
+      >{{ sync === 'saving' ? tr("inventory.stickerCrafts.saving", "Saving…") : sync === 'error' ? tr("inventory.stickerCrafts.notSaved", "Not saved") : tr("inventory.stickerCrafts.saved", "Saved") }}</span>
       <div class="ml-auto flex items-center gap-2">
         <button
           :class="[BTN, clearArmed ? 'border-destructive/60 text-destructive' : '']"
@@ -741,7 +816,7 @@ const FIELD =
         </button>
         <button
           :class="[BTN, 'tac-on']"
-          :disabled="boardFull"
+          :disabled="boardFull || !loaded"
           :title="boardFull ? `The mat holds ${MAX_ON_BOARD} stickers` : 'Pick a sticker, or a saved craft, to lay on the mat'"
           @click="openPicker('sticker')"
         >
@@ -792,11 +867,17 @@ const FIELD =
           Drag to move · Shift + drag to turn · Shift-click to add · Alt-click one of a group · Q / E turn · Arrows nudge · Right-drag pans
         </div>
 
-        <div v-if="boardLoading" class="absolute inset-0 grid place-items-center">
+        <div v-if="boardLoading || (!loaded && !loadError)" class="absolute inset-0 grid place-items-center">
           <Loader2 class="h-5 w-5 animate-spin text-muted-foreground" />
         </div>
         <div v-else-if="boardError" class="absolute inset-0 grid place-items-center p-6 text-center text-f13 text-destructive">
           {{ tr("inventory.stickerCrafts.boardError", "The 3D board could not start.") }} {{ boardError }}
+        </div>
+        <!-- Nothing can be edited until the mat has loaded: an edit made before
+             it arrived would be overwritten by it, or overwrite it. -->
+        <div v-else-if="loadError" class="absolute inset-0 flex flex-col items-center justify-center gap-3 p-6 text-center">
+          <span class="text-f13 text-destructive">{{ tr("inventory.stickerCrafts.loadError", "Your Sticker Crafts didn't load.") }} {{ loadError }}</span>
+          <button :class="[BTN, 'bg-card/80']" @click="loadAll">{{ tr("inventory.stickerCrafts.retry", "Try again") }}</button>
         </div>
         <div
           v-else-if="!stickers.length"

@@ -268,7 +268,13 @@
       "selection": "Selection",
       "grouping": "Grouping",
       "onMat": "On the mat",
-      "library": "Saved crafts"
+      "library": "Saved crafts",
+      "localOnly": "This browser only",
+      "saving": "Saving…",
+      "notSaved": "Not saved",
+      "saved": "Saved",
+      "loadError": "Your Sticker Crafts didn't load.",
+      "retry": "Try again"
     }
   }
 }

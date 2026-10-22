@@ -72,6 +72,7 @@ const {
   pickerRows,
   pickerOwned,
   pickerCrafts,
+  pickerCraftsLoading,
   pickerCraftRows,
   pickerNoun,
   attachCardSize,
@@ -289,7 +290,10 @@ const shortName = (name: string) => name.replace(/^Sticker \| /, "");
           v-if="pickerSource === 'crafts' && !pickerCraftRows.length"
           class="col-span-full animate-fade-in py-8 text-center text-f13 text-muted-foreground"
         >
-          <template v-if="!pickerQuery">
+          <template v-if="pickerCraftsLoading">
+            <Loader2 class="mx-auto h-4 w-4 animate-spin" />
+          </template>
+          <template v-else-if="!pickerQuery">
             No Sticker Crafts saved yet. Lay up to five stickers out on the Sticker Crafts tab, select them and press Save.
           </template>
           <template v-else>No crafts match that search.</template>
