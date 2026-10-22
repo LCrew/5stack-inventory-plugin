@@ -94,6 +94,10 @@ export interface Skin {
    *  with the skin, and the classic knife pool is the special of eleven cases at
    *  once, so no single one is true. */
   collection?: string;
+  /** STICKERS, PATCHES and sticker slabs: the capsule it came in — the label
+   *  over each attachment-picker tile. Not `collection`, which is the inventory
+   *  grid's facet. */
+  capsule?: string;
   /** Artwork identity shared by every colour variant — the STACK key. */
   design?: number;
   /** KNIVES and GLOVES only: the bare model the finish is painted onto
@@ -177,6 +181,8 @@ export interface CatalogItem {
    *  too (the backend resolver fills it), which is what lets the inventory grid
    *  and the loadout sheet sort by collection. */
   collection?: string;
+  /** See `Skin.capsule` — filled on an owned sticker, patch or slab too. */
+  capsule?: string;
   /**
    * MUSIC KITS only: the kit's menu theme, as a fully resolved, playable URL.
    *

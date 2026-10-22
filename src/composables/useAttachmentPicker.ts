@@ -79,6 +79,9 @@ export type PickerRow = {
   inst?: string | null;
   /** What this owned one is already applied to, if anything. */
   attachedName?: string | null;
+  /** The capsule it came in, for the label over the tile (stickers, patches,
+   *  slabs). */
+  capsule?: string | null;
   /** The owned row's own scratch / pattern, so picking it previews truthfully. */
   wear?: number | null;
   seed?: number | null;
@@ -168,6 +171,7 @@ export function useAttachmentPicker(opts: AttachmentPickerOptions) {
         type: i.item?.type,
         inst: String(i.id),
         attachedName: attachedName(i),
+        capsule: i.item?.capsule ?? null,
         wear: i.wear,
         seed: i.seed,
       }))
@@ -186,6 +190,7 @@ export function useAttachmentPicker(opts: AttachmentPickerOptions) {
           image: it.image,
           rarity: it.rarity,
           type: it.type ?? PICKER_TYPE[picker.value?.kind ?? "sticker"],
+          capsule: it.capsule ?? null,
         })),
   );
 

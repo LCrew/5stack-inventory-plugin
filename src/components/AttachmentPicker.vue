@@ -208,6 +208,16 @@ const {
             @click.stop="$emit('preview', it, picker?.kind ?? 'sticker')"
             @keydown.enter.stop.prevent="$emit('preview', it, picker?.kind ?? 'sticker')"
           ><Box class="h-3.5 w-3.5" /></span>
+          <!-- The capsule it came in, over the art — the place the knife and
+               glove craft cards put their model label, in the same grey caps.
+               The name under the art says WHAT it is; this says where it is
+               from, which is how stickers are actually hunted ("the Katowice
+               2014 one"). Clear of the corner badges either side. -->
+          <span
+            v-if="it.capsule"
+            class="relative z-[2] w-full truncate text-center text-f8 uppercase tracking-cs1 text-muted-foreground/70"
+            :class="it.attachedName ? 'px-4' : 'pr-4'"
+          >{{ it.capsule }}</span>
           <div :class="CARD_ART" class="relative z-[2]">
             <!-- decoding="async" keeps the decode off the main thread. With
                  `lazy`, a fast scroll brings dozens of images into view at

@@ -18,6 +18,7 @@ The 3D model extraction is now at pipeline version 39, the same number as the in
 - **Music kit preview in the editor**: Edit on a music kit plays the full song and, separately, its round-MVP anthem, each with play/pause and seek. One volume control sits above both and shares the level with every other player.
 - **One volume bar per music kit list**: the music kit sheet's Owned and Craft tabs have a single volume control in the toolbar instead of a slider on every card.
 - **Agent pose and motion in the sidebar**: an agent's pose (Ready, Stand, Open) moved from the top-left corner of the 3D view into the right-hand column, like the pet's controls. A new Motion setting makes the agent breathe and look around (Idle), move through all three poses in turn (Cycle), or hold still for placing patches (Still).
+- **Capsule over each sticker in the picker**: every sticker, patch and sticker slab tile in the "Pick a sticker" sheet shows its capsule in small grey capitals on top, like the model label on knife and glove cards. The 126 stickers the game data leaves unnamed show no label.
 - **Precise sticker dragging**: a sticker picked up in the 3D editor keeps the point where you grabbed it. Small nudges no longer jump the sticker's centre to the pointer.
 
 ### Removed

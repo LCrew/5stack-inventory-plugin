@@ -149,6 +149,21 @@ createServer(async (req, res) => {
       if (slot === "knife") return json(res, { base: null, skins: cat.getKnives() });
       if (slot === "gloves") return json(res, { base: null, skins: cat.getGloves() });
     }
+    // The attachment pickers' search, from the working tree's catalog like the
+    // knife and glove sheets above — so a change to what it returns (the
+    // capsule label, a facet) shows here before any backend is deployed.
+    const attach = { "/api/catalog/stickers": "sticker", "/api/catalog/charms": "charm", "/api/catalog/patches": "patch" }[p];
+    if (attach) {
+      const q = Object.fromEntries(url.searchParams);
+      const limit = Number(q.limit);
+      return json(res, cat.searchAttachments({
+        kind: attach, q: q.q ?? "", group: q.group ?? "", collection: q.collection ?? "", rarity: q.rarity ?? "",
+        sort: ["default", "rarity", "name"].includes(q.sort) ? q.sort : undefined,
+        dir: q.dir === "asc" || q.dir === "desc" ? q.dir : undefined,
+        offset: Math.max(0, Math.floor(Number(q.offset)) || 0),
+        limit: Number.isFinite(limit) && limit > 0 ? limit : undefined,
+      }));
+    }
     // Made-up but stable prices, so price labels and sorts have something to show.
     if (p === "/api/prices")
       return json(res, { enabled: true, source: "steam", ready: true, window: "7d", listings: 1, sourceDate: null, syncedAt: null });
