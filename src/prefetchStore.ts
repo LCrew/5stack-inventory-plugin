@@ -104,7 +104,8 @@ const UNUSED_TTL_MS = 10 * 60_000;
 
 // ---- Logging ----------------------------------------------------------------
 /**
- * `?prefetchlog=1`, sticky like the viewer's other `xxxlog` switches (see
+ * `prefetchlog` (Developer tab -> Prefetch log), sticky like the viewer's other
+ * `xxxlog` switches (see
  * compositeStore's `compositelog`): every warm queued, started and finished,
  * and every loader that took a file or fell through. Off, it costs a boolean.
  */

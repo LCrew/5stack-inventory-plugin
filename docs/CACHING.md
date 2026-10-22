@@ -91,6 +91,9 @@ nothing. Rules for whoever writes them:
 - Rewrite or delete a `.gz` whenever its original changes. nginx
   (`gzip_static`) never compares the two; the Node servers skip a `.gz` older
   than its original, to the second.
+- That includes copying a `.glb` or `.json` into `/models` by hand: delete the
+  `.gz` beside it as well, or nginx keeps sending the old copy to every
+  browser. (`/anims` is never precompressed, so copying clips there is safe.)
 - Never write one for audio. nginx answers a range request out of the `.gz`'s
   bytes when the client also accepts gzip.
 

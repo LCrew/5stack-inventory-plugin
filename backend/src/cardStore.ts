@@ -118,9 +118,14 @@ export function cardPixelSize(head: Buffer): { width: number; height: number } |
  */
 export function plausibleCard(buf: Buffer): CardFormat | null {
   const format = cardFormatOf(buf);
-  const size = format ? cardPixelSize(buf) : null;
-  if (!format || !size) return null;
-  return size.width >= 16 && size.height >= 16 && size.width <= 4096 && size.height <= 4096 ? format : null;
+  return format && cardSized(buf) ? format : null;
+}
+
+/** Whether the image's header puts it within a card's bounds, 16 to 4096
+ *  pixels a side. */
+function cardSized(buf: Buffer): boolean {
+  const size = cardPixelSize(buf);
+  return !!size && size.width >= 16 && size.height >= 16 && size.width <= 4096 && size.height <= 4096;
 }
 
 /** A card's key with its extension off: the name both formats share. */
@@ -246,6 +251,26 @@ export const CARD_WEBP_QUALITY = 90;
 const CWEBP_ARGS = ["-quiet", "-metadata", "none", "-q", String(CARD_WEBP_QUALITY), "-sharp_yuv"];
 const CWEBP_TIMEOUT_MS = 20_000;
 
+// At most this many cwebp processes at once; the rest wait for a slot. A card
+// encodes in ~25ms, so the queue costs nothing, where a burst of uploads each
+// decoding a 4096px square at once would take the pod's memory with it.
+const CWEBP_CONCURRENCY = 2;
+let cwebpRunning = 0;
+const cwebpWaiting: (() => void)[] = [];
+async function withCwebpSlot<T>(fn: () => Promise<T>): Promise<T> {
+  if (cwebpRunning < CWEBP_CONCURRENCY) cwebpRunning++;
+  else await new Promise<void>((resolve) => cwebpWaiting.push(resolve));
+  try {
+    return await fn();
+  } finally {
+    // Hand the slot straight to the next in line, so nothing can take it in
+    // between and push the count over.
+    const next = cwebpWaiting.shift();
+    if (next) next();
+    else cwebpRunning--;
+  }
+}
+
 /**
  * Whether cwebp runs here. The backend image installs it (`webp`, for the
  * extractor); a dev pod or a bare `npm run dev` may not have it, and then PNG
@@ -273,16 +298,21 @@ function run(cmd: string, args: string[]): Promise<boolean> {
  * A PNG card as a WebP at CARD_WEBP_QUALITY, or null to store the PNG as is:
  * no cwebp, the encode failed, or it came out no smaller.
  *
+ * Only a PNG whose header puts it within a card's bounds is decoded. An
+ * instance upload is checked for its format alone, and a 3MB PNG can declare a
+ * 30000px square that cwebp would decode in full, gigabytes of it; anything
+ * outside the bounds is stored as the PNG it is, as every upload used to be.
+ *
  * Through temporary files rather than pipes, which keeps it to the cwebp
  * invocation every libwebp version takes. The output is checked like an upload,
  * so a broken encoder can never put something that is not a WebP under a key.
  */
 export async function pngCardToWebp(png: Buffer): Promise<Buffer | null> {
-  if (!(await cwebpAvailable())) return null;
+  if (!cardSized(png) || !(await cwebpAvailable())) return null;
   const base = path.join(os.tmpdir(), `card-${process.pid}-${randomBytes(6).toString("hex")}`);
   try {
     await fs.writeFile(`${base}.png`, png);
-    if (!(await run("cwebp", [...CWEBP_ARGS, `${base}.png`, "-o", `${base}.webp`]))) return null;
+    if (!(await withCwebpSlot(() => run("cwebp", [...CWEBP_ARGS, `${base}.png`, "-o", `${base}.webp`])))) return null;
     const out = await fs.readFile(`${base}.webp`);
     return cardFormatOf(out) === "webp" && out.length < png.length ? out : null;
   } catch {

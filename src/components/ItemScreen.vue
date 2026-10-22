@@ -28,12 +28,12 @@ const props = defineProps<{
   /** First person — folds the details panel away. See below. */
   held?: boolean;
   /**
-   * The stage does NOT run to the card's edges (the edit modal, where the form
-   * column sits beside it). The header is pinned to this screen's top-left, and
-   * a bleeding stage puts that corner inside the card's padding — the name ends
-   * up inset by the padding for free. An inset stage has no padding round it,
-   * so the name sat on the very corner of the picture while the same name in
-   * the focus view stood well clear of it. This steps the chrome in by itself.
+   * The stage is NOT pulled out to the card's edges, so it starts exactly where
+   * this header does — and the name and the buttons sat on its very corner. That
+   * never showed while the stage was the card's own dark colour; a lit backdrop
+   * (the CS2 haze) draws the stage's edge, and the text was jammed against it.
+   * Set by the item modal while editing; focus and view-only pull the stage out
+   * past their padding, which already insets the header.
    */
   inset?: boolean;
 }>();
@@ -133,11 +133,16 @@ onBeforeUnmount(() => panelRO?.disconnect());
     </button>
     <!-- `pointer-events-none` on the rail, restored on the panel: the empty
          space under a short list is stage, and dragging the model there should
-         turn it. -->
+         turn it.
+         `bottom-12`, not `bottom-0`: the stage's own bottom-right controls (the
+         first-person toggle and the screenshot button) sit in this same column,
+         and on a short window a long panel ran down over them — StatTrak under
+         the toggle. Ending the panel above them costs nothing on a tall screen,
+         where the list never reaches that far, and it scrolls on a short one. -->
     <div
       v-if="$slots.panel && panelOpen"
       ref="panelEl"
-      class="pointer-events-none absolute bottom-0 z-[5] flex w-[308px] flex-col overflow-y-auto pb-2 pl-2"
+      class="pointer-events-none absolute bottom-12 z-[5] flex w-[308px] flex-col overflow-y-auto pb-2 pl-2"
       :class="[panelTop, panelRight]"
     >
       <div class="pointer-events-auto flex flex-col gap-2.5">

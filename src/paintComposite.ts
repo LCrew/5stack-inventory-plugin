@@ -792,11 +792,12 @@ export interface WeaponInputs {
    *  .exr (RGBA16161616F), not .png — always take the filename from meta.json. */
   position?: string;
   surface?: string;
-  /** 2048 copies of the inputs above that are larger (extraction v38+, meta.json
-   *  `textures2048`; only HD gun bodies have any). compositePaint swaps them in
-   *  when it composites at 2048 or less, where a 4096 input is read at its 2048
-   *  mip anyway: ~6MB instead of ~35MB for an AK-47's color + metalness, and
-   *  measured identical output within a level. Absent on older mounts. */
+  /** 2048 copies of the inputs above that are larger (extraction v39+, this
+   *  fork's v38+; meta.json `textures2048`; only HD gun bodies have any).
+   *  compositePaint swaps them in when it composites at 2048 or less, where a
+   *  4096 input is read at its 2048 mip anyway: ~6MB instead of ~35MB for an
+   *  AK-47's color + metalness, and measured identical output within a level.
+   *  Absent on older mounts. */
   at2048?: Partial<Pick<WeaponInputs, "ao" | "masks" | "color" | "metalness">>;
   weaponLength?: number;
   uvScale?: number;
@@ -2076,9 +2077,10 @@ export function compositeSizeCap(def: PaintDef, maxSize?: number): number {
 /**
  * The weapon inputs a composite at `sizeCap` actually samples. At a cap of 2048
  * or less the GPU would read a 4096 input at its 2048 mip, so the 2048 copies
- * (WeaponInputs.at2048, extraction v38) are the same texels for a quarter of the
- * download; above it, the full set. compositePaint and src/prefetch.ts both ask
- * here, so what a prefetch warms is what the composite then loads.
+ * (WeaponInputs.at2048, extraction v39; this fork's v38) are the same texels
+ * for a quarter of the download; above it, the full set. compositePaint and
+ * src/prefetch.ts both ask here, so what a prefetch warms is what the composite
+ * then loads.
  */
 export function weaponInputsAt(weapon: WeaponInputs | null | undefined, sizeCap: number): WeaponInputs | null | undefined {
   return weapon?.at2048 && sizeCap <= 2048 ? { ...weapon, ...weapon.at2048 } : weapon;

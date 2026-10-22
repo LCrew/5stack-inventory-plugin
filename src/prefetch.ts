@@ -33,8 +33,9 @@
  * The bytes go into src/prefetchStore.ts and the loaders take them from there;
  * nothing relies on the HTTP cache. A file a loader already holds in its own
  * cache is not warmed again (see usedRecently). Everything is skipped under
- * Save-Data, on a 2g estimate, and with `?noprefetch=1` (sticky — for timing a
- * cold open against a warm one). `?prefetchlog=1` traces every step.
+ * Save-Data, on a 2g estimate, and with the Developer tab's No prefetch switch
+ * (`noprefetch`, for timing a cold open against a warm one). Its Prefetch log
+ * switch (`prefetchlog`) traces every step.
  */
 import { fetchStickerGeometry, getAssetVersion, type InventoryItem, type LoadoutEntry } from "./api";
 import { hasModel, hasModelSync, modelUrlFor } from "./modelAvailability";
@@ -102,7 +103,7 @@ if (PREFETCH_LOG && typeof window !== "undefined") {
 
 /** Why warming is off right now, or null when it is allowed. */
 function blocked(): string | null {
-  if (DISABLED) return "off (?noprefetch=1)";
+  if (DISABLED) return "off (No prefetch)";
   const conn = (navigator as { connection?: { saveData?: boolean; effectiveType?: string } }).connection;
   if (conn?.saveData) return "Save-Data";
   if (/2g$/.test(conn?.effectiveType ?? "")) return `connection ${conn?.effectiveType}`;
@@ -158,8 +159,13 @@ export function hoverPrefetch(subject: () => PrefetchSubject | null | undefined)
  * time, the given team's first, one item at a time. Idle warms only fill a
  * third of the budget (see prefetchStore), so a big loadout warms its first
  * few items and stops.
+ *
+ * Not on phones. Nothing asked for these, and a third of a phone's budget is
+ * ~13MB on every first visit over what is often a metered connection; a phone
+ * still warms on a press, which is when its owner has asked for the view.
  */
 export function prefetchEquipped(rows: LoadoutEntry[], inventory: InventoryItem[], team?: string) {
+  if (COARSE) return plog("skip", "idle", "coarse pointer");
   if (blocked()) return;
   const byId = new Map(inventory.map((i) => [String(i.id), i]));
   const ordered = [...rows].sort((a, b) => Number(b.team === team) - Number(a.team === team));

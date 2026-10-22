@@ -1,17 +1,18 @@
 // Lighter copies of what the extraction put on the mount — the same pixels and
 // the same bytes, in fewer bytes on the wire. Two passes, each a step of
-// extract-models.sh (v38):
+// extract-models.sh (v39):
 //
 //   node scripts/lighten-assets.mjs inputs-2048 --models /cs2-models/models
 //   node scripts/lighten-assets.mjs gzip        --models /cs2-models/models
 //
 // NEITHER REPLACES A FILE. Every output is a new file beside the original, for
-// one reason: the installed plugin and the dev copy share this mount, and the
-// installed one is an older client. A file it cannot read, or a meta.json shape
-// it does not know, would break it the moment the dev copy re-extracts. So the
-// originals stay byte-for-byte what they were, every reader of them keeps working
-// untouched, and only a client (or server) that knows about a lighter copy uses
-// it.
+// one reason: an older client reads this mount too (a tab still running the
+// previous bundle, a pod mid-rollout, and on this fork the installed plugin,
+// which shares the mount with the dev copy). A file it cannot read, or a meta.json
+// shape it does not know, would break it the moment the mount re-extracts. So
+// the originals stay byte-for-byte what they were, every reader of them keeps
+// working untouched, and only a client (or server) that knows about a lighter
+// copy uses it.
 //
 //   inputs-2048  <key>.inputs[.hd]/<name>.2048.png for every composite input over
 //                2048 px, listed in meta.json as `textures2048`. The compositor

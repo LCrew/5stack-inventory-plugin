@@ -97,7 +97,7 @@ export interface Skin {
   /** Artwork identity shared by every colour variant — the STACK key. */
   design?: number;
   /** KNIVES and GLOVES only: the bare model the finish is painted onto
-   *  ("Butterfly Knife"), with its own icon — what the craft sheet groups under. */
+   *  ("Butterfly Knife"), with its own icon — what the craft sheet sections by. */
   baseId?: number;
   baseName?: string;
   baseImage?: string | null;
@@ -497,21 +497,34 @@ export const catalogRenderUrl = (itemId: number) => `${API_ORIGIN}/api/renders/c
 // Both card uploads take the snapshot's PNG and send it as a WebP where the
 // server and the browser allow (postCard in cardEncode.ts); the key and every
 // URL above stay the same either way.
+/** The version a card was baked for, for the server to check against its own
+ *  (staleCardVersion in main.ts). Nothing until the catalog has said: 0 is
+ *  "not loaded yet" here, and would read as stale against any extraction. */
+const bakedFor = () => (renderVersion ? `?v=${renderVersion}` : "");
 export async function uploadCatalogRender(itemId: number, blob: Blob): Promise<boolean> {
   try {
-    const res = await postCard(`${API_BASE}/api/render/catalog/${itemId}`, blob, cardsTakeWebp);
+    const res = await postCard(`${API_BASE}/api/render/catalog/${itemId}${bakedFor()}`, blob, cardsTakeWebp);
     return res.ok;
   } catch {
     return false;
   }
 }
-export async function uploadRender(instanceId: number, blob: Blob): Promise<{ ok: boolean; error?: string }> {
+/**
+ * `stale`: the server refused the card because an extraction finished after
+ * this tab loaded its catalog, so the card was baked from the previous assets
+ * under the previous version's name. Only a reload fixes that.
+ */
+export async function uploadRender(
+  instanceId: number,
+  blob: Blob,
+): Promise<{ ok: boolean; error?: string; stale?: boolean }> {
   try {
-    const res = await postCard(`${API_BASE}/api/render/${instanceId}`, blob, cardsTakeWebp);
+    const res = await postCard(`${API_BASE}/api/render/${instanceId}${bakedFor()}`, blob, cardsTakeWebp);
     if (res.ok) return { ok: true };
     let error = `HTTP ${res.status}`;
     try {
       const data = (await res.json()) as { error?: string };
+      if (res.status === 409 && data?.error === "stale") return { ok: false, stale: true };
       if (data?.error) error = `${error} — ${data.error}`;
     } catch { /* non-JSON */ }
     return { ok: false, error };
@@ -972,7 +985,7 @@ export const fetchSteamSync = () =>
 export type DirStat = { files: number; bytes: number };
 /** A breakdown part. `sentBytes`: what its files cost to send, counting each
  *  one that has a precompressed `.gz` copy at that copy's size (absent when
- *  none do, and on backends from before extraction v38). */
+ *  none do, and on backends from before extraction v39). */
 export type PartStat = DirStat & { sentBytes?: number };
 /**
  * Which slice of a mount a `parts` entry describes. Every one of these is a
@@ -987,8 +1000,8 @@ export type CachePart =
   | "compositeInputs" // <weapon>.inputs[.hd] — the paint compositor's sources
   | "modelTextures" // the flat texture pool the GLBs reference
   | "modelMeta" // anchors, sticker markup, the version stamp
-  | "inputs2048" // the 2048 copies of the largest composite inputs (v38)
-  | "compressedCopies" // the .gz copies the servers send instead (v38)
+  | "inputs2048" // the 2048 copies of the largest composite inputs (v39)
+  | "compressedCopies" // the .gz copies the servers send instead (v39)
   | "paintMaterials" // the finish JSON
   | "paintTextures"; // everything the finish JSON points at
 

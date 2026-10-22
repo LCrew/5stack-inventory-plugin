@@ -2,15 +2,16 @@
   "name": "5stack-inventory-plugin",
   "version": "0.1.0",
   "description": "CS2 inventory simulator — a 5stack Custom Pages micro-frontend. Rendered natively inside the 5stack panel via Module Federation; reuses 5stack Steam auth.",
-  "license": "MIT",
+  "license": "AGPL-3.0-only",
   "type": "module",
   "scripts": {
+    "third-party-notices": "node scripts/third-party-notices.mjs",
     "dev": "npm install && vite build && (node scripts/dev-watch.mjs &) && node scripts/serve.mjs",
     "dev:ui": "npm run dev",
     "dev:api": "cd backend && npm install && node --watch --experimental-strip-types src/server.ts",
     "build": "vite build",
     "typecheck": "vue-tsc --noEmit",
-    "check": "npm run typecheck && npm run check:slots && npm run check:inspect && npm run check:stattrak && npm run check:steam-sync && npm run check:prices && npm run check:sfc && npm run check:schema && npm run check:i18n && npm run check:sorts && npm run check:origin && npm run check:assets && npm run check:auto-extract && npm run check:guidelines && npm run check:prefetch && npm run check:extract-state && npm run check:extract-shards && npm run check:extract-workers && npm run check:machine-memory && npm run check:model-textures && npm run check:extract-completion && npm run check:paint-inputs",
+    "check": "npm run typecheck && npm run check:slots && npm run check:inspect && npm run check:stattrak && npm run check:steam-sync && npm run check:prices && npm run check:sfc && npm run check:schema && npm run check:i18n && npm run check:sorts && npm run check:origin && npm run check:auto-extract && npm run check:guidelines && npm run check:extract-state && npm run check:extract-shards && npm run check:extract-workers && npm run check:machine-memory && npm run check:model-textures && npm run check:extract-completion && npm run check:paint-inputs && npm run check:assets && npm run check:prefetch",
     "check:slots": "node --experimental-strip-types tools/slot-whitelist-check.ts",
     "check:inspect": "node --experimental-strip-types tools/inspect-roundtrip.ts",
     "check:stattrak": "node --experimental-strip-types tools/stattrak-digits.ts",
@@ -22,17 +23,17 @@
     "check:i18n": "node --experimental-strip-types tools/i18n-check.ts",
     "check:sorts": "esbuild tools/sort-modes-check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/sort-modes-check.mjs && node node_modules/.cache/sort-modes-check.mjs",
     "check:origin": "node --experimental-strip-types tools/origin-guard-check.ts",
-    "check:assets": "node --experimental-strip-types tools/asset-response-check.ts",
     "check:extract-state": "node --experimental-strip-types tools/extract-state-check.ts",
+    "check:assets": "node --experimental-strip-types tools/asset-response-check.ts",
     "check:auto-extract": "node --experimental-strip-types tools/auto-extract-check.ts",
     "check:extract-workers": "node --experimental-strip-types tools/extract-workers-check.ts",
     "check:machine-memory": "node --experimental-strip-types tools/machine-memory-check.ts",
     "check:guidelines": "node --experimental-strip-types tools/guidelines-check.ts",
-    "check:prefetch": "node --experimental-strip-types tools/prefetch-check.ts",
     "check:charmsim": "esbuild tools/charmsim-check.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/charmsim-check.mjs && node node_modules/.cache/charmsim-check.mjs",
     "check:model-textures": "python3 tools/model-texture-check.py",
     "check:extract-completion": "node tools/extract-completion-check.mjs",
-    "check:paint-inputs": "python3 tools/paint-textures-check.py && node tools/paint-inputs-check.mjs"
+    "check:paint-inputs": "python3 tools/paint-textures-check.py && node tools/paint-inputs-check.mjs",
+    "check:prefetch": "node --experimental-strip-types tools/prefetch-check.ts"
   },
   "dependencies": {
     "@5stack/ui": "^0.2.0",
@@ -42,21 +43,21 @@
     "reka-ui": "^2.10.5",
     "tailwind-merge": "^3.7.0",
     "three": "^0.186.1",
-    "vue": "^3.5.43"
+    "vue": "^3.5.44"
   },
   "devDependencies": {
     "@originjs/vite-plugin-federation": "^1.4.1",
     "@types/three": "^0.186.0",
-    "@vitejs/plugin-vue": "^6.0.9",
+    "@vitejs/plugin-vue": "^6.0.10",
     "autoprefixer": "^10.6.1",
     "esbuild": "^0.28.2",
-    "postcss": "^8.5.28",
-    "postcss-nesting": "^14.0.2",
+    "postcss": "^8.5.31",
+    "postcss-nesting": "^14.0.3",
     "tailwindcss": "^3.4.19",
     "typescript": "^6.0.3",
-    "vite": "^8.3.1",
+    "vite": "^8.3.4",
     "vite-plugin-css-injected-by-js": "^5.0.2",
-    "vue-tsc": "^3.3.11"
+    "vue-tsc": "^3.3.13"
   },
   "overrides": {
     "@5stack/ui": {

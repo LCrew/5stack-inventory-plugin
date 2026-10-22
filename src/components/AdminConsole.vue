@@ -318,7 +318,7 @@ const PART_META: Record<string, { label: string; hint: string; required?: boolea
   },
   modelTextures: { label: "Model textures", hint: "The shared pool every GLB references", required: true },
   modelMeta: { label: "Anchors & markup", hint: "Attachment points, sticker slots, the version stamp" },
-  // The two kinds of COPY extraction v38 writes beside an original. Their own
+  // The two kinds of COPY extraction v39 writes beside an original. Their own
   // rows, so every row above is what the mount holds once, and the group can
   // say how much of its total is copies.
   inputs2048: { label: "Lighter input copies", hint: "2048 px copies of the largest composite inputs, fetched instead of the originals" },

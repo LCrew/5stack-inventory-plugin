@@ -103,9 +103,9 @@ export interface CatalogSkin {
   design?: number;
   /**
    * KNIVES and GLOVES only: the bare model every finish of the kind is painted
-   * onto — "Butterfly Knife", "Bloodhound Gloves". The craft sheet folds the
-   * finishes under it, wearing the model's own icon, which for gloves is not an
-   * item on the list (see getGloves) and so has to be named here.
+   * onto — "Butterfly Knife", "Bloodhound Gloves". The craft sheet groups the
+   * finishes under it. For gloves that model is not an item on the list (see
+   * getGloves), so it has to be named here.
    */
   baseId?: number;
   baseName?: string;
@@ -329,7 +329,9 @@ export function getWeaponSkins(model: string): {
 
 export function getAgents() {
   return items
-    .filter((i) => i.type === "agent")
+    // Not the stock SAS and Phoenix that cs2-lib 9.6 added: like the stock
+    // knives and gloves they are the slot's default, not something to craft.
+    .filter((i) => i.type === "agent" && !i.isDefault)
     .map((a) => ({
       id: a.id,
       name: a.name,
@@ -1201,7 +1203,7 @@ export function getDefaults() {
   const agentDefault = (team: "CT" | "T") => {
     const family = team === "CT" ? "ctm_sas" : "tm_phoenix";
     const preferred = team === "CT" ? "ctm_sas_variantf" : "tm_phoenix_varianth";
-    const pool = items.filter((i) => i.type === "agent" && (i.modelKey ?? "").includes(family));
+    const pool = items.filter((i) => i.type === "agent" && !i.isDefault && (i.modelKey ?? "").includes(family));
     return lite(pool.find((i) => (i.modelKey ?? "").includes(preferred)) ?? pool[0]);
   };
   return {

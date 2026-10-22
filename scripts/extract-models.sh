@@ -252,6 +252,8 @@ set -euo pipefail
 #     index kept whole by `--only`, and stale per-action files removed.
 #     A scoped run of that step (dev-backend.sh step viewmodel-anims) stamps
 #     nothing, so it can follow upstream's full run without a re-extract.
+#   Upstream has since shipped that same step (#59-#61; extract-viewmodel-anims
+#   is now identical on both sides), so a full v39 run from either matches.
 # v38 (2026-10-21): LIGHTER ASSETS, same pixels (scripts/lighten-assets.mjs).
 #   inputs-2048  every composite input over 2048px gets a 2048 copy beside it
 #                (`<name>.2048.png`, listed in meta.json as `textures2048`). The
@@ -2120,7 +2122,7 @@ PYEOF
 fi
 
 # ---- 3b2. 2048 copies of the large composite inputs --------------------------
-# v38. The HD gun bundles ship color/metalness (and some masks) at 4096, and the
+# v39. The HD gun bundles ship color/metalness (and some masks) at 4096, and the
 # compositor renders at 2048 for every style but the projected two — where the
 # GPU then reads the 4096 map at its 2048 mip. This writes that mip once, as
 # <name>.2048.png beside the original, and lists it in meta.json `textures2048`;
@@ -5707,7 +5709,7 @@ fi
 fi
 
 # ---- 5d. Precompressed siblings ----------------------------------------------
-# v38. <file>.gz (gzip -9) beside every .glb and .json over 1KB on /models, which
+# v39. <file>.gz (gzip -9) beside every .glb and .json over 1KB on /models, which
 # nginx (gzip_static) and the Node servers send in place of the raw file when the
 # browser accepts gzip. GLBs went out uncompressed before this: ak47.glb is 3.3MB
 # raw and 1.1MB here; sticker-markup.json 559KB -> 24KB. PNG/WebP/EXR and audio

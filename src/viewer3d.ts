@@ -4120,7 +4120,8 @@ async function buildViewer(
   const smooth = (x: number) => x * x * (3 - 2 * x);
   function stepAgentMotion(now: number) {
     if (kind !== "agent" || !bindPose || opts?.still) return;
-    const live = motionOn && agentMotion !== "still";
+    // Reduced motion holds the agent still, as it does the inspect sway.
+    const live = motionOn && agentMotion !== "still" && !reducedMotion.value;
     if (!live) {
       // Back to the plain pose once, when motion stops.
       if (agentMoved) {
@@ -5643,6 +5644,11 @@ async function buildViewer(
    * syncFpvSeat), so once is enough. The real meshes keep rendering and keep
    * their skeleton; the twins share their material, name and userData.
    */
+  /** First person only: each twin's real skinned mesh, and every bone's world
+   *  matrix at the moment the twins were posed — what a sticker needs to follow
+   *  the part it sits on (see partFollowFor). */
+  const twinSource = new Map<import("three").Mesh, import("three").SkinnedMesh>();
+  const bonesAtMount = new Map<import("three").Object3D, import("three").Matrix4>();
   /** World matrix, in the pose the twins were taken in, of each bone that
    *  carries attachments through a first-person clip — a dual rig's pistols,
    *  any other weapon's `weapon_offset`. See followDualParts. */
@@ -5655,6 +5661,9 @@ async function buildViewer(
     for (let i = 0; i < weaponMeshes.length; i++) {
       const skinned = weaponMeshes[i] as import("three").SkinnedMesh;
       if (!skinned.isSkinnedMesh) continue;
+      for (const bone of skinned.skeleton.bones) {
+        if (!bonesAtMount.has(bone)) bonesAtMount.set(bone, bone.matrixWorld.clone());
+      }
       const geom = skinned.geometry.clone();
       const pos = geom.getAttribute("position");
       const nrm = geom.getAttribute("normal");
@@ -5688,6 +5697,7 @@ async function buildViewer(
       twin.matrix.copy(skinned.matrixWorld);
       twin.matrixWorld.copy(skinned.matrixWorld);
       weaponMeshes[i] = twin;
+      twinSource.set(twin, skinned);
     }
     // The bones that carry attachments through a clip, as they stand in the
     // twins — see followDualParts: a dual rig's two pistols, everything else's
@@ -5702,6 +5712,54 @@ async function buildViewer(
       if (b) dualBind.set(name, b.matrixWorld.clone());
     }
     if (dualBind.size < carriers.length) dualBind.clear();
+  }
+
+  /**
+   * FIRST PERSON: a sticker rides the part it is on.
+   *
+   * Stickers are cut once, in world space, from the twins above, so they are
+   * where the parts were at mount. The body never moves in this mode, but its
+   * parts do: the reload clip takes the AK-47's magazine out and back, and the
+   * sticker on it stayed in the air where the magazine had been.
+   *
+   * So a sticker takes the bone that carries most of the skin under its centre
+   * and follows that bone's motion since mount. For a vertex skinned to bone B,
+   *   world = M · bindMatrixInverse · B · boneInverse · bindMatrix · v,
+   * and only B changes, so
+   *   world_now = M · BI · B_now · B_mount⁻¹ · BI⁻¹ · M⁻¹ · world_mount.
+   * `pre` and `post` are the two constant ends of that. Rigid, by the centre's
+   * bone: a sticker that straddles two parts goes with the one under its
+   * middle, which the game's own decals do too.
+   */
+  type PartFollow = { bone: import("three").Object3D; pre: import("three").Matrix4; post: import("three").Matrix4 };
+  function partFollowFor(at: SurfacePoint | null): PartFollow | null {
+    const skinned = at ? twinSource.get(at.mesh) : undefined;
+    if (!at || !skinned || !at.tri || !at.bary) return null;
+    const si = skinned.geometry.getAttribute("skinIndex");
+    const sw = skinned.geometry.getAttribute("skinWeight");
+    if (!si || !sw) return null;
+    const weight = new Map<number, number>();
+    for (let j = 0; j < 3; j++) {
+      for (let k = 0; k < 4; k++) {
+        const w = sw.getComponent(at.tri[j], k) * at.bary[j];
+        if (w > 0) {
+          const b = si.getComponent(at.tri[j], k);
+          weight.set(b, (weight.get(b) ?? 0) + w);
+        }
+      }
+    }
+    let best = -1;
+    let most = 0;
+    for (const [b, w] of weight) if (w > most) [best, most] = [b, w];
+    const bone = skinned.skeleton.bones[best];
+    const mount = bone ? bonesAtMount.get(bone) : undefined;
+    if (!bone || !mount) return null;
+    // `pre` is M · BI, and `post` must undo exactly that. NOT bindMatrix · M⁻¹:
+    // bindMatrix is the mesh's world matrix when it was BOUND, and the viewer
+    // scales and centres the model after that, so it is no inverse of anything
+    // here — every sticker took a constant offset and flew off the gun.
+    const pre = skinned.matrixWorld.clone().multiply(skinned.bindMatrixInverse);
+    return { bone, pre, post: mount.clone().invert().multiply(pre.clone().invert()) };
   }
   /**
    * The subset that carries TEXCOORD_1 — i.e. the surfaces the game maps
@@ -5869,7 +5927,15 @@ async function buildViewer(
     return built;
   }
 
-  type SurfacePoint = { mesh: import("three").Mesh; point: import("three").Vector3; normal: import("three").Vector3 };
+  type SurfacePoint = {
+    mesh: import("three").Mesh;
+    point: import("three").Vector3;
+    normal: import("three").Vector3;
+    /** The triangle's vertices and the point's weights on them — for reading
+     *  the skin under it (partFollowFor). Absent from a plain raycast hit. */
+    tri?: [number, number, number];
+    bary?: [number, number, number];
+  };
   /**
    * Every point on the model carrying this TEXCOORD_1 — see above for why there
    * is more than one.
@@ -5909,7 +5975,13 @@ async function buildViewer(
           normal.addScaledVector(tmp.fromBufferAttribute(nrm, c), w2);
           normal.transformDirection(mesh.matrixWorld).normalize();
         }
-        out.push({ mesh, point, normal: normal.lengthSq() ? normal : new THREE.Vector3(0, 1, 0) });
+        out.push({
+          mesh,
+          point,
+          normal: normal.lengthSq() ? normal : new THREE.Vector3(0, 1, 0),
+          tri: [a, b, c],
+          bary: [w0, w1, w2],
+        });
       }
     }
     return out;
@@ -6726,7 +6798,7 @@ async function buildViewer(
     // Real anchor when we have the model's markup; the old silhouette guess
     // only as a fallback for weapons we couldn't fetch markup for.
     const { mk, shared } = slotMarkup(st.slot);
-    let hit: { mesh: import("three").Mesh; point: import("three").Vector3; normal: import("three").Vector3 } | null;
+    let hit: SurfacePoint | null;
     // Set on the markup path: the sticker's rectangle in the unwrap. Its presence
     // is what selects the UV cut over the legacy world-space projection.
     let uvCut: { u: number; v: number; size: number; rot: number } | null = null;
@@ -6917,6 +6989,18 @@ async function buildViewer(
     // span measured back into world units, so the grab area still matches what
     // is on screen; decalSizeFor computes exactly that from the uv1 density.
     mesh.userData.stickerRadius = decalSizeFor(st.slot) * 0.5;
+    // First person: ride the part under the sticker's centre (partFollowFor).
+    // The geometry was just cut where the parts were at mount, so the follow
+    // starts again from there.
+    // Not on a dual rig: followDualParts carries those stickers with their
+    // pistol, and two follows writing one matrix would fight.
+    const follow = fpvSpec && !dualBind.has("weapon_l") ? partFollowFor(hit) : null;
+    mesh.userData.partFollow = follow;
+    if (!follow && !mesh.matrixAutoUpdate) {
+      mesh.matrix.identity();
+      mesh.matrixAutoUpdate = true;
+      mesh.matrixWorldNeedsUpdate = true;
+    }
     if (isNew) flashSticker(st.slot);
     if (STICKER_LOG) {
       const end = performance.now();
@@ -8241,85 +8325,55 @@ async function buildViewer(
   // frame (x forward/muzzle, y left, z up). The GLB is that frame swizzled and
   // scaled, so the conversion both ways is the node matrix's permutation.
   const SRC_TO_M = 0.0254;
-  // The swizzle alone is NOT the whole conversion once a pose is rendered.
-  // `inventory_icon` moves the body off the bind pose — that is what makes the
-  // weapon stand upright instead of lying on its side — so a point picked off
-  // the rendered surface is in POSED space, while the game reads model (bind)
-  // space. Undo the body's rigid pose motion on the way out and re-apply it on
-  // the way in. Weapons are rigid props, so for the body poseXform is exact.
+  // A CHARM OFFSET IS A POINT IN THE MODEL'S OWN FRAME — the frame the
+  // vertices and the authored charm quads are in — in Source inches. So it is
+  // mapped exactly the way those quads are (see charmSurfaceTris' `put`): the
+  // body's pose, then the object's world matrix.
   //
-  // This is why charm placement broke in-game while stickers kept working:
-  // stickers report through UV1, a per-vertex property no pose can move.
-  // poseXform maps MODEL INCHES -> WORLD METRES: the GLB node matrix carries the
-  // x0.0254 (see the charm-anchor extraction notes), and bakePose picks it up.
-  // So it must be fed inches, NOT metres. Scaling by SRC_TO_M first applied the
-  // conversion twice, which made the map 1/0.0254 = 39.37x too sensitive
-  // everywhere except AT the anchor, where poseXform and poseInv cancel by
-  // construction and hid it. A ~5cm drag emitted x=86.941" on an AK whose
-  // anchor is 8.567". Measured by probePlacement().probeLinearity, which must
-  // read 1.00 on every axis — see tools/shadertest/placement.ts.
-  // Charm offsets live in a DIFFERENT space from our geometry, and the whole
-  // history of this bug is the two being conflated.
+  // It used to go through a swizzle, the `weapon` bone's origin ("base") and a
+  // per-weapon calibration derived from the muzzle_flash landmark — an
+  // approximation of this same transform that was never better than its
+  // landmark. On an AK-47 it was 8.3mm out: a charm the game hangs IN the hole
+  // under the receiver hung from the receiver's edge here. Mapped like the
+  // quads, the same stored offset lands in the centre of that hole, 1.5mm from
+  // its authored quad. It is also what the one in-game measurement from the old
+  // derivation says: `x=36` hung an M4A4 charm at the muzzle, and the M4A4's
+  // muzzle sits at x=36.7 in this frame.
   //
-  //   game offsets : attachment origin + the `weapon` bone's origin ("base"),
-  //                  in Source inches. Verified in game on the M4A4:
-  //                  muzzle_flash 18.455 + base 18.235 = 36.69, and sending
-  //                  x=36 hangs the charm just behind the muzzle.
-  //   our GLB      : attachment origin ONLY. Attachments are parented to
-  //                  `weapon_offset`, which sits at [0,0,0]; `weapon` is a
-  //                  SIBLING bone, not an ancestor, so VRF never bakes it in.
+  // Not the keychain ATTACHMENT (charmAnchor below): that is bone-relative and
+  // in a different frame, and the note there still holds for it.
   //
-  // charmAnchors.json used to store base-included values and the viewer read
-  // them as GLB positions. On the M4A4 that put the anchor at 0.4736m when the
-  // model only reaches 0.448m — past the muzzle, which is exactly where users
-  // saw the charm pinned. The file now stores the bone-relative anchor plus the
-  // base separately, and the base is added/removed only when crossing into or
-  // out of the game's space.
-  //
-  // No pose transform here: poseXform is a bone matrix that happens to carry a
-  // 0.0254 and is not the model->GLB mapping. Applying it (either by feeding it
-  // metres or inches) was tried and moves the anchor off the weapon.
-  const charmBase = (() => {
-    const b = (CHARM_ANCHORS as Record<string, { base?: number[] } | undefined>)[model]?.base;
-    return b && b.length === 3 ? b : [0, 0, 0];
-  })();
-  // Per-weapon calibration: our GLB and the game's model do not line up exactly,
-  // and the residual differs per weapon (M4A4 z=-2.22 vs Glock z=-1.31), so a
-  // single constant cannot serve both.
-  //
-  // DERIVED, not hand-measured. `muzzle_flash` is a landmark known in both
-  // spaces — the .vmdl gives its offset-space position and the frontmost barrel
-  // geometry is the same physical point — so the gap between them is the
-  // correction. Generated by tools/shadertest/placement.ts (?all=1) and stored
-  // in charmAnchors.json. Validated against the one in-game measurement we
-  // have: derived (0.825, 0.207, -2.219) vs measured (0.784, 0.146, -2.370) on
-  // an M4A4, agreeing within 0.15" on a 35" rifle.
-  //
-  // Applied in BOTH directions so preview and transmitted offset stay inverse:
-  // a stored game offset previews where the user put it, and a drag emits what
-  // the game wants.
-  const CHARM_CAL = (() => {
-    const c = (CHARM_ANCHORS as Record<string, { cal?: number[] } | undefined>)[model]?.cal;
-    return c && c.length === 3 ? { x: c[0], y: c[1], z: c[2] } : { x: 0, y: 0, z: 0 };
-  })();
-  const offsetToWorld = (c: { x?: number | null; y?: number | null; z?: number | null }) =>
-    new THREE.Vector3(
-      ((c.y ?? 0) - CHARM_CAL.y - charmBase[1]) * SRC_TO_M,
-      ((c.z ?? 0) - CHARM_CAL.z - charmBase[2]) * SRC_TO_M,
-      ((c.x ?? 0) - CHARM_CAL.x - charmBase[0]) * SRC_TO_M,
-    );
-  const worldToOffset = (v: import("three").Vector3) => ({
-    x: v.z / SRC_TO_M + charmBase[0] + CHARM_CAL.x,
-    y: v.x / SRC_TO_M + charmBase[1] + CHARM_CAL.y,
-    z: v.y / SRC_TO_M + charmBase[2] + CHARM_CAL.z,
-  });
+  // Both keep their old contract — pre-recentre space, callers add or subtract
+  // `center` — so every caller and probe reads the same as before.
+  const charmFrame = () => {
+    const pose = poseBones.byName.get("weapon_offset") ?? poseXform;
+    object.updateMatrixWorld(true);
+    return { pose, world: object.matrixWorld };
+  };
+  const offsetToWorld = (c: { x?: number | null; y?: number | null; z?: number | null }) => {
+    const { pose, world } = charmFrame();
+    const p = new THREE.Vector3(c.x ?? 0, c.y ?? 0, c.z ?? 0);
+    // No pose baked (first person keeps the skeleton at bind): the swizzle and
+    // scale, exactly as `put` falls back.
+    if (pose) p.applyMatrix4(pose);
+    else p.set(p.y, p.z, p.x).multiplyScalar(SRC_TO_M);
+    return p.applyMatrix4(world).add(center);
+  };
+  const worldToOffset = (v: import("three").Vector3) => {
+    const { pose, world } = charmFrame();
+    const p = v.clone().sub(center).applyMatrix4(world.clone().invert());
+    if (pose) p.applyMatrix4(pose.clone().invert());
+    else p.set(p.z, p.x, p.y).divideScalar(SRC_TO_M);
+    return { x: p.x, y: p.y, z: p.z };
+  };
 
   /**
    * FIRST PERSON: from the pose the charm data was measured on to the pose the
    * held weapon is in.
    *
-   * The keychain point (and a stored charm offset) is model space at the ICON
-   * pose, the one the item view bakes. A held weapon stays skinned at BIND (see
+   * The keychain point is model space at the ICON pose, the one the item view
+   * bakes. (A stored charm offset no longer needs this: offsetToWorld maps it
+   * like the quads, into whichever frame the gun is drawn in.) A held weapon stays skinned at BIND (see
    * "FIRST PERSON KEEPS THE SKELETON"), where its `weapon` bone, and the whole
    * body with it, sits elsewhere: on the USP-S 0.27m along the barrel. The
    * recentre takes the body back to the origin either way, so a point measured
@@ -8349,7 +8403,6 @@ async function buildViewer(
     if (bone.parent) icon.premultiply(bone.parent.matrixWorld);
     return new THREE.Matrix4().multiplyMatrices(bone.matrixWorld, icon.invert());
   })();
-  const charmPoseUnfix = charmPoseFix ? charmPoseFix.clone().invert() : null;
 
   const charmAnchor = (() => {
     const a = (CHARM_ANCHORS as Record<string, { keychain: number[] } | undefined>)[model];
@@ -8991,22 +9044,26 @@ async function buildViewer(
     // Off the weapon: slide along the silhouette rather than inventing a point.
     const raw = surf ?? nearestOnBody();
     if (!raw) return null;
-    // FREE PLACEMENT. The charm goes exactly where the pointer says, kept on
-    // the surface and nothing else. Two rules were tried here and both
-    // reverted, each by measurement:
-    //   - a quad SEAT moved the average USP-S drag frame 16mm off the pointer
-    //     (64mm before the bones were unfiltered), enforcing a restriction no
-    //     source could confirm the game has;
-    //   - a clamp into charmBoundsBox (cs2-lib's own reading of the game's
-    //     limit) fought the surface snap — a clamped point snaps back to the
-    //     nearest surface, which is outside the box again wherever the box
-    //     excludes real body (the AK's magazine, which players demonstrably
-    //     charm in game). ?drop=1 scored the fight: 77% of AK frames
-    //     "escaped", every one of them flush on the gun at the pointer.
-    // The box survives as TELEMETRY (dropAt reports inBox) so the day someone
-    // places a charm in game at an out-of-box offset and reads it back, the
-    // question of whether the game clamps has a measurement waiting.
-    const anchor = snapToSurface(raw, true);
+    // LEGAL PLACEMENT: on the authored KeychainMarkup quads, the surfaces the
+    // game itself lets a charm go. Pointing at one puts the charm exactly there;
+    // pointing anywhere else on the gun slides it to the nearest legal point,
+    // so a charm can no longer be dropped on a trigger. On an AK-47 the quads
+    // cover 31% of the body, 13% of the bolt, 1.5% of the magazine and none of
+    // the trigger (vertices within 6mm of a quad).
+    //
+    // This was tried once and reverted: it moved the average USP-S drag frame
+    // 16mm off the pointer, "enforcing a restriction no source could confirm
+    // the game has", and the AK's magazine was believed charmable in game. The
+    // source is the quads themselves — Valve's own placement data — and a
+    // charm hanging IN FRONT of the magazine hangs from the receiver above it,
+    // which is quad. The offset still goes to the game exactly as placed (see
+    // offsetToWorld), so what is shown is what the game draws.
+    //
+    // The clamp into charmBoundsBox stays out (it fought the surface snap; see
+    // dropAt's inBox telemetry): the quads are tighter than the box anyway.
+    const onSurface = snapToSurface(raw, true);
+    const legal = charmSurfaceTris ? nearestOnCharmSurface(onSurface) : null;
+    const anchor = legal && legal.dist > CHARM_LEGAL_TOL ? legal.point.clone() : onSurface;
     // Pointing at a hole is not a placement — but only where there is no
     // authored data at all (a knife, or a mount extracted before the markup
     // existed): with a map the box is the game's own rule and the guess does
@@ -9060,6 +9117,9 @@ async function buildViewer(
    * bite has always been sized for. Same value here, same reason.
    */
   const CHARM_CLEARANCE = 0.0003;
+  /** How far a drag point may sit from an authored quad and still count as on
+   *  it: the quads are flat and the shell is not, by up to a few mm. Metres. */
+  const CHARM_LEGAL_TOL = 0.002;
   /** A point on an authored quad, put on the mesh under it — the quads are flat
    *  and the shell is not, so this is what turns a quad point into a seat with a
    *  real outward normal. */
@@ -9149,8 +9209,8 @@ async function buildViewer(
     // — the flank of a magazine, the front of a handguard, which is the "charm
     // dangling under the barrel" every screenshot showed. The KeychainMarkup
     // quads answer where a DEFAULT charm belongs, so the default is seated on
-    // one. A placed charm never comes through here (see snapToSurface): where
-    // the user put it IS the answer.
+    // one. A placed charm never comes through here (see charmPivot): where the
+    // user put it IS the answer.
     //
     // Landing on the quad is not the last step: the quads are flat and the shell
     // is not, so the quad point is up to a few mm off the real surface. Seating
@@ -9215,11 +9275,17 @@ async function buildViewer(
 
   function charmPivot(c: CharmPlacement) {
     // The same placed/unplaced fork resolveCharmPivot itself branches on: a
-    // placement with any component is somewhere someone chose — keep it there,
-    // on the surface. Only the untouched default gets seated onto the authored
-    // quads.
+    // placement with any component is somewhere someone chose — keep it EXACTLY
+    // there. Only the untouched default gets seated onto the authored quads.
+    //
+    // Not snapped to any surface. The game hangs a charm at its stored offset
+    // and nowhere else, and an offset can sit in an opening: the AK-47's hole
+    // under the receiver takes the charm's ring, and snapping to the nearest
+    // surface pulled it out onto the hole's rim. A placement dragged here is on
+    // the surface already (the drag snaps it), so reading it back unsnapped
+    // returns the same point.
     const placed = c.x != null || c.y != null || c.z != null;
-    return placed ? snapToSurface(resolveCharmPivot(c)) : attachToBody(resolveCharmPivot(c));
+    return placed ? resolveCharmPivot(c) : attachToBody(resolveCharmPivot(c));
   }
 
   /**
@@ -9237,7 +9303,9 @@ async function buildViewer(
     if (charmAnchor) {
       // Absolute, to match what the game consumes — undo the recentering to get
       // back into model space rather than measuring from the anchor.
-      const off = worldToOffset((charmPoseUnfix ? p.clone().applyMatrix4(charmPoseUnfix) : p.clone()).add(center));
+      // The frame worldToOffset inverts is the one the gun is drawn in, first
+      // person included, so no pose correction on the way out.
+      const off = worldToOffset(p.clone().add(center));
       return { x: round(off.x, 3), y: round(off.y, 3), z: round(off.z, 3) };
     }
     // The length fraction spans the WHOLE usable body (t 0.05..0.95), not the
@@ -9271,9 +9339,13 @@ async function buildViewer(
     // is what an unplaced charm previews at.
     if (charmAnchor) {
       const placed = c.x != null || c.y != null || c.z != null;
+      // Mapped like the quads, so already in the frame the gun is drawn in —
+      // first person included; charmPoseFix is for the attachment only.
       const stored = placed ? offsetToWorld(c).sub(center) : null;
-      if (stored && charmPoseFix) stored.applyMatrix4(charmPoseFix);
-      return liftOutOfBody(stored ?? charmAnchor.clone());
+      // Only the authored anchor is lifted clear of the body. A stored offset
+      // is where the game draws the charm, so it is drawn there too (see
+      // charmPivot).
+      return stored ?? liftOutOfBody(charmAnchor.clone());
     }
     if (c.x == null && c.y == null && c.z == null) {
       const hook = dualKeychainPoint();
@@ -9326,21 +9398,16 @@ async function buildViewer(
   ring.visible = false;
   scene.add(ring);
   /**
-   * `?charmmap=1` — paint the authored KeychainMarkup quads on the weapon.
-   *
-   * A DEBUG VIEW, not UI. The quads stopped being the placement rule (a drag is
-   * free anywhere on the body inside their bounding box — see
-   * resolveDragAnchor), so lighting them during a drag told the user a rule
-   * that no longer exists; the drag-time highlight is gone. The flag remains
-   * because the quads still do two jobs — seat the unplaced default, and
-   * supply the clamp box — and "are they on the mesh we render" is a question
-   * someone will need drawn again (it is how the elite's 33-96mm map offset
-   * was found).
+   * The authored KeychainMarkup quads, painted on the weapon: where a charm may
+   * go. Shown WHILE A CHARM IS DRAGGED, because the quads are the placement
+   * rule (see resolveDragAnchor) and a rule the pointer slides against has to
+   * be visible. `charmmap` (Developer tab) keeps them up the whole time — how
+   * the elite's 33-96mm map offset was found.
    */
   const CHARM_MAP_ALWAYS = debugFlag("charmmap");
   const charmMap = (() => {
     const xyz = charmSurfaceTris;
-    if (!xyz || opts?.still || !CHARM_MAP_ALWAYS) return null;
+    if (!xyz || opts?.still) return null;
     const geo = new THREE.BufferGeometry();
     geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(xyz), 3));
     const mat = new THREE.MeshBasicMaterial({
@@ -9361,11 +9428,19 @@ async function buildViewer(
     });
     const mesh = new THREE.Mesh(geo, mat);
     mesh.renderOrder = 29; // over the weapon, under the ring at 30
+    mesh.visible = CHARM_MAP_ALWAYS;
     scene.add(mesh);
     return { mesh, mat, geo };
   })();
 
     function updateRing() {
+    if (charmMap) {
+      const dragging = !!charm && charmDragging;
+      charmMap.mesh.visible = CHARM_MAP_ALWAYS || dragging;
+      // Strong enough to read on a busy finish while it is the rule being
+      // dragged against; the always-on debug view keeps the light wash.
+      charmMap.mat.opacity = dragging ? 0.35 : 0.2;
+    }
     if (!charm) {
       ring.visible = false;
       return;
@@ -12144,19 +12219,19 @@ async function buildViewer(
   /** The weapon's whole skeleton follows the viewmodel clip's prop tracks. */
   const fpvProps = fpvKnife || fpvDual;
   /**
-   * Which prop tracks an action takes, for a weapon that is not all prop
-   * tracks (fpvProps).
+   * Which prop tracks this path takes, for a weapon that is not all prop
+   * tracks (fpvProps): `weapon_offset` only.
    *
-   * A gun's parts come from its GLB's own clips where it has one for the
-   * action (reload, shoot, draw — PART_CLIP), and two clips on one bone average
-   * into neither, so those actions take only `weapon_offset`. The inspects have
-   * no part clip, so they take everything. `weapon_offset` is the gun turned in
-   * the hand: identity in every plain clip, and the whole point of the rare
-   * ones — the Deagle's spin and the C4's toss key it, and without it the hands
-   * went through the motion around a weapon that never moved.
+   * A gun's PARTS (magazine, bolt) already play from the same viewmodel clip
+   * through `entry.parts` (see playFpvAction), on every action that has them,
+   * and two actions on one bone average into neither — so this takes only what
+   * that path leaves out. `weapon_offset` is the gun turned in the hand:
+   * identity in every plain clip, and the whole point of the rare ones — the
+   * Deagle's spin and the C4's toss key it, and without it the hands went
+   * through the motion around a weapon that never moved.
    */
-  const propBones = (action: ClipAction | "rest") => (b: string) =>
-    !!object.getObjectByName(b) && (fpvProps || b === "weapon_offset" || (action !== "rest" && !weaponActions.has(action)));
+  const propBones = (_action: ClipAction | "rest") => (b: string) =>
+    !!object.getObjectByName(b) && (fpvProps || b === "weapon_offset");
   const fpvTune = new THREE.Quaternion();
   const fpvEuler = new THREE.Euler();
   /**
@@ -12182,6 +12257,17 @@ async function buildViewer(
    */
   const fpvRel = new THREE.Matrix4();
   const fpvLightQ = new THREE.Quaternion();
+  /** Each first-person sticker to where its part is now — see partFollowFor. */
+  function followStickerParts() {
+    for (const mesh of liveMesh.values()) {
+      const f = mesh.userData.partFollow as PartFollow | null | undefined;
+      if (!f) continue;
+      f.bone.updateWorldMatrix(true, false);
+      mesh.matrix.multiplyMatrices(f.pre, f.bone.matrixWorld).multiply(f.post);
+      mesh.matrixAutoUpdate = false;
+      mesh.matrixWorldNeedsUpdate = true;
+    }
+  }
   function syncFpvSeat() {
     if (!fpvFrame || !fpvWpn || !fpvUnbake) return;
     fpvFrame.updateMatrixWorld(true);
@@ -12694,7 +12780,13 @@ async function buildViewer(
   /** Viewmodel clips built on demand, one per action, with their sound cues. */
   const fpvClips = new Map<
     ClipAction,
-    { clip: import("three").AnimationClip; cues: ClipCue[]; prop: import("three").AnimationClip | null }
+    {
+      clip: import("three").AnimationClip;
+      cues: ClipCue[];
+      prop: import("three").AnimationClip | null;
+      /** A gun's moving parts from the viewmodel clip itself — see playFpvAction. */
+      parts: import("three").AnimationAction | null;
+    }
   >();
   /** Cues still to fire for the action playing, in clip order. */
   let fpvCues: ClipCue[] = [];
@@ -12801,6 +12893,7 @@ async function buildViewer(
       arms.rest();
       playProp(null);
       for (const a of weaponActions.values()) a.fadeOut(PARTS_FADE);
+      for (const e of fpvClips.values()) e.parts?.fadeOut(PARTS_FADE);
       onDone?.();
       return;
     }
@@ -12823,10 +12916,43 @@ async function buildViewer(
         return;
       }
       const built = buildViewmodelClip(THREE as unknown as typeof import("three"), raw);
+      /**
+       * A GUN'S PARTS COME FROM THIS CLIP TOO, when it has them.
+       *
+       * They used to come from the weapon GLB's own `reload`/`shoot`, on the
+       * belief that the two are the same animation. They are not. On the AK-47
+       * the GLB's `reload` throws the magazine 20-28" from the gun and turns it
+       * 180 degrees and back between two frames (0.60-0.73s) — the swap, as
+       * the world model plays it — so the held magazine flailed through the
+       * reload nowhere near the hand. The viewmodel clip's own `clip` track
+       * stays within 1.5" of `attachHand_L` from the pull to the insert: it is
+       * authored against these hands, on this clock. Same bone space (the rest
+       * values agree to 0.002"), so it plays on the weapon's skeleton as is.
+       *
+       * `weapon`/`weapon_offset` stay out for the reason the GLB's do: `wpn`
+       * owns the placement.
+       */
+      // Not knives or the Dual Berettas: those take the same tracks through
+      // playProp (fpvProps), and two actions on one bone average into neither.
+      const vmParts =
+        !fpvProps && weaponMixer
+          ? buildPropClip(
+              THREE as unknown as typeof import("three"),
+              raw,
+              (b) => !/^(weapon_offset|ag1_hand_[lr])$/i.test(b) && !!object.getObjectByName(b),
+            )
+          : null;
+      let parts: import("three").AnimationAction | null = null;
+      if (vmParts && weaponMixer) {
+        parts = weaponMixer.clipAction(vmParts);
+        parts.setLoop(THREE.LoopOnce, 1);
+        parts.clampWhenFinished = true;
+      }
       entry = {
         clip: built.clip,
         cues: [...(raw.sounds ?? [])].sort((a, b) => a.t - b.t),
         prop: buildPropClip(THREE as unknown as typeof import("three"), raw, propBones(action)),
+        parts,
       };
       fpvClips.set(clipName, entry);
       // The fire clip carries the weapon's rate of fire — see the extractor.
@@ -12836,7 +12962,11 @@ async function buildViewer(
       }
     }
     if (!arms) return;
-    const parts = weaponActions.get(action);
+    // The viewmodel's own parts when the clip has them; the GLB's otherwise.
+    const glbParts = weaponActions.get(action);
+    const parts = entry.parts ?? glbParts;
+    // Never both: two actions on the same bones blend into a third motion.
+    if (entry.parts && glbParts) glbParts.stop();
     arms.play(entry.clip, () => {
       parts?.fadeOut(PARTS_FADE);
       playProp(null);
@@ -12953,6 +13083,9 @@ async function buildViewer(
       m.multiplyMatrices(bone.matrixWorld, dualInv.copy(bind).invert());
     }
     for (const mesh of liveMesh.values()) {
+      // A gun's stickers ride their own part (followStickerParts), which already
+      // carries weapon_offset's motion: the magazine is its child.
+      if (mesh.userData.partFollow) continue;
       const at = mesh.userData.stickerCenter as import("three").Vector3 | undefined;
       if (!at) continue;
       const name = (mesh.userData.dualBone as string | undefined) ?? (mesh.userData.dualBone = dualNearest(at));
@@ -14318,6 +14451,10 @@ async function buildViewer(
       // The weapon follows the clip's own `wpn` track. AFTER the mixer, because
       // that is what moved the node this reads.
       syncFpvSeat();
+      // And the stickers follow the parts the mixer just moved.
+      followStickerParts();
+      // A dual rig's pistols move whole, on their own bones; that follow
+      // handles its stickers and charm (followStickerParts never arms there).
       followDualParts();
       flash?.update(dt);
       pumpFpvCues();

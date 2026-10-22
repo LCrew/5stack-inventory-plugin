@@ -1,0 +1,72 @@
+5Stack Inventory Plugin
+Copyright (C) 2026 Luke Policinski
+
+This program is free software: you can redistribute it and/or modify it
+under the terms of the GNU Affero General Public License, version 3 only, as
+published by the Free Software Foundation (see LICENSE), together with the
+additional terms below.
+
+This program is distributed in the hope that it will be useful, but
+WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero
+General Public License for more details.
+
+
+ADDITIONAL TERMS (GNU AGPL version 3, section 7)
+
+These terms apply to every copy of this program and to every work based
+on it.
+
+1. Attribution (section 7(b)). Keep this NOTICE file and every copyright
+   notice in the source. Any user interface that displays Appropriate
+   Legal Notices must include the credit "Powered by 5Stack" with a
+   working link to https://5stack.gg. In the 5Stack web panel that credit
+   is on the sign-in page and on the Licenses page (/licenses).
+
+2. Origin (section 7(c)). Do not present a modified version as the
+   official 5Stack, or as made or endorsed by its author, and mark a
+   modified version as changed from the original.
+
+3. Names and marks (section 7(e)). This license grants no right to use
+   the 5Stack name or logo, except to give the credit in term 1 and to
+   describe the origin of the work truthfully.
+
+
+EARLIER VERSIONS
+
+Versions of this repository published before this NOTICE file was added
+declared the MIT License in package.json and remain under it.
+
+
+CONTRIBUTIONS
+
+Contributions are accepted only under the terms in CONTRIBUTING.md of the
+upstream repository, which let Luke Policinski license them under any
+terms:
+https://github.com/lukepolo/5stack-inventory-plugin/blob/main/CONTRIBUTING.md
+
+
+OTHER LICENSING
+
+To use this program under terms other than the license above, contact
+the copyright holder: https://github.com/lukepolo
+
+
+THIRD-PARTY SOFTWARE
+
+This plugin uses third-party npm packages, each under its own license,
+among them cs2-lib and cs2-lib-inspect by Ian Lucas (MIT License) and the
+module federation runtime from @originjs/vite-plugin-federation (Mulan
+Permissive Software License 2). Their license texts are collected in
+THIRD_PARTY_NOTICES.txt. After changing dependencies, regenerate it with
+`npm run third-party-notices`.
+
+
+MATERIAL NOT COVERED BY THIS LICENSE
+
+src/valveCombos/ and tools/shadertest/groundtruth/ hold shader code
+decompiled from Counter-Strike 2's shipped shader files with Source 2
+Viewer, and other data in this repository is read from the game's files.
+That material is the property of Valve Corporation. The copyright holder
+does not license it under the GNU AGPL, and nothing in this repository
+grants rights to it.

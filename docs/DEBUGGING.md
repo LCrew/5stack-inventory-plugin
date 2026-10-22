@@ -163,8 +163,8 @@ registry is `src/devFlags.ts`.
 | `perf` | per-frame timing HUD |
 | `inspectanim` | the idle inspect motion (also gates the holo drift) |
 | `compositelog` | every composite store lookup: generation, stem, `HIT`/`MISS`, uploads (not in the HUD) |
-| `prefetchlog` | every prefetch warm (`start`, `ready`, `missing`), every file a loader took from it (`HIT`, `loader waits for`), and `window.__prefetch.stats()` (not in the HUD); see [§4.16](#416-opening-an-item-in-3d-is-slow) |
-| `noprefetch` | turns prefetching off, for timing a cold open against a warm one (not in the HUD) |
+| `prefetchlog` | every prefetch warm (`start`, `ready`, `missing`), every file a loader took from it (`HIT`, `loader waits for`), and `window.__prefetch.stats()`; see [§4.16](#416-opening-an-item-in-3d-is-slow) |
+| `noprefetch` | turns prefetching off, for timing a cold open against a warm one |
 | `globalThis.__stDebug = true` (in a rig) | StatTrak placement and readout clearance, logged as `[st]` / `[st-clear]` |
 
 **Live vs card path.** `still: true` (cards, bakes) and the live viewer differ:
@@ -718,13 +718,13 @@ and on a store MISS the composite's sources (the weapon's `.inputs[.hd]`,
 milliseconds and its MB over the wire in the HUD.
 
 `src/prefetch.ts` starts that chain before the click: on a tile hover, on the
-Edit / View in 3D press, and for the equipped items once the page is idle (its
-header says what each one fetches). The bytes go into `src/prefetchStore.ts`
+Edit / View in 3D press, and for the equipped items once the page is idle (not
+on phones; its header says what each one fetches). The bytes go into `src/prefetchStore.ts`
 and the loaders take them from there through four hooks (`prefetchedFetch`,
 `prefetchedUrl`, `prefetchedUrlSync`, `settlePrefetched`); nothing depends on
-the HTTP cache. `?prefetchlog=1` shows every `start`, `ready` and `missing`, and
+the HTTP cache. **Prefetch log** (`prefetchlog`) shows every `start`, `ready` and `missing`, and
 on the loader side every `HIT`, `loader waits for` and `in use`;
-`window.__prefetch.stats()` has the totals. `?noprefetch=1` is the baseline.
+`window.__prefetch.stats()` has the totals. **No prefetch** (`noprefetch`) is the baseline.
 
 **Timing an open.** Run tools/standalone with `MOCK_CARDS=stub` (§3.6), click
 Edit from a page script, then poll the new canvas every frame until it has lit

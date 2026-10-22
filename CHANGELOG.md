@@ -10,7 +10,7 @@ The 3D model extraction is now at pipeline version 39, the same number as the in
 - **Editable StatTrak kill count**: the craft editor has a Kills field under the StatTrak switch, and the 3D preview shows the number live. Saving an edit sends the count only if you changed it, so kills the game server counts while the editor is open are never overwritten.
 - **Craftable C4**: the C4's Craft tab now offers the plain C4, which takes stickers, a charm and a name tag. Items with no finishes, the C4 included, are no longer offered a float, pattern or StatTrak they can't have.
 - **Glove pattern control**: every painted glove gets the same pattern tools as weapons: type a number, roll the dice, scrub the rail with a live 3D preview, and "Compare with another". Newer (Gen2) finishes whose artwork moves with the pattern also get Placement bars (Shift X, Shift Y, Rotation).
-- **Knives and gloves grouped by model**: the knife and glove Craft tabs open on one card per model, such as Butterfly Knife or Bloodhound Gloves, with a finish count. Finish cards carry the grey model label and the price, like owned cards.
+- **Knife and glove Craft tab by model**: every finish is still one scroll, now grouped by model with a header per model that stays pinned while you're in it. A rail of model silhouettes above the grid scrolls sideways, follows where you are, and jumps to a model on a click; a Jump menu beside it lists every model with a filter. Cards carry the grey model label and the price, like owned cards.
 - **Leaner Replace list**: Replace lists only the base weapons that can take the slot on that side and aren't already in the loadout.
 - **Reorder stickers**: drag sticker tiles onto each other, or use the ‹ › buttons, to change slot order, which decides which sticker is drawn on top. A moved sticker stays where it was on the weapon.
 - **Music kit preview in the focus view**: the focus view plays both tracks, labelled Full song and MVP, with one volume control above them, the same way the editor does. It showed one unlabelled player and no MVP anthem.
@@ -29,6 +29,9 @@ The 3D model extraction is now at pipeline version 39, the same number as the in
 
 - Editing or duplicating an owned item keeps its finish's float range. Owned Dopplers could be dragged to 1.00, and the save then failed.
 - Craft & Equip defaults to the team you are crafting from instead of "Both teams".
+- On a short window the item details panel ran down over the 3D view's first-person and screenshot buttons, StatTrak under the toggle. The panel now ends above them and scrolls.
+- A charm's pattern in the details panel's Applied list sat on a line of its own, reading as one more attachment. It now sits under the charm's name.
+- The focus view of a default-finish weapon showed Float and Pattern as "—", with a line across the bottom of the 3D view. A default finish has neither, so the row is gone.
 - The glove Craft list no longer includes ten gloves nobody can own: the eight bare models and the two stock pairs.
 - While editing, the item's name and estimated value sat on the very corner of the 3D view. They now stand clear of the edge, as in the focus view.
 
@@ -53,6 +56,10 @@ The 3D model extraction is now at pipeline version 39, the same number as the in
 
 - In first person the agent's sleeve wore the equipped glove's finish up to the elbow. Only the gloves take the finish now, and the sleeve keeps the agent's own look.
 - Stickers and charms disappeared in first person. They stay on the gun now, hidden only where the hand covers them, and a charm swings as the gun moves through reloads and shots.
+- A placed charm hung about a centimetre from where the game draws it. On the AK-47 a charm the game hangs in the hole under the receiver hung from the receiver's edge. Charm offsets are now mapped exactly like the game's own charm surfaces, so the 3D view shows the charm where the game will.
+- A charm could be dragged anywhere on a gun, the trigger included. Dragging now keeps it on the surfaces the game allows a charm (its authored charm surfaces, lit up while you drag); pointing elsewhere slides it to the nearest allowed spot.
+- In first person a sticker on a moving part stayed behind when the part moved: the AK-47's magazine sticker hung in the air during a reload. A sticker now moves with the part it is on.
+- The first-person reload threw the magazine around: on the AK-47 it spun 180 degrees and back and flew 20-28 inches from the gun, away from the hand holding it. Guns now take their moving parts from the first-person clip itself, so the magazine stays in the hand from the pull to the insert.
 - The C4 was held like a rifle in first person, with a rifle's reload and shot. It now plays its own draw, idle and inspect, after the next run of the first-person animation step (see Model Extraction).
 - First person offered Fire and Reload for items that can do neither. The buttons now match the item: the C4 is inspected and drawn only, the Zeus fires but has no reload, and knives have no fire or reload. An agent opened after holding a weapon no longer gets the weapon's buttons.
 - The Dual Berettas came up empty-handed in first person: the pistols showed only during a reload or a shot. They now sit in the hands through idle, inspect and draw too, with their stickers, StatTrak module, name tag and charm riding each pistol.
@@ -92,6 +99,7 @@ The 3D model extraction is now at pipeline version 39, the same number as the in
 - Switching "Verify composites" off in the Developer tab left it on, so that browser compared paint composites with the shared store but never saved any, and the pre-bake refused to run. Off now means off.
 - Editing an item's stickers or charm now re-renders its card. Card files were named only by wear, pattern and StatTrak, so moving, swapping or scratching a sticker kept the old picture until the cache was cleared.
 - A card whose paint failed to load, or which came out black, is retried instead of stored. This caused the Driver Gloves card to be black.
+- A tab left open while a model extraction finished showed "Render SAVED (backend OK) but /renders/ doesn't serve it back" and went on baking cards from the previous models under the new version's name. The server now refuses those cards, and the tab stops baking and asks for a reload. This caused the Driver Gloves card to be black.
 - Paint composites saved to the shared store before the Safari fix are no longer used, since Safari could have stored a bare weapon for a Doppler there.
 
 ## Performance
@@ -105,7 +113,7 @@ The 3D model extraction is now at pipeline version 39, the same number as the in
 - **Smaller studio lighting**: the lighting behind the Studio, Showcase, Warm and Dark presets is 371 kB instead of 1.4 MB, and is fetched only when one of them is in use. Test renders are unchanged to within 1 level in 99% of pixels.
 - **3D views load ahead of the click**: resting the pointer on an item card starts downloading what its 3D view needs, so a Bayonet | Doppler then opens in Edit in 0.7 s instead of 2 s on a 100 Mbit/s connection. Moving off the card before a download starts cancels it.
 - **Edit starts every download at once**: pressing Edit or View in 3D fetches the model, its textures and the paint together, instead of one after another as the viewer reaches each.
-- **Equipped items warm in the background**: once the loadout has loaded, the equipped items' 3D models are fetched while the page is idle, up to a fixed memory budget.
+- **Equipped items warm in the background**: once the loadout has loaded, the equipped items' 3D models are fetched while the page is idle, up to a fixed memory budget. Not on phones, where it would spend mobile data nobody asked for.
 - Prefetching stays out of the way: it is off under Save-Data and on 2G, and pauses while the tab is hidden or a 3D view is loading. The large paint inputs are only fetched once Edit or View in 3D is pressed, never on hover.
 
 ### Bug Fixes
@@ -157,7 +165,7 @@ The 3D model extraction is now at pipeline version 39, the same number as the in
 - **Card store in the mock server**: `tools/standalone` keeps baked cards (`CARDS_DIR` saves them between runs) and can play a backend from before WebP cards (`MOCK_CARD_FORMATS=png`).
 - **Composite store in the standalone mock**: `tools/standalone/mock-server.mjs` answers the pre-bake list from the fake inventory, accepts composite uploads after checking their names the way the backend does, and serves them back.
 - **Bundle report**: `tools/bundle-report.config.ts` builds the plugin and lists what each chunk contains and what loads with it.
-- **Prefetch switches**: `?prefetchlog=1` logs every prefetch and whether the viewer used it, and `?noprefetch=1` turns prefetching off to time a cold open.
+- **Prefetch switches**: **Prefetch log** in the Developer tab logs every prefetch and whether the viewer used it, and **No prefetch** turns prefetching off to time a cold open.
 - **Load-time testing in the standalone UI**: `MOCK_CARDS=stub` stops the card backfill, whose bakes would otherwise pre-load the model being timed. The mock keeps the paint composites it is sent, so a second session opens with a store hit, and `MOCK_COMPOSITES=keep` also reads the dev server's store for the rest.
 
 ### Removed
