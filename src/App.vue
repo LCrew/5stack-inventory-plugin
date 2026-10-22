@@ -6,7 +6,7 @@ import {
   Loader2, Search, LayoutGrid, Crosshair,
   Package, Hammer, Trash2, Copy, RotateCcw, Sparkles, Replace, RefreshCw, Pencil, Plus, X, Settings, Box, Clock, CircleDollarSign,
   Image as ImageIcon, Check, ExternalLink, SlidersHorizontal, ChevronUp, ChevronDown, ChevronLeft, ChevronRight, Palette, Link2,
-  Layers, Sticker as StickerIcon,
+  Layers, Sticker as StickerIcon, Group as GroupIcon, Ungroup as UngroupIcon, Move as MoveIcon,
 } from "lucide-vue-next";
 import {
   fetchCatalog,
@@ -2862,6 +2862,8 @@ async function saveCraft(andEquip = false) {
     const body = craftBody();
     if (editingId.value != null) {
       const updated = await updateInstance(editingId.value, body);
+      // A Sticker Craft placed on it stays a group the next time it is opened.
+      craftDrop.persist(updated.id);
       renderedIds.delete(updated.id);
       void generateRender(updated, { force: true }).then((ok) => {
         if (ok) bakeStamp.value = { ...bakeStamp.value, [updated.id]: Date.now() };
@@ -2897,6 +2899,7 @@ async function saveCraft(andEquip = false) {
       warnIfStatTrakCountIgnored(body.stattrak_count, updated);
     } else {
       const inst = await craftItem({ item_id: craft.value.skin.id, ...body });
+      craftDrop.persist(inst.id);
       warnIfStatTrakCountIgnored(body.stattrak_count, inst);
       void generateRender(inst).then((ok) => {
         if (ok) bakeStamp.value = { ...bakeStamp.value, [inst.id]: Date.now() };
@@ -3716,13 +3719,13 @@ async function moveSticker(from: number, to: number) {
   c.stickers[from] = b ? reanchor(b, to, from) : null;
 }
 /**
- * A saved Sticker Craft, from the sticker picker's Sticker Crafts tab. It waits
- * in the Stickers panel until it is dragged onto the gun, and stays linked once
- * it is down — see useStickerCraftPlacement for the drop, the link and the
- * board-to-unwrap units.
+ * A saved Sticker Craft, from the sticker picker's Sticker Crafts tab. It floats
+ * over the gun until it is dragged on, and stays a group once it is down — see
+ * useStickerCraftPlacement for the drop, the group and the board-to-unwrap units.
  */
 const craftDrop = useStickerCraftPlacement({
   craft,
+  instanceId: () => craftInstId.value,
   model: () => craftTarget.value?.model,
   viewer: () => modalViewer.current(),
   placements: craftStickerPlacements,
@@ -3734,10 +3737,11 @@ const craftDrop = useStickerCraftPlacement({
 // Top-level for the template, which only unwraps refs it can see directly.
 const {
   pending: craftPending,
-  link: craftLink,
+  group: craftGroup,
   ghost: craftGhost,
+  dragging: craftDragging,
   pendingSlots: craftPendingSlots,
-  linkedSlots: craftLinkedSlots,
+  groupSlots: craftGroupSlots,
 } = craftDrop;
 function applyStickerCraft(entry: SavedCraft) {
   const p = picker.value;
@@ -10377,6 +10381,30 @@ if (MDEBUG) {
                      stays live and its button toggles the panel shut, and OVER
                      the stage so the first click anywhere else dismisses. -->
                 <div v-if="modal3d && devHudOpen" class="absolute inset-0 z-[4]" @click="devHudOpen = false"></div>
+                <!-- A picked Sticker Craft, held up over the gun until it is
+                     dragged on (useStickerCraftPlacement). Floating where the
+                     gun is not, so the first thing it says is "drag me". Made
+                     transparent rather than removed while dragging: the drag
+                     holds its pointer capture on this element. -->
+                <div v-if="modal3d && craftPending" class="pointer-events-none absolute inset-x-0 top-[13%] z-[6] flex justify-center">
+                  <div
+                    class="animate-craft-float pointer-events-auto flex cursor-grab flex-col items-center gap-1.5 rounded-lg border border-dashed border-[color:var(--acc)] bg-card/75 p-2 shadow-lg backdrop-blur transition-opacity"
+                    :class="craftDragging ? 'opacity-0' : ''"
+                    style="touch-action: none"
+                    :title="'Drag onto the gun to place ' + craftPending.entry.name"
+                    @pointerdown="craftDrop.startDrag"
+                  >
+                    <div class="grid h-20 w-40 place-items-center overflow-hidden rounded bg-[#183a31]/70">
+                      <img v-if="craftPending.entry.preview" :src="craftPending.entry.preview" alt="" class="h-full w-full object-cover" draggable="false" />
+                      <div v-else class="flex flex-wrap items-center justify-center gap-1 p-1">
+                        <img v-for="(cs, ci) in craftPending.entry.stickers" :key="ci" :src="cs.image" alt="" class="h-8 w-8 object-contain" draggable="false" />
+                      </div>
+                    </div>
+                    <span class="flex items-center gap-1.5 text-f10 uppercase tracking-cs1 text-foreground">
+                      <MoveIcon class="h-3.5 w-3.5 text-[color:var(--acc)]" /> Drag onto the gun
+                    </span>
+                  </div>
+                </div>
                 <!-- Live cost, stacked under the 2D/3D + cog row so it reads as part
                      of the same top-left column of chrome — the same corner the
                      inventory card puts it in, under the model label. It was up in
@@ -10545,15 +10573,26 @@ if (MDEBUG) {
                   @click="craftDrop.cancel()"
                 ><X class="h-3.5 w-3.5" /></button>
               </div>
-              <!-- A placed craft: its stickers move and turn as one in 3D. -->
-              <div v-else-if="craftLink" class="mb-1.5 flex items-center gap-1.5 text-f9 uppercase tracking-cs1 text-[#9fcbff]">
-                <Link2 class="h-3 w-3 flex-none" />
-                <span class="truncate">{{ craftLink.name }} · moves as one</span>
+              <!-- A placed craft. Grouped, its stickers move and turn as one in
+                   3D; Ungroup lets each move on its own for fine adjustments,
+                   and Group binds them again as they then stand. -->
+              <div
+                v-else-if="craftGroup"
+                class="mb-1.5 flex items-center gap-1.5 text-f9 uppercase tracking-cs1"
+                :class="craftGroup.linked ? 'text-[#9fcbff]' : 'text-muted-foreground'"
+              >
+                <Link2 v-if="craftGroup.linked" class="h-3 w-3 flex-none" />
+                <UngroupIcon v-else class="h-3 w-3 flex-none" />
+                <span class="min-w-0 truncate">{{ craftGroup.name }} · {{ craftGroup.linked ? 'moves as one' : 'moving singly' }}</span>
                 <button
-                  class="ml-auto flex-none uppercase text-muted-foreground/70 transition-colors hover:text-foreground"
-                  title="Let these stickers move one at a time again"
-                  @click="craftDrop.unlink()"
-                >Unlink</button>
+                  class="ml-auto flex flex-none items-center gap-1 rounded border border-border px-1.5 py-0.5 uppercase tracking-cs1 text-muted-foreground tac-action"
+                  :title="craftGroup.linked ? 'Ungroup — move the stickers one at a time for fine adjustments' : 'Group again — the stickers move and turn as one from where they are now'"
+                  @click="craftGroup.linked ? craftDrop.ungroup() : craftDrop.regroup()"
+                >
+                  <UngroupIcon v-if="craftGroup.linked" class="h-3 w-3" />
+                  <GroupIcon v-else class="h-3 w-3" />
+                  {{ craftGroup.linked ? 'Ungroup' : 'Group' }}
+                </button>
               </div>
               <div class="grid gap-1.5" :style="{ gridTemplateColumns: `repeat(${stickerSlotCount}, minmax(0, 1fr))` }">
                 <!-- Draggable onto each other: slot order is draw order, so this is
@@ -10568,7 +10607,7 @@ if (MDEBUG) {
                     stickerDropOn === idx && stickerDragFrom !== idx && '!border-solid !border-[color:var(--acc)]',
                     stickerDragFrom === idx && 'opacity-40',
                     craftPendingSlots.has(idx) && '!border-dashed !border-[color:var(--acc)]',
-                    craftLinkedSlots.has(idx) && 'shadow-[inset_0_-2px_0_#6fb3ff]',
+                    craftGroupSlots.has(idx) && (craftGroup?.linked ? 'shadow-[inset_0_-2px_0_#6fb3ff]' : 'shadow-[inset_0_-2px_0_#6fb3ff59]'),
                   ]"
                   :title="st ? st.name + ' (slot ' + (idx + 1) + ') — drag onto another slot to reorder; later slots draw on top' : 'Add a sticker in slot ' + (idx + 1)"
                   :draggable="!!st"

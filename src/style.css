@@ -212,6 +212,16 @@
   [data-cs2-inventory] .animate-grid-in {
     animation: cs2FadeIn 220ms ease-out both;
   }
+  /* A picked Sticker Craft floating over the 3D view until it is dragged onto
+     the gun: a slow bob, so it reads as held up and waiting rather than as part
+     of the picture. Reduced motion stops it (see the rule further down). */
+  [data-cs2-inventory] .animate-craft-float {
+    animation: cs2CraftFloat 2.4s ease-in-out infinite;
+  }
+}
+@keyframes cs2CraftFloat {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-6px); }
 }
 @keyframes cs2ViewIn {
   from { opacity: 0; transform: translateY(10px) scale(0.985); }
