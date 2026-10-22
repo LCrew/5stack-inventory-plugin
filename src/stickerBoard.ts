@@ -7,18 +7,21 @@
 //
 // The board owns NO layout state. StickerCrafts holds the list of stickers and
 // hands it over whole on every change (`sync`); the board only draws it and
-// reports what the pointer did. That keeps grouping, undo-free editing and the
-// saved library in one place, and lets this file stay a renderer.
+// reports what the pointer did. That keeps grouping, ordering and the saved
+// library in one place, and lets this file stay a renderer.
 //
 // The stickers are drawn with the weapon decals' own art and material path
 // (loadStickerTexture + applyStickerSfx), so a holo or a foil looks here the way
 // it does on a gun, and the board can never disagree with the editor about
-// which artwork a sticker has.
+// which artwork a sticker has. Each one fills a STICKER_CM square exactly as a
+// decal fills its slot's square: the art is already letterboxed to a square by
+// loadStickerTexture, so stretching the quad to the ink's proportions (as this
+// first did) squashed every sticker that isn't square.
 import type * as ThreeNS from "three";
 import { applyStickerSfx } from "./stickerShader";
 import { paintTextureUrl } from "./paintComposite";
 import { loadStickerTexture, loadThree, stickerArtInfo, type ThreeBundle } from "./viewer3d";
-import { GRID_H, GRID_W, MARGIN, STICKER_CM, type BoardSticker } from "./stickerCraftsModel";
+import { GRID_H, GRID_W, MARGIN, STICKER_CM, type BoardSticker, type CraftSticker } from "./stickerCraftsModel";
 
 /** Texture resolution of the mat. 40 px per cm keeps the mm ticks crisp. */
 const PX_PER_CM = 40;
@@ -34,6 +37,11 @@ export interface BoardCallbacks {
   dragStart(uid: string): void;
   drag(dx: number, dy: number): void;
   dragEnd(): void;
+  /** Shift + drag: turn the selection, as a running angle in degrees from where
+   *  the gesture started (right = clockwise). */
+  turnStart(): void;
+  turn(deg: number): void;
+  turnEnd(): void;
   /** Alt + wheel over the mat: rotate the selection by this many degrees. */
   rotate(deg: number): void;
 }
@@ -43,13 +51,52 @@ export interface StickerBoard {
   sync(stickers: BoardSticker[], selected: ReadonlySet<string>): void;
   /** "angled" is the default three-quarter look; "top" is straight down, for measuring. */
   setView(view: "angled" | "top"): void;
-  /** The number of stickers whose art is still loading. */
-  pending(): number;
+  /** A top-down picture of a craft on the mat, as a JPEG data URL — the library
+   *  card and the weapon picker's tile. Rendered by this board, so it is the
+   *  board's own look and not an approximation of it. */
+  snapshot(stickers: CraftSticker[]): Promise<string>;
   dispose(): void;
 }
 
 const ACCENT = 0xe0a24a;
 const GROUP_LINE = 0x6fb3ff;
+/** Degrees of turn per pixel of a Shift-drag. */
+const TURN_PER_PX = 0.5;
+/** Snapshot size. 2:1, the shape of the library card and the picker tile. */
+const SNAP_W = 360;
+const SNAP_H = 180;
+
+/**
+ * The reflections the stickers see.
+ *
+ * A dim room with one softbox high along the mat's TOP edge (the far side, -z).
+ * RoomEnvironment hung its lights overhead, and a camera looking straight down
+ * sees exactly overhead in a flat sticker's reflection, so every foil and holo
+ * flared white in the Top view. From up there the softbox still catches the
+ * angled view's reflections — that is the glint a holo needs — while straight
+ * up is dark ceiling.
+ */
+function studioEnv(THREE: typeof ThreeNS) {
+  const env = new THREE.Scene();
+  const room = new THREE.Mesh(
+    new THREE.BoxGeometry(120, 70, 120),
+    new THREE.MeshBasicMaterial({ color: 0x2a2f33, side: THREE.BackSide }),
+  );
+  room.position.y = 30;
+  env.add(room);
+  const panel = (w: number, h: number, rgb: number, at: [number, number, number]) => {
+    const m = new THREE.Mesh(
+      new THREE.PlaneGeometry(w, h),
+      new THREE.MeshBasicMaterial({ color: new THREE.Color(rgb, rgb, rgb), side: THREE.DoubleSide }),
+    );
+    m.position.set(...at);
+    m.lookAt(0, 0, 0);
+    env.add(m);
+  };
+  panel(80, 22, 3.4, [0, 34, -40]); // the softbox, along the top edge
+  panel(60, 10, 0.45, [0, 12, 46]); // a weak bounce off the near side
+  return env;
+}
 
 /** Draw the mat into a canvas: grid, rulers, numbers and the angle guides. */
 function drawMat(): HTMLCanvasElement {
@@ -137,22 +184,22 @@ type Node = {
   root: ThreeNS.Group;
   mesh: ThreeNS.Mesh;
   outline: ThreeNS.LineLoop;
-  /** Width/height of the ink at scale 1, in cm — the art's own aspect. */
-  w: number;
-  h: number;
+  /** The INK's share of the footprint, per axis — the art is centred in its
+   *  square, so this is what the outline and the group box hug. */
+  inkW: number;
+  inkH: number;
   /** What the material was last built for; a new image or wear rebuilds it. */
   image: string;
   wear: number;
   /** Bumped per rebuild, so a slow load can't land on a newer one. */
   token: number;
-  loading: boolean;
   /** A wear change waits for the slider to settle before it rebuilds. */
   wearTimer?: ReturnType<typeof setTimeout>;
 };
 
 export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbacks): Promise<StickerBoard> {
   const bundle: ThreeBundle = await loadThree();
-  const { THREE, OrbitControls, RoomEnvironment } = bundle;
+  const { THREE, OrbitControls } = bundle;
 
   const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
@@ -169,15 +216,15 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
   canvas.style.setProperty("-webkit-touch-callout", "none");
   container.appendChild(canvas);
 
-  const scene = new THREE.Scene();
   const pmrem = new THREE.PMREMGenerator(renderer);
-  const envTex = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-  scene.environment = envTex;
-  scene.environmentIntensity = 0.7;
-  const sun = new THREE.DirectionalLight(0xffffff, 1.4);
-  sun.position.set(12, 30, 18);
-  scene.add(sun);
-  scene.add(new THREE.HemisphereLight(0xdfeee8, 0x0c1a16, 0.5));
+  const envScene = studioEnv(THREE);
+  const envTex = pmrem.fromScene(envScene, 0.04).texture;
+  envScene.traverse((o) => {
+    const m = o as ThreeNS.Mesh;
+    if (!m.isMesh) return;
+    m.geometry.dispose();
+    (m.material as ThreeNS.Material).dispose();
+  });
 
   // The mat: a thin slab, its top face printed, its edges plain.
   const matTex = new THREE.CanvasTexture(drawMat());
@@ -186,9 +233,24 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
   const edgeMat = new THREE.MeshStandardMaterial({ color: 0x10261f, roughness: 0.9 });
   const topMat = new THREE.MeshStandardMaterial({ map: matTex, roughness: 0.82, metalness: 0 });
   const slabGeom = new THREE.BoxGeometry(MAT_W, 0.3, MAT_H);
-  const slab = new THREE.Mesh(slabGeom, [edgeMat, edgeMat, topMat, edgeMat, edgeMat, edgeMat]);
-  slab.position.y = -0.15;
-  scene.add(slab);
+
+  /** A lit scene holding the mat: the board's, and a snapshot's of its own. */
+  const stage = () => {
+    const s = new THREE.Scene();
+    s.environment = envTex;
+    s.environmentIntensity = 0.8;
+    // The key light comes in low over the TOP edge, like the softbox it pairs
+    // with, so the Top view never looks down its reflection either.
+    const sun = new THREE.DirectionalLight(0xffffff, 1.5);
+    sun.position.set(4, 26, -34);
+    s.add(sun);
+    s.add(new THREE.HemisphereLight(0xdfeee8, 0x0c1a16, 0.45));
+    const slab = new THREE.Mesh(slabGeom, [edgeMat, edgeMat, topMat, edgeMat, edgeMat, edgeMat]);
+    slab.position.y = -0.15;
+    s.add(slab);
+    return s;
+  };
+  const scene = stage();
 
   const camera = new THREE.PerspectiveCamera(35, 1, 1, 600);
   // Each view is a direction to look from; the distance is worked out from the
@@ -216,6 +278,7 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
   let current = new Map<string, BoardSticker>();
   let selectedNow: ReadonlySet<string> = new Set();
   let disposed = false;
+  let dirty = true;
 
   const setNdc = (e: PointerEvent | WheelEvent) => {
     const r = canvas.getBoundingClientRect();
@@ -243,51 +306,95 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
     return { x: p.x + GRID_W / 2, y: p.z + GRID_H / 2 };
   };
 
-  let drag: { id: number; uid: string; from: { x: number; y: number }; moved: boolean } | null = null;
-  let press: { id: number; x: number; y: number } | null = null;
+  /**
+   * What the held pointer is doing.
+   *   move  — pressed on a sticker: drag the selection across the mat.
+   *   turn  — Shift held: left/right turns the selection about its centre. A
+   *           Shift press that never moves is still a Shift-click, settled on
+   *           release (`uid` / `wasSelected`).
+   *   press — pressed on the empty mat: the camera's, unless it ends as a click.
+   */
+  type Gesture =
+    | { kind: "move"; id: number; uid: string; from: { x: number; y: number }; moved: boolean }
+    | { kind: "turn"; id: number; x0: number; moved: boolean; uid: string | null; wasSelected: boolean; alt: boolean }
+    | { kind: "press"; id: number; x: number; y: number };
+  let gesture: Gesture | null = null;
+  const capture = (id: number) => {
+    controls.enabled = false;
+    canvas.setPointerCapture(id);
+  };
+  const release = (id: number) => {
+    controls.enabled = true;
+    if (canvas.hasPointerCapture(id)) canvas.releasePointerCapture(id);
+  };
+
   const onDown = (e: PointerEvent) => {
-    if (e.button !== 0) return;
+    if (e.button !== 0 || gesture) return;
     setNdc(e);
     const uid = hitSticker();
+    if (e.shiftKey && (uid || selectedNow.size)) {
+      const wasSelected = !!uid && selectedNow.has(uid);
+      // Pressed on one that isn't picked yet: add it now, so the turn carries it.
+      if (uid && !wasSelected) cb.pick(uid, { shift: true, alt: e.altKey });
+      gesture = { kind: "turn", id: e.pointerId, x0: e.clientX, moved: false, uid, wasSelected, alt: e.altKey };
+      capture(e.pointerId);
+      return;
+    }
     if (uid) {
       const from = boardPoint();
-      cb.pick(uid, { shift: e.shiftKey, alt: e.altKey });
+      cb.pick(uid, { shift: false, alt: e.altKey });
       if (from) {
-        drag = { id: e.pointerId, uid, from, moved: false };
-        controls.enabled = false;
-        canvas.setPointerCapture(e.pointerId);
+        gesture = { kind: "move", id: e.pointerId, uid, from, moved: false };
+        capture(e.pointerId);
       }
-    } else {
-      press = { id: e.pointerId, x: e.clientX, y: e.clientY };
+      return;
     }
+    gesture = { kind: "press", id: e.pointerId, x: e.clientX, y: e.clientY };
   };
   const onMove = (e: PointerEvent) => {
     setNdc(e);
-    if (drag && e.pointerId === drag.id) {
-      const at = boardPoint();
-      if (!at) return;
-      if (!drag.moved) {
-        drag.moved = true;
-        cb.dragStart(drag.uid);
+    const g = gesture;
+    if (g && e.pointerId === g.id) {
+      if (g.kind === "move") {
+        const at = boardPoint();
+        if (!at) return;
+        if (!g.moved) {
+          g.moved = true;
+          cb.dragStart(g.uid);
+        }
+        cb.drag(at.x - g.from.x, at.y - g.from.y);
+      } else if (g.kind === "turn") {
+        const dx = e.clientX - g.x0;
+        if (!g.moved && Math.abs(dx) < 4) return;
+        if (!g.moved) {
+          g.moved = true;
+          cb.turnStart();
+        }
+        cb.turn(dx * TURN_PER_PX);
       }
-      cb.drag(at.x - drag.from.x, at.y - drag.from.y);
       return;
     }
-    if (e.pointerType === "mouse" && !press) canvas.style.cursor = hitSticker() ? "grab" : "";
+    if (e.pointerType === "mouse" && !gesture) {
+      const hit = hitSticker();
+      canvas.style.cursor = e.shiftKey && (hit || selectedNow.size) ? "ew-resize" : hit ? "grab" : "";
+    }
   };
   const onUp = (e: PointerEvent) => {
-    if (drag && e.pointerId === drag.id) {
-      if (drag.moved) cb.dragEnd();
-      drag = null;
-      controls.enabled = true;
-      if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
-      return;
-    }
-    // A press that went nowhere is a click on the empty mat; one that moved
-    // was the camera orbiting, and must leave the selection alone.
-    if (press && e.pointerId === press.id) {
-      if (Math.hypot(e.clientX - press.x, e.clientY - press.y) < 5) cb.pick(null, { shift: e.shiftKey, alt: e.altKey });
-      press = null;
+    const g = gesture;
+    if (!g || e.pointerId !== g.id) return;
+    gesture = null;
+    if (g.kind === "move") {
+      if (g.moved) cb.dragEnd();
+      release(e.pointerId);
+    } else if (g.kind === "turn") {
+      if (g.moved) cb.turnEnd();
+      // A Shift-click on one that was already picked takes it back out.
+      else if (g.uid && g.wasSelected && e.type === "pointerup") cb.pick(g.uid, { shift: true, alt: g.alt });
+      release(e.pointerId);
+    } else if (e.type === "pointerup" && Math.hypot(e.clientX - g.x, e.clientY - g.y) < 5) {
+      // A press that went nowhere is a click on the empty mat; one that moved
+      // was the camera orbiting, and must leave the selection alone.
+      cb.pick(null, { shift: e.shiftKey, alt: e.altKey });
     }
   };
   const onWheel = (e: WheelEvent) => {
@@ -310,7 +417,6 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
   controls.maxDistance = 140;
   // Never under the mat: it is a slab on a table, not a model to turn over.
   controls.maxPolarAngle = Math.PI * 0.42;
-  controls.update();
 
   // ---- view changes: eased, not cut ---------------------------------------
   let fly: { t0: number; fromPos: ThreeNS.Vector3; fromTarget: ThreeNS.Vector3; to: ReturnType<typeof viewPose> } | null = null;
@@ -331,23 +437,50 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
   const groupMat = new THREE.LineDashedMaterial({ color: GROUP_LINE, dashSize: 0.5, gapSize: 0.35, depthTest: false, transparent: true });
   const groupLines = new THREE.Group();
   scene.add(groupLines);
-  let loads = 0;
-  let dirty = true;
 
   const placeholderMat = () =>
     new THREE.MeshBasicMaterial({ color: 0x9fb8ad, transparent: true, opacity: 0.25, depthWrite: false });
+
+  /**
+   * A sticker's material: its art and the real sticker shading at this wear.
+   * The ink fractions come back with it, for the outline.
+   */
+  async function stickerMaterial(image: string, wear: number) {
+    const [loaded, info] = await Promise.all([loadStickerTexture(image), stickerArtInfo(image)]);
+    const mat = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      transparent: true,
+      // Every sticker skips the depth buffer, so draw order alone decides which
+      // lies on top — the same rule as slot order on a gun.
+      depthWrite: false,
+      roughness: 0.55,
+      metalness: 0,
+    });
+    let inkW = 1;
+    let inkH = 1;
+    if (loaded) {
+      mat.map = loaded.tex;
+      inkW = loaded.aspect >= 1 ? 1 : loaded.aspect;
+      inkH = loaded.aspect >= 1 ? 1 / loaded.aspect : 1;
+      await applyStickerSfx(THREE, mat, info.sfx, wear, paintTextureUrl, { expandAlpha: loaded.realStickerArt });
+    } else {
+      mat.color.set(0x55605c);
+    }
+    return { mat, inkW, inkH };
+  }
 
   function makeNode(s: BoardSticker): Node {
     const root = new THREE.Group();
     const mesh = new THREE.Mesh(quadGeom, placeholderMat());
     mesh.userData.uid = s.uid;
+    mesh.scale.set(STICKER_CM, 1, STICKER_CM);
     root.add(mesh);
     const outline = new THREE.LineLoop(outlineGeom, outlineMat);
     outline.renderOrder = 10_000;
     outline.visible = false;
     root.add(outline);
     scene.add(root);
-    return { root, mesh, outline, w: STICKER_CM, h: STICKER_CM, image: "", wear: -1, token: 0, loading: false };
+    return { root, mesh, outline, inkW: 1, inkH: 1, image: "", wear: -1, token: 0 };
   }
 
   /** (Re)build a node's material for its image and wear. */
@@ -355,49 +488,38 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
     const token = ++node.token;
     node.image = s.image;
     node.wear = s.wear;
-    node.loading = true;
-    loads++;
-    try {
-      const [loaded, info] = await Promise.all([loadStickerTexture(s.image), stickerArtInfo(s.image)]);
-      if (token !== node.token || disposed) return;
-      const mat = new THREE.MeshStandardMaterial({
-        color: 0xffffff,
-        transparent: true,
-        depthWrite: false,
-        roughness: 0.55,
-        metalness: 0,
-      });
-      if (loaded) {
-        mat.map = loaded.tex;
-        // The ink's own proportions, as the decal quad keeps them.
-        node.w = STICKER_CM * (loaded.aspect >= 1 ? 1 : loaded.aspect);
-        node.h = STICKER_CM * (loaded.aspect >= 1 ? 1 / loaded.aspect : 1);
-        await applyStickerSfx(THREE, mat, info.sfx, s.wear, paintTextureUrl, { expandAlpha: loaded.realStickerArt });
-        if (token !== node.token || disposed) {
-          mat.dispose();
-          return;
-        }
-      } else {
-        mat.color.set(0x55605c);
-      }
-      (node.mesh.material as ThreeNS.Material).dispose();
-      node.mesh.material = mat;
-      place(node, current.get(node.mesh.userData.uid) ?? s);
-      drawGroups();
-    } finally {
-      if (token === node.token) node.loading = false;
-      loads--;
-      dirty = true;
+    const built = await stickerMaterial(s.image, s.wear).catch(() => null);
+    if (!built) return;
+    if (token !== node.token || disposed) {
+      built.mat.dispose();
+      return;
     }
+    (node.mesh.material as ThreeNS.Material).dispose();
+    node.mesh.material = built.mat;
+    node.inkW = built.inkW;
+    node.inkH = built.inkH;
+    place(node, current.get(node.mesh.userData.uid) ?? s);
+    drawGroups();
+    dirty = true;
   }
 
   /** Transform a node to its sticker's spot on the mat. */
   function place(node: Node, s: BoardSticker) {
     node.root.position.set(s.x - GRID_W / 2, 0.05, s.y - GRID_H / 2);
     node.root.rotation.y = (-s.rot * Math.PI) / 180;
-    node.mesh.scale.set(node.w * s.scale, 1, node.h * s.scale);
-    node.outline.scale.set(node.w * s.scale + 0.3, 1, node.h * s.scale + 0.3);
+    node.outline.scale.set(STICKER_CM * node.inkW + 0.3, 1, STICKER_CM * node.inkH + 0.3);
   }
+
+  /** A sticker's footprint on the mat — its ink box, turned — as an extent about its centre. */
+  const extent = (rot: number, inkW: number, inkH: number) => {
+    const hw = (STICKER_CM * inkW) / 2;
+    const hh = (STICKER_CM * inkH) / 2;
+    const a = (rot * Math.PI) / 180;
+    return {
+      ex: Math.abs(hw * Math.cos(a)) + Math.abs(hh * Math.sin(a)),
+      ey: Math.abs(hw * Math.sin(a)) + Math.abs(hh * Math.cos(a)),
+    };
+  };
 
   /** A dashed box round every group that has a member selected. */
   function drawGroups() {
@@ -418,12 +540,7 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
       let maxY = -Infinity;
       for (const m of members) {
         const node = nodes.get(m.uid);
-        const hw = ((node?.w ?? STICKER_CM) * m.scale) / 2;
-        const hh = ((node?.h ?? STICKER_CM) * m.scale) / 2;
-        const a = (m.rot * Math.PI) / 180;
-        // The rotated footprint's extent, so the box hugs what you see.
-        const ex = Math.abs(hw * Math.cos(a)) + Math.abs(hh * Math.sin(a));
-        const ey = Math.abs(hw * Math.sin(a)) + Math.abs(hh * Math.cos(a));
+        const { ex, ey } = extent(m.rot, node?.inkW ?? 1, node?.inkH ?? 1);
         minX = Math.min(minX, m.x - ex);
         maxX = Math.max(maxX, m.x + ex);
         minY = Math.min(minY, m.y - ey);
@@ -474,13 +591,74 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
         }, 120);
       }
       place(node, s);
-      // Draw order is list order. Every sticker skips the depth buffer (see
-      // dress), so this alone decides which lies on top.
       node.mesh.renderOrder = i + 1;
       node.outline.visible = selected.has(s.uid);
     });
     drawGroups();
     dirty = true;
+  }
+
+  // ---- snapshots ------------------------------------------------------------------
+  /**
+   * Render a craft top-down, framed on itself, into a JPEG.
+   *
+   * Its own scene (the same mat, light and reflections), so whatever else is on
+   * the board stays out of the picture. The drawing buffer is borrowed at the
+   * snapshot's size and handed back with the board redrawn in the same task, so
+   * the page never composites a frame of it.
+   */
+  async function snapshot(list: CraftSticker[]): Promise<string> {
+    const snap = stage();
+    const made = await Promise.all(list.map((s) => stickerMaterial(s.image, s.wear).catch(() => null)));
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    list.forEach((s, i) => {
+      const built = made[i];
+      if (!built) return;
+      const mesh = new THREE.Mesh(quadGeom, built.mat);
+      mesh.scale.set(STICKER_CM, 1, STICKER_CM);
+      mesh.position.set(s.x, 0.05, s.y);
+      mesh.rotation.y = (-s.rot * Math.PI) / 180;
+      mesh.renderOrder = i + 1;
+      snap.add(mesh);
+      const { ex, ey } = extent(s.rot, built.inkW, built.inkH);
+      minX = Math.min(minX, s.x - ex);
+      maxX = Math.max(maxX, s.x + ex);
+      minY = Math.min(minY, s.y - ey);
+      maxY = Math.max(maxY, s.y + ey);
+    });
+    if (!Number.isFinite(minX)) [minX, maxX, minY, maxY] = [-2.5, 2.5, -2.5, 2.5];
+    const aspect = SNAP_W / SNAP_H;
+    const pad = 1;
+    const halfW = Math.max((maxX - minX) / 2 + pad, ((maxY - minY) / 2 + pad) * aspect);
+    const halfH = halfW / aspect;
+    const cx = (minX + maxX) / 2;
+    const cy = (minY + maxY) / 2;
+    const cam = new THREE.OrthographicCamera(-halfW, halfW, halfH, -halfH, 1, 300);
+    // Screen-up is the mat's top edge (-z), as in the Top view.
+    cam.up.set(0, 0, -1);
+    cam.position.set(cx, 120, cy);
+    cam.lookAt(cx, 0, cy);
+
+    const size = renderer.getSize(new THREE.Vector2());
+    const ratio = renderer.getPixelRatio();
+    const out = document.createElement("canvas");
+    out.width = SNAP_W;
+    out.height = SNAP_H;
+    try {
+      renderer.setPixelRatio(1);
+      renderer.setSize(SNAP_W, SNAP_H, false);
+      renderer.render(snap, cam);
+      out.getContext("2d")!.drawImage(canvas, 0, 0, SNAP_W, SNAP_H);
+    } finally {
+      renderer.setPixelRatio(ratio);
+      renderer.setSize(size.x, size.y, false);
+      renderer.render(scene, camera);
+      for (const m of made) m?.mat.dispose();
+    }
+    return out.toDataURL("image/jpeg", 0.85);
   }
 
   // ---- size and loop ------------------------------------------------------------
@@ -527,7 +705,7 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
   return {
     sync,
     setView,
-    pending: () => loads,
+    snapshot,
     dispose() {
       disposed = true;
       cancelAnimationFrame(raf);

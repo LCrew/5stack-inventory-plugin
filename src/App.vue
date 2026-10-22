@@ -165,6 +165,7 @@ import { useViewerStage, type StageIcon, type StageKey } from "./composables/use
 import { useDebouncedSearch } from "./composables/useDebouncedSearch";
 import { useInventoryView } from "./composables/useInventoryView";
 import { useAttachmentPicker, type PickerRow } from "./composables/useAttachmentPicker";
+import { STICKER_CM, type SavedCraft } from "./stickerCraftsModel";
 import { usePersistedBool, usePersistedEnum, usePersistedNumber } from "./composables/usePersistedRef";
 import { accentSoft, ART_FADE_B, attachmentsOf, canInspect, CARD_ART, CARD_CHROME_PX, glowStyle, hasScratch, hasSeed, hasWear, isCustomizable, isReadOnly, itemName, RARITY_META, rarityName, rarityRank, selRing, STEAM_BLUE, stripName, weaponName, wearTier, wearPositionInTier } from "./itemVisuals";
 import { stackByDesign, TINT_SUFFIX } from "./decks";
@@ -3712,6 +3713,64 @@ async function moveSticker(from: number, to: number) {
   const b = c.stickers[to];
   c.stickers[to] = a ? reanchor(a, from, to) : null;
   c.stickers[from] = b ? reanchor(b, to, from) : null;
+}
+/**
+ * Lay a saved Sticker Craft onto the gun, from the sticker picker's Sticker
+ * Crafts tab.
+ *
+ * Its stickers fill consecutive slots from the one being filled (pulled back if
+ * they would run past the fifth), bottom-most first: slot order is draw order,
+ * the same as the board's list order. Each lands where it sat on the board
+ * relative to the craft's centre, and the centre lands where the slot being
+ * filled is — its sticker if it has one, else its anchor.
+ *
+ * The board measures in footprints: STICKER_CM is one sticker, and on a gun one
+ * sticker is 1/scale of the slot's unwrap (see buildDecal in viewer3d), with the
+ * art's right along +u and its up along +v. So a sticker one footprint to the
+ * right on the board is one footprint along +u here, whichever way the slot
+ * faces, and the board's y (which runs DOWN) is -v. Rotation carries over as is:
+ * the board turns clockwise for a positive number, as the game does. Offsets are
+ * anchor-relative and re-expressed per slot, as in moveSticker.
+ */
+async function applyStickerCraft(entry: SavedCraft) {
+  const c = craft.value;
+  const p = picker.value;
+  if (!c || !p || p.kind !== "sticker" || !entry.stickers.length) return;
+  const n = Math.min(entry.stickers.length, stickerSlotCount);
+  const start = Math.max(0, Math.min(p.slot, stickerSlotCount - n));
+  const model = craftTarget.value?.model;
+  const geo = model ? await fetchStickerGeometry(model) : null;
+  if (craft.value !== c || picker.value !== p) return;
+  const body = c.skin.legacyPaint && c.skin.paintMaterial ? "body_legacy" : "body_hd";
+  const mine = (geo?.slots ?? []).filter((s) => s.mesh === body);
+  const anchors = mine.length ? mine : (geo?.slots ?? []);
+  const first = anchors.reduce<(typeof anchors)[number] | undefined>((lo, s) => (!lo || s.index < lo.index ? s : lo), undefined);
+  const anchorOf = (slot: number) => anchors.find((s) => s.index === slot) ?? first;
+  const fit = (v: number, r?: [number, number]) => Math.round((r ? Math.min(r[1], Math.max(r[0], v)) : v) * 1e4) / 1e4;
+  const home = anchorOf(p.slot);
+  const here = c.stickers[p.slot];
+  const cu = (home?.offset[0] ?? 0) + (here?.x ?? 0);
+  const cv = (home?.offset[1] ?? 0) + (here?.y ?? 0);
+  entry.stickers.slice(0, n).forEach((s, i) => {
+    const slot = start + i;
+    const a = anchorOf(slot);
+    // Unwrap units per board centimetre, at this slot's sticker size.
+    const k = 1 / (STICKER_CM * (a?.scale || 1));
+    c.stickers[slot] = {
+      id: s.id,
+      name: s.name,
+      image: s.image,
+      inst: null,
+      // No markup for this model: nothing to measure against, so the slots'
+      // own default spots, as for any sticker picked one at a time.
+      x: a ? fit(cu + s.x * k - a.offset[0], geo?.bounds?.x) : null,
+      y: a ? fit(cv - s.y * k - a.offset[1], geo?.bounds?.y) : null,
+      r: Math.round(s.rot * 2) / 2,
+      w: s.wear,
+    };
+  });
+  picker.value = null;
+  if (modal3dAvailable.value) modal3d.value = true;
 }
 /** The sticker tile being dragged onto another, for the reorder. */
 const stickerDragFrom = ref<number | null>(null);
@@ -11186,7 +11245,7 @@ if (MDEBUG) {
          enter/leave off its child mounting and unmounting, and a component that
          is always mounted with the v-if inside it would toggle the panel with
          no fade at all. -->
-    <AttachmentPicker v-if="picker" :view="pickerView" @pick="pickAttachment" @preview="openPreview3d" />
+    <AttachmentPicker v-if="picker" :view="pickerView" @pick="pickAttachment" @preview="openPreview3d" @pick-craft="applyStickerCraft" />
     </Transition>
 
     <!-- Attachment preview — a SIBLING of the picker's Transition, not a

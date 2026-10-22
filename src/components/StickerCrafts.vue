@@ -1,23 +1,27 @@
 <script setup lang="ts">
 // STICKER CRAFTS — a measuring board for laying stickers out and grouping them.
 //
-// The fourth header tab, after Craft. It is a workbench, not a store: nothing
-// here is saved to the inventory or sent to the game. You pull stickers out of
-// the same picker the craft editor uses, lay them on a centimetre mat in 3D,
-// move, turn and size them, and bind the ones that belong together into a
-// grouping that moves as one. A grouping can be kept in the library below the
-// board and laid down again later.
+// The fourth header tab, after Craft. You pull stickers out of the same picker
+// the craft editor uses, lay them on a centimetre mat in 3D, move and turn them,
+// and bind up to five into a grouping that moves as one. A grouping saved to the
+// library is a STICKER CRAFT: the weapon editor's sticker picker offers it under
+// its own tab and lays the whole thing onto the gun in one pick (see
+// applyStickerCraft in App.vue).
 //
-// EXPERIMENTAL. What a grouping is FOR (stamping a whole layout onto a weapon in
-// one go) is still to be decided; this is the part that has to exist first.
+// The mat is measured in sticker footprints as much as in centimetres: every
+// sticker fills the same STICKER_CM square, because a weapon's sticker slot is
+// one fixed square too and CS2 has no sticker size. That is what lets a layout
+// made here land on any gun the way it looks here.
 //
-// State lives here and in localStorage only. The 3D board (stickerBoard.ts) is
-// a renderer that is handed the list on every change and reports the pointer.
+// EXPERIMENTAL. State lives here and in localStorage only. The 3D board
+// (stickerBoard.ts) is a renderer that is handed the list on every change and
+// reports the pointer.
 import { computed, inject, onBeforeUnmount, onMounted, ref, shallowRef, toRaw, toRef, watch } from "vue";
 import {
   BookmarkPlus,
   BringToFront,
   Copy,
+  GripVertical,
   Group,
   Loader2,
   Magnet,
@@ -35,7 +39,21 @@ import {
 import type { InventoryItem } from "../api";
 import { useAttachmentPicker, type PickerRow } from "../composables/useAttachmentPicker";
 import { usePersistedBool } from "../composables/usePersistedRef";
-import { GRID_H, GRID_W, STICKER_CM, type BoardSticker } from "../stickerCraftsModel";
+import {
+  BOARD_KEY,
+  GRID_H,
+  GRID_W,
+  MAX_ON_BOARD,
+  MAX_PER_GROUPING,
+  cleanSticker,
+  readJson,
+  readLibrary,
+  writeJson,
+  writeLibrary,
+  type BoardSticker,
+  type CraftSticker,
+  type SavedCraft,
+} from "../stickerCraftsModel";
 import type { StickerBoard } from "../stickerBoard";
 import AttachmentPicker from "./AttachmentPicker.vue";
 import PillTabs from "./PillTabs.vue";
@@ -50,63 +68,19 @@ const props = defineProps<{
 
 const tr = inject<(k: string, f: string) => string>("tr", (_k, f) => f);
 
-/** A named set of stickers that move, turn and size as one. */
+/** A named set of stickers that move and turn as one. */
 type Grouping = { id: string; name: string };
-/** A grouping kept in the library: its stickers relative to their own centre. */
-type Saved = {
-  id: string;
-  name: string;
-  savedAt: number;
-  stickers: Omit<BoardSticker, "uid" | "group">[];
-};
 
-const BOARD_KEY = "cs2inv.stickerCrafts.board";
-const LIBRARY_KEY = "cs2inv.stickerCrafts.library";
-/** Snap step for dragging and nudging, in cm. */
+/** Snap step for dragging, in cm, and for turning, in degrees. */
 const SNAP_CM = 0.5;
-/** More than this and the board stops being a layout and starts being a load test. */
-const MAX_STICKERS = 120;
+const SNAP_DEG = 5;
 
 const newId = () =>
   typeof crypto !== "undefined" && "randomUUID" in crypto
     ? crypto.randomUUID()
     : Math.random().toString(36).slice(2) + Date.now().toString(36);
 
-// ---- storage ----------------------------------------------------------------
-// localStorage throws in Safari private mode and when full. A board that
-// doesn't persist is still a board, so every read and write is guarded.
-function readJson(key: string): unknown {
-  try {
-    const raw = localStorage.getItem(key);
-    return raw ? JSON.parse(raw) : null;
-  } catch {
-    return null;
-  }
-}
-function writeJson(key: string, value: unknown) {
-  try {
-    localStorage.setItem(key, JSON.stringify(value));
-  } catch {
-    /* private mode / quota — the board just doesn't persist */
-  }
-}
-const num = (v: unknown, dflt: number) => (typeof v === "number" && Number.isFinite(v) ? v : dflt);
-/** Trust nothing read back: a hand-edited or older entry must not take the screen down. */
-function cleanSticker(raw: unknown): Omit<BoardSticker, "uid" | "group"> | null {
-  const s = raw as Partial<BoardSticker> | null;
-  if (!s || typeof s !== "object" || typeof s.image !== "string" || !s.image) return null;
-  return {
-    id: num(s.id, 0),
-    name: typeof s.name === "string" ? s.name : "Sticker",
-    image: s.image,
-    x: num(s.x, GRID_W / 2),
-    y: num(s.y, GRID_H / 2),
-    rot: num(s.rot, 0),
-    scale: Math.min(4, Math.max(0.2, num(s.scale, 1))),
-    wear: Math.min(1, Math.max(0, num(s.wear, 0))),
-  };
-}
-
+// ---- state ------------------------------------------------------------------
 const stored = readJson(BOARD_KEY) as { stickers?: unknown[]; groups?: unknown[] } | null;
 const groups = ref<Grouping[]>(
   (Array.isArray(stored?.groups) ? stored.groups : [])
@@ -122,14 +96,7 @@ const stickers = ref<BoardSticker[]>(
     return [{ ...s, uid: typeof r.uid === "string" ? r.uid : newId(), group }];
   }),
 );
-const library = ref<Saved[]>(
-  (Array.isArray(readJson(LIBRARY_KEY)) ? (readJson(LIBRARY_KEY) as unknown[]) : []).flatMap((raw) => {
-    const e = raw as Partial<Saved> | null;
-    if (!e || typeof e.id !== "string" || !Array.isArray(e.stickers)) return [];
-    const list = e.stickers.map(cleanSticker).filter((s): s is NonNullable<typeof s> => !!s);
-    return list.length ? [{ id: e.id, name: typeof e.name === "string" ? e.name : "Grouping", savedAt: num(e.savedAt, 0), stickers: list }] : [];
-  }),
-);
+const library = ref<SavedCraft[]>(readLibrary());
 const selected = ref<Set<string>>(new Set());
 const snap = usePersistedBool("cs2inv.stickerCrafts.snap", true);
 const boardView = ref<"angled" | "top">("angled");
@@ -137,15 +104,46 @@ const boardView = ref<"angled" | "top">("angled");
 // A drag writes a position per pointer move; saving each one would be a
 // localStorage write per frame. A short debounce lands the last one.
 let saveTimer: ReturnType<typeof setTimeout> | undefined;
+const saveBoard = () => writeJson(BOARD_KEY, { stickers: stickers.value, groups: groups.value });
 watch(
   [stickers, groups],
   () => {
     clearTimeout(saveTimer);
-    saveTimer = setTimeout(() => writeJson(BOARD_KEY, { stickers: toRaw(stickers.value), groups: toRaw(groups.value) }), 300);
+    saveTimer = setTimeout(saveBoard, 300);
   },
   { deep: true },
 );
-watch(library, () => writeJson(LIBRARY_KEY, toRaw(library.value)), { deep: true });
+// Not debounced: the weapon picker reads the library straight out of storage.
+watch(library, () => writeLibrary(library.value), { deep: true });
+
+// ---- draw order -------------------------------------------------------------------
+/**
+ * The mat in draw order, bottom first, as UNITS: a loose sticker, or a whole
+ * grouping. A grouping's members are kept next to each other in the list —
+ * the layer list shows a grouping as one block and drags it as one, which only
+ * means something if the block is also one run of draw order. It sits where its
+ * top-most member was.
+ */
+type Unit = { kind: "one"; s: BoardSticker } | { kind: "group"; group: Grouping; members: BoardSticker[] };
+function unitsOf(list: BoardSticker[]): Unit[] {
+  const out: Unit[] = [];
+  const seen = new Set<string>();
+  for (let i = list.length - 1; i >= 0; i--) {
+    const s = list[i];
+    if (!s.group) {
+      out.push({ kind: "one", s });
+      continue;
+    }
+    if (seen.has(s.group)) continue;
+    seen.add(s.group);
+    const group = groups.value.find((g) => g.id === s.group) ?? { id: s.group, name: "Group" };
+    out.push({ kind: "group", group, members: list.filter((m) => m.group === s.group) });
+  }
+  return out.reverse();
+}
+const flatten = (units: Unit[]) => units.flatMap((u) => (u.kind === "one" ? [u.s] : u.members));
+const normalize = () => (stickers.value = flatten(unitsOf(stickers.value)));
+normalize();
 
 // ---- derived ------------------------------------------------------------------
 const byUid = (uid: string) => stickers.value.find((s) => s.uid === uid);
@@ -158,8 +156,11 @@ const selGroup = computed(() => {
   if (!g || !sel.value.every((s) => s.group === g)) return null;
   return members(g).length === sel.value.length ? (groups.value.find((x) => x.id === g) ?? null) : null;
 });
-const canGroup = computed(() => sel.value.length >= 2 && !selGroup.value);
+const tooMany = computed(() => sel.value.length > MAX_PER_GROUPING);
+const canGroup = computed(() => sel.value.length >= 2 && !tooMany.value && !selGroup.value);
 const canUngroup = computed(() => sel.value.some((s) => s.group));
+const canSave = computed(() => sel.value.length >= 1 && !tooMany.value);
+const boardFull = computed(() => stickers.value.length >= MAX_ON_BOARD);
 const centroid = (list: { x: number; y: number }[]) => ({
   x: list.reduce((a, s) => a + s.x, 0) / Math.max(1, list.length),
   y: list.reduce((a, s) => a + s.y, 0) / Math.max(1, list.length),
@@ -168,18 +169,14 @@ const shortName = (name: string) => name.replace(/^Sticker \| /, "");
 const fmt = (v: number, d = 1) => v.toFixed(d);
 const clampX = (x: number) => Math.min(GRID_W, Math.max(0, x));
 const clampY = (y: number) => Math.min(GRID_H, Math.max(0, y));
+/** -180..180 in the game's half-degree steps (CS2_STICKER_ROTATION_STEP). */
 const normDeg = (d: number) => {
   const r = ((((d + 180) % 360) + 360) % 360) - 180;
-  return Math.round(r * 10) / 10;
+  return Math.round(r * 2) / 2;
 };
 
-/** Groupings first (each with its members, top-most first), then loose stickers. */
-const layerGroups = computed(() =>
-  groups.value
-    .map((g) => ({ group: g, items: [...members(g.id)].reverse() }))
-    .filter((e) => e.items.length),
-);
-const looseLayers = computed(() => [...stickers.value].filter((s) => !s.group).reverse());
+/** The layer list, top-most first: blocks for groupings, rows for the rest. */
+const layerUnits = computed(() => [...unitsOf(stickers.value)].reverse());
 
 // ---- selection ------------------------------------------------------------------
 /**
@@ -197,7 +194,10 @@ function pick(uid: string | null, mods: { shift: boolean; alt: boolean }) {
   if (mods.shift) {
     const next = new Set(selected.value);
     const all = unit.every((u) => next.has(u));
-    for (const u of unit) all ? next.delete(u) : next.add(u);
+    for (const u of unit) {
+      if (all) next.delete(u);
+      else next.add(u);
+    }
     selected.value = next;
   } else if (!selected.value.has(uid) || mods.alt) {
     // Pressing a sticker that is already part of the selection keeps the
@@ -222,46 +222,36 @@ function nudge(dx: number, dy: number) {
     s.y = clampY(Math.round((s.y + dy) * 10) / 10);
   });
 }
-/** Turn the selection about its own centre: positions swing, each sticker turns. */
-function rotateSelection(deg: number) {
-  if (!sel.value.length) return;
-  const c = centroid(sel.value);
+type Pose = { x: number; y: number; rot: number };
+/** Turn stickers from a remembered pose about a centre: positions swing, each sticker turns. */
+function turnFrom(from: Map<string, Pose>, c: { x: number; y: number }, deg: number) {
   const a = (deg * Math.PI) / 180;
   const cos = Math.cos(a);
   const sin = Math.sin(a);
-  patchSelected((s) => {
-    const dx = s.x - c.x;
-    const dy = s.y - c.y;
+  for (const s of stickers.value) {
+    const f = from.get(s.uid);
+    if (!f) continue;
+    const dx = f.x - c.x;
+    const dy = f.y - c.y;
     // y runs DOWN the mat, so this is clockwise on screen for a positive angle.
-    s.x = clampX(c.x + dx * cos - dy * sin);
-    s.y = clampY(c.y + dx * sin + dy * cos);
-    s.rot = normDeg(s.rot + deg);
-  });
+    s.x = clampX(Math.round((c.x + dx * cos - dy * sin) * 100) / 100);
+    s.y = clampY(Math.round((c.y + dx * sin + dy * cos) * 100) / 100);
+    s.rot = normDeg(f.rot + deg);
+  }
 }
-/** Size the selection about its own centre: gaps grow with the stickers. */
-function scaleSelection(f: number) {
-  if (!sel.value.length) return;
-  const c = centroid(sel.value);
-  // One clamp for the lot, or a group would lose its proportions at the limits.
-  const lo = Math.min(...sel.value.map((s) => s.scale));
-  const hi = Math.max(...sel.value.map((s) => s.scale));
-  const k = Math.min(Math.max(f, 0.2 / lo), 4 / hi);
-  patchSelected((s) => {
-    s.x = clampX(c.x + (s.x - c.x) * k);
-    s.y = clampY(c.y + (s.y - c.y) * k);
-    s.scale = Math.round(s.scale * k * 1000) / 1000;
-  });
+const poses = () => new Map(sel.value.map((s): [string, Pose] => [s.uid, { x: s.x, y: s.y, rot: s.rot }]));
+function rotateSelection(deg: number) {
+  if (sel.value.length) turnFrom(poses(), centroid(sel.value), deg);
 }
 function setWear(w: number) {
   patchSelected((s) => (s.wear = w));
 }
-function setSingle<K extends "x" | "y" | "rot" | "scale">(key: K, v: number) {
+function setSingle(key: "x" | "y" | "rot", v: number) {
   const s = single.value;
   if (!s || !Number.isFinite(v)) return;
   if (key === "x") s.x = clampX(v);
   else if (key === "y") s.y = clampY(v);
-  else if (key === "rot") s.rot = normDeg(v);
-  else s.scale = Math.min(4, Math.max(0.2, v));
+  else s.rot = normDeg(v);
 }
 
 /** Groupings left with one member are no grouping at all. */
@@ -283,6 +273,7 @@ function groupSelection() {
   groups.value = [...groups.value, g];
   patchSelected((s) => (s.group = g.id));
   pruneGroups();
+  normalize();
 }
 function ungroupSelection() {
   patchSelected((s) => (s.group = null));
@@ -300,7 +291,7 @@ function removeSelection() {
 }
 /** Copies land 1 cm down-right. Whole groupings copied become new groupings. */
 function duplicateSelection() {
-  if (!sel.value.length || stickers.value.length + sel.value.length > MAX_STICKERS) return;
+  if (!sel.value.length || stickers.value.length + sel.value.length > MAX_ON_BOARD) return;
   const remap = new Map<string, string>();
   const made: BoardSticker[] = [];
   for (const s of sel.value) {
@@ -314,29 +305,111 @@ function duplicateSelection() {
       }
       group = remap.get(s.group)!;
     }
-    made.push({ ...s, uid: newId(), x: clampX(s.x + 1), y: clampY(s.y + 1), group });
+    made.push({ ...toRaw(s), uid: newId(), x: clampX(s.x + 1), y: clampY(s.y + 1), group });
   }
   stickers.value = [...stickers.value, ...made];
   selected.value = new Set(made.map((s) => s.uid));
 }
-/** Draw order. Forward/back move the selection one place past its neighbours. */
-function restack(where: "front" | "back" | "forward" | "backward") {
-  const list = [...stickers.value];
+/**
+ * Front / back. Inside one grouping (some members picked with Alt-click) the
+ * picked ones move to that grouping's top or bottom; otherwise every unit with
+ * something picked in it moves to the top or bottom of the mat.
+ */
+function restack(where: "front" | "back") {
   const isSel = (s: BoardSticker) => selected.value.has(s.uid);
-  if (where === "front") stickers.value = [...list.filter((s) => !isSel(s)), ...list.filter(isSel)];
-  else if (where === "back") stickers.value = [...list.filter(isSel), ...list.filter((s) => !isSel(s))];
-  else if (where === "forward") {
-    for (let i = list.length - 2; i >= 0; i--) {
-      if (isSel(list[i]) && !isSel(list[i + 1])) [list[i], list[i + 1]] = [list[i + 1], list[i]];
+  const units = unitsOf(stickers.value);
+  const g = sel.value[0]?.group;
+  if (g && sel.value.every((s) => s.group === g) && members(g).length > sel.value.length) {
+    for (const u of units) {
+      if (u.kind !== "group" || u.group.id !== g) continue;
+      const picked = u.members.filter(isSel);
+      const rest = u.members.filter((m) => !isSel(m));
+      u.members = where === "front" ? [...rest, ...picked] : [...picked, ...rest];
     }
-    stickers.value = list;
-  } else {
-    for (let i = 1; i < list.length; i++) {
-      if (isSel(list[i]) && !isSel(list[i - 1])) [list[i], list[i - 1]] = [list[i - 1], list[i]];
-    }
-    stickers.value = list;
+    stickers.value = flatten(units);
+    return;
   }
+  const hit = (u: Unit) => (u.kind === "one" ? isSel(u.s) : u.members.some(isSel));
+  const picked = units.filter(hit);
+  const rest = units.filter((u) => !hit(u));
+  stickers.value = flatten(where === "front" ? [...rest, ...picked] : [...picked, ...rest]);
 }
+
+// ---- layer list: drag to reorder ---------------------------------------------------
+// Pointer events rather than HTML drag-and-drop, which Safari on touch does not
+// do. A press that moves is a reorder, one that doesn't is a click. On touch only
+// the grip starts a drag (touch-action: none); the rest of a row scrolls the list.
+//
+// Two kinds of list: "top" is the mat's units, top-most first; "g:<id>" is one
+// grouping's members. A sticker never leaves its grouping by being dragged.
+const rootEl = ref<HTMLElement | null>(null);
+const listDrag = ref<{ list: string; from: number; pos: number | null } | null>(null);
+let rowPress: { list: string; from: number; id: number; y: number; active: boolean; tap: (shift: boolean) => void } | null = null;
+function rowDown(e: PointerEvent, list: string, from: number, tap: (shift: boolean) => void) {
+  if (e.button !== 0) return;
+  // A member row sits inside its grouping's block; the block must not drag too.
+  e.stopPropagation();
+  rowPress = { list, from, id: e.pointerId, y: e.clientY, active: false, tap };
+  window.addEventListener("pointermove", rowMove);
+  window.addEventListener("pointerup", rowUp);
+  window.addEventListener("pointercancel", rowUp);
+}
+function rowMove(e: PointerEvent) {
+  const p = rowPress;
+  if (!p || e.pointerId !== p.id) return;
+  if (!p.active) {
+    if (Math.abs(e.clientY - p.y) < 5) return;
+    p.active = true;
+  }
+  e.preventDefault();
+  const rows = [...(rootEl.value?.querySelectorAll<HTMLElement>(`[data-list="${p.list}"]`) ?? [])];
+  const pos = rows.filter((r) => {
+    const b = r.getBoundingClientRect();
+    return b.top + b.height / 2 < e.clientY;
+  }).length;
+  listDrag.value = { list: p.list, from: p.from, pos };
+}
+function rowUp(e: PointerEvent) {
+  const p = rowPress;
+  if (!p || e.pointerId !== p.id) return;
+  window.removeEventListener("pointermove", rowMove);
+  window.removeEventListener("pointerup", rowUp);
+  window.removeEventListener("pointercancel", rowUp);
+  rowPress = null;
+  const d = listDrag.value;
+  listDrag.value = null;
+  if (e.type !== "pointerup") return;
+  if (!p.active) return p.tap(e.shiftKey);
+  if (!d || d.pos == null) return;
+  const to = d.pos > d.from ? d.pos - 1 : d.pos;
+  if (to !== d.from) reorder(d.list, d.from, to);
+}
+/** Move a row of a list (indices as SHOWN: top-most first). */
+function reorder(list: string, from: number, to: number) {
+  const units = unitsOf(stickers.value);
+  const move = <T,>(shown: T[]) => {
+    const [x] = shown.splice(from, 1);
+    shown.splice(to, 0, x);
+    return shown.reverse();
+  };
+  if (list === "top") {
+    stickers.value = flatten(move([...units].reverse()));
+    return;
+  }
+  const u = units.find((x) => x.kind === "group" && x.group.id === list.slice(2));
+  if (u?.kind !== "group") return;
+  u.members = move([...u.members].reverse());
+  stickers.value = flatten(units);
+}
+const dropClass = (list: string, idx: number, count: number) => {
+  const d = listDrag.value;
+  if (!d || d.list !== list) return "";
+  return [
+    d.from === idx ? "opacity-40" : "",
+    d.pos === idx ? "sc-drop-before" : "",
+    d.pos === count && idx === count - 1 ? "sc-drop-after" : "",
+  ].join(" ");
+};
 
 // Clearing everything is the one action here that can't be walked back, so it
 // asks twice: the first press arms it for a few seconds.
@@ -356,27 +429,47 @@ function clearBoard() {
 }
 
 // ---- the library ------------------------------------------------------------------
-function saveSelection() {
-  if (!sel.value.length) return;
-  const c = centroid(sel.value);
-  const name = selGroup.value?.name ?? `Grouping ${library.value.length + 1}`;
-  library.value = [
-    {
-      id: newId(),
-      name,
-      savedAt: Date.now(),
-      stickers: sel.value.map(({ uid: _u, group: _g, ...s }) => ({ ...s, x: s.x - c.x, y: s.y - c.y })),
-    },
-    ...library.value,
-  ];
+/** Draw a craft's preview on the board and keep it with the entry. */
+async function renderPreview(id: string) {
+  const b = board.value;
+  const entry = library.value.find((e) => e.id === id);
+  if (!b || !entry) return;
+  try {
+    const url = await b.snapshot(toRaw(entry.stickers).map((s) => toRaw(s)));
+    const now = library.value.find((e) => e.id === id);
+    if (now) now.preview = url;
+  } catch {
+    /* no preview is a plainer card, not an error */
+  }
 }
-/** Lay a saved grouping down in the middle of the mat, as a grouping again. */
-function placeSaved(entry: Saved) {
-  if (stickers.value.length + entry.stickers.length > MAX_STICKERS) return;
+function saveSelection() {
+  if (!canSave.value) return;
+  const c = centroid(sel.value);
+  const entry: SavedCraft = {
+    id: newId(),
+    name: selGroup.value?.name ?? `Grouping ${library.value.length + 1}`,
+    savedAt: Date.now(),
+    // Draw order, bottom first: on a gun that becomes slot order.
+    stickers: sel.value.map((s): CraftSticker => ({
+      id: s.id,
+      name: s.name,
+      image: s.image,
+      x: Math.round((s.x - c.x) * 100) / 100,
+      y: Math.round((s.y - c.y) * 100) / 100,
+      rot: s.rot,
+      wear: s.wear,
+    })),
+  };
+  library.value = [entry, ...library.value];
+  void renderPreview(entry.id);
+}
+/** Lay a saved craft down in the middle of the mat, as a grouping again. */
+function placeSaved(entry: SavedCraft) {
+  if (stickers.value.length + entry.stickers.length > MAX_ON_BOARD) return;
   const g = entry.stickers.length > 1 ? { id: newId(), name: entry.name } : null;
   if (g) groups.value = [...groups.value, g];
   const made = entry.stickers.map((s) => ({
-    ...s,
+    ...toRaw(s),
     uid: newId(),
     x: clampX(GRID_W / 2 + s.x),
     y: clampY(GRID_H / 2 + s.y),
@@ -385,33 +478,11 @@ function placeSaved(entry: Saved) {
   stickers.value = [...stickers.value, ...made];
   selected.value = new Set(made.map((s) => s.uid));
 }
-function renameSaved(entry: Saved, name: string) {
+function renameSaved(entry: SavedCraft, name: string) {
   if (name.trim()) entry.name = name.trim().slice(0, 40);
 }
 function deleteSaved(id: string) {
   library.value = library.value.filter((e) => e.id !== id);
-}
-/** A small plan of a saved grouping, laid out in a 2:1 box. */
-function savedPlan(entry: Saved) {
-  const half = (s: { scale: number }) => (STICKER_CM * s.scale) / 2;
-  const minX = Math.min(...entry.stickers.map((s) => s.x - half(s)));
-  const maxX = Math.max(...entry.stickers.map((s) => s.x + half(s)));
-  const minY = Math.min(...entry.stickers.map((s) => s.y - half(s)));
-  const maxY = Math.max(...entry.stickers.map((s) => s.y + half(s)));
-  const k = Math.min(200 / (maxX - minX), 100 / (maxY - minY));
-  const ox = (200 - (maxX - minX) * k) / 2;
-  const oy = (100 - (maxY - minY) * k) / 2;
-  return entry.stickers.map((s, i) => ({
-    key: i,
-    image: s.image,
-    style: {
-      left: `${((ox + (s.x - half(s) - minX) * k) / 200) * 100}%`,
-      top: `${((oy + (s.y - half(s) - minY) * k) / 100) * 100}%`,
-      width: `${((half(s) * 2 * k) / 200) * 100}%`,
-      height: `${((half(s) * 2 * k) / 100) * 100}%`,
-      transform: `rotate(${s.rot}deg)`,
-    },
-  }));
 }
 
 // ---- adding stickers --------------------------------------------------------------
@@ -439,7 +510,7 @@ function freeSpot(): { x: number; y: number } {
 }
 function addSticker(row: PickerRow) {
   picker.value = null;
-  if (!row.image || stickers.value.length >= MAX_STICKERS) return;
+  if (!row.image || boardFull.value) return;
   const at = freeSpot();
   const s: BoardSticker = {
     uid: newId(),
@@ -449,12 +520,16 @@ function addSticker(row: PickerRow) {
     x: at.x,
     y: at.y,
     rot: 0,
-    scale: 1,
     wear: row.wear ?? 0,
     group: null,
   };
   stickers.value = [...stickers.value, s];
   selected.value = new Set([s.uid]);
+}
+/** The picker's Sticker Crafts tab, opened from here: lay the craft on the mat. */
+function addCraft(entry: SavedCraft) {
+  picker.value = null;
+  placeSaved(entry);
 }
 
 // ---- the board ----------------------------------------------------------------------
@@ -464,6 +539,7 @@ const boardError = ref<string | null>(null);
 const boardLoading = ref(true);
 let dragFrom: Map<string, { x: number; y: number }> | null = null;
 let dragLead: string | null = null;
+let turning: { from: Map<string, Pose>; c: { x: number; y: number } } | null = null;
 
 watch(
   [stickers, selected],
@@ -506,6 +582,16 @@ onMounted(async () => {
         dragFrom = null;
         dragLead = null;
       },
+      turnStart() {
+        turning = sel.value.length ? { from: poses(), c: centroid(sel.value) } : null;
+      },
+      turn(deg) {
+        if (!turning) return;
+        turnFrom(turning.from, turning.c, snap.value ? Math.round(deg / SNAP_DEG) * SNAP_DEG : deg);
+      },
+      turnEnd() {
+        turning = null;
+      },
       rotate: rotateSelection,
     });
     // Navigated away while three was still arriving.
@@ -515,6 +601,11 @@ onMounted(async () => {
     }
     board.value = b;
     b.sync(toRaw(stickers.value).map((s) => toRaw(s)), toRaw(selected.value));
+    // Crafts saved before previews existed get theirs now, one at a time.
+    for (const e of library.value.filter((x) => !x.preview).map((x) => x.id)) {
+      if (board.value !== b) break;
+      await renderPreview(e);
+    }
   } catch (e) {
     boardError.value = e instanceof Error ? e.message : String(e);
   } finally {
@@ -543,7 +634,8 @@ function onKey(e: KeyboardEvent) {
     duplicateSelection();
   } else if (mod && k === "g") {
     e.preventDefault();
-    e.shiftKey ? ungroupSelection() : groupSelection();
+    if (e.shiftKey) ungroupSelection();
+    else groupSelection();
   } else if (mod || e.altKey) {
     return;
   } else if (e.key === "Delete" || e.key === "Backspace") {
@@ -569,10 +661,13 @@ function onKey(e: KeyboardEvent) {
 onMounted(() => window.addEventListener("keydown", onKey));
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", onKey);
+  window.removeEventListener("pointermove", rowMove);
+  window.removeEventListener("pointerup", rowUp);
+  window.removeEventListener("pointercancel", rowUp);
   clearTimeout(saveTimer);
   clearTimeout(clearTimer);
   // Land a save that was still waiting on its debounce.
-  writeJson(BOARD_KEY, { stickers: toRaw(stickers.value), groups: toRaw(groups.value) });
+  saveBoard();
   board.value?.dispose();
   board.value = null;
 });
@@ -592,7 +687,7 @@ const FIELD =
 </script>
 
 <template>
-  <div class="flex min-h-0 flex-1 flex-col overflow-hidden">
+  <div ref="rootEl" class="flex min-h-0 flex-1 flex-col overflow-hidden">
     <!-- Header — the Armory's: a quiet title row, the actions on the right. -->
     <div class="flex min-h-[44px] flex-none items-center gap-3 border-b border-border px-4 py-2">
       <span class="flex-none text-f11 font-semibold uppercase tracking-cs2">{{ tr("inventory.stickerCrafts.title", "Sticker Crafts") }}</span>
@@ -600,7 +695,7 @@ const FIELD =
       <span
         v-if="!compact"
         class="flex-none rounded border border-border px-1.5 py-0.5 text-f8 uppercase tracking-cs1 text-muted-foreground"
-        title="Nothing here is saved to your inventory or sent to the game"
+        title="Nothing here is saved to your inventory or sent to the game until you apply a craft to a weapon and save it there"
       >{{ tr("inventory.stickerCrafts.experimental", "Experimental") }}</span>
       <span v-if="!compact" class="flex-none font-mono text-f10 text-muted-foreground/70">
         {{ stickers.length }} {{ stickers.length === 1 ? "sticker" : "stickers" }}<template v-if="groups.length"> · {{ groups.length }} {{ groups.length === 1 ? "group" : "groups" }}</template>
@@ -617,8 +712,8 @@ const FIELD =
         </button>
         <button
           :class="[BTN, 'tac-on']"
-          :disabled="stickers.length >= MAX_STICKERS"
-          title="Pick a sticker to lay on the mat"
+          :disabled="boardFull"
+          :title="boardFull ? `The mat holds ${MAX_ON_BOARD} stickers` : 'Pick a sticker, or a saved craft, to lay on the mat'"
           @click="openPicker('sticker')"
         >
           <Plus class="h-3.5 w-3.5" /> {{ compact ? tr("inventory.stickerCrafts.addShort", "Add") : tr("inventory.stickerCrafts.add", "Add sticker") }}
@@ -651,7 +746,7 @@ const FIELD =
           <button
             class="pointer-events-auto flex h-7 items-center gap-1.5 rounded-lg border border-border bg-card/80 px-2.5 text-f10 uppercase tracking-cs1 text-muted-foreground backdrop-blur tac-action"
             :class="snap ? 'tac-on' : ''"
-            :title="snap ? 'Snapping to the half-centimetre grid — click to place freely' : 'Placing freely — click to snap to the half-centimetre grid'"
+            :title="snap ? 'Snapping to half centimetres and 5° turns — click to place freely' : 'Placing freely — click to snap to half centimetres and 5° turns'"
             @click="snap = !snap"
           >
             <Magnet class="h-3.5 w-3.5" />
@@ -665,7 +760,7 @@ const FIELD =
           v-if="!compact && stickers.length"
           class="pointer-events-none absolute bottom-3 left-3 rounded-md bg-card/70 px-2.5 py-1.5 text-f10 text-muted-foreground backdrop-blur"
         >
-          Drag to move · Shift-click to add · Alt-click one of a group · Q / E or Alt + wheel to turn · Arrows nudge · Right-drag pans
+          Drag to move · Shift + drag to turn · Shift-click to add · Alt-click one of a group · Q / E turn · Arrows nudge · Right-drag pans
         </div>
 
         <div v-if="boardLoading" class="absolute inset-0 grid place-items-center">
@@ -727,36 +822,19 @@ const FIELD =
               <span class="w-12 flex-none font-mono text-f8 uppercase tracking-cs1 text-muted-foreground">Turn</span>
               <input
                 :value="single.rot"
-                type="range" min="-180" max="180" step="1"
+                type="range" min="-180" max="180" step="0.5"
                 class="pattern-range min-w-0 flex-1"
                 @input="setSingle('rot', ($event.target as HTMLInputElement).valueAsNumber)"
               />
-              <span class="w-11 flex-none text-right font-mono text-f9 text-muted-foreground">{{ fmt(single.rot, 0) }}°</span>
+              <span class="w-11 flex-none text-right font-mono text-f9 text-muted-foreground">{{ fmt(single.rot, 1) }}°</span>
             </div>
-            <div v-if="single" class="mb-1.5 flex items-center gap-2">
-              <span class="w-12 flex-none font-mono text-f8 uppercase tracking-cs1 text-muted-foreground">Size</span>
-              <input
-                :value="single.scale"
-                type="range" min="0.2" max="4" step="0.01"
-                class="pattern-range min-w-0 flex-1"
-                @input="setSingle('scale', ($event.target as HTMLInputElement).valueAsNumber)"
-              />
-              <span class="w-11 flex-none text-right font-mono text-f9 text-muted-foreground">{{ fmt(STICKER_CM * single.scale) }}cm</span>
-            </div>
-            <!-- Several at once: turn and size the lot about its own centre. -->
-            <div v-if="!single" class="mb-2 flex flex-col gap-1.5">
-              <div class="flex items-center gap-1.5">
-                <span class="w-12 flex-none font-mono text-f8 uppercase tracking-cs1 text-muted-foreground">Turn</span>
-                <button :class="ICON_BTN" title="Turn 15° anticlockwise (Shift + Q)" @click="rotateSelection(-15)"><RotateCcw class="h-3.5 w-3.5" /></button>
-                <button :class="ICON_BTN" class="font-mono text-f10" title="Turn 5° anticlockwise (Q)" @click="rotateSelection(-5)">−5°</button>
-                <button :class="ICON_BTN" class="font-mono text-f10" title="Turn 5° clockwise (E)" @click="rotateSelection(5)">+5°</button>
-                <button :class="ICON_BTN" title="Turn 15° clockwise (Shift + E)" @click="rotateSelection(15)"><RotateCw class="h-3.5 w-3.5" /></button>
-              </div>
-              <div class="flex items-center gap-1.5">
-                <span class="w-12 flex-none font-mono text-f8 uppercase tracking-cs1 text-muted-foreground">Size</span>
-                <button :class="ICON_BTN" class="font-mono text-f10" title="10% smaller, gaps included" @click="scaleSelection(1 / 1.1)">−10%</button>
-                <button :class="ICON_BTN" class="font-mono text-f10" title="10% larger, gaps included" @click="scaleSelection(1.1)">+10%</button>
-              </div>
+            <!-- Several at once: turn the lot about its own centre. -->
+            <div v-else class="mb-2 flex items-center gap-1.5">
+              <span class="w-12 flex-none font-mono text-f8 uppercase tracking-cs1 text-muted-foreground">Turn</span>
+              <button :class="ICON_BTN" title="Turn 15° anticlockwise (Shift + Q)" @click="rotateSelection(-15)"><RotateCcw class="h-3.5 w-3.5" /></button>
+              <button :class="ICON_BTN" class="font-mono text-f10" title="Turn 5° anticlockwise (Q)" @click="rotateSelection(-5)">−5°</button>
+              <button :class="ICON_BTN" class="font-mono text-f10" title="Turn 5° clockwise (E)" @click="rotateSelection(5)">+5°</button>
+              <button :class="ICON_BTN" title="Turn 15° clockwise (Shift + E)" @click="rotateSelection(15)"><RotateCw class="h-3.5 w-3.5" /></button>
             </div>
             <div class="mb-2 flex items-center gap-2">
               <span class="w-12 flex-none font-mono text-f8 uppercase tracking-cs1 text-muted-foreground">Wear</span>
@@ -782,8 +860,10 @@ const FIELD =
         <section class="sc-block">
           <header class="mb-2 flex items-baseline gap-2">
             <span class="text-f10 uppercase tracking-cs1 text-muted-foreground">{{ tr("inventory.stickerCrafts.grouping", "Grouping") }}</span>
-            <span class="ml-auto truncate text-f11 text-muted-foreground">
-              {{ selGroup ? selGroup.name : canGroup ? "Select 2+ to group" : "" }}
+            <span class="ml-auto truncate text-f11" :class="tooMany ? 'text-destructive' : 'text-muted-foreground'">
+              <template v-if="tooMany">{{ MAX_PER_GROUPING }} stickers at most</template>
+              <template v-else-if="selGroup">{{ selGroup.name }}</template>
+              <template v-else-if="canGroup">{{ sel.length }} / {{ MAX_PER_GROUPING }}</template>
             </span>
           </header>
           <input
@@ -796,80 +876,98 @@ const FIELD =
             @change="renameGroup(selGroup.id, ($event.target as HTMLInputElement).value)"
           />
           <div class="grid grid-cols-3 gap-1.5">
-            <button :class="BTN" class="justify-center" :disabled="!canGroup" title="Bind the selection into one grouping (Ctrl/⌘ + G)" @click="groupSelection">
+            <button
+              :class="BTN"
+              class="justify-center"
+              :disabled="!canGroup"
+              :title="tooMany ? `A grouping holds at most ${MAX_PER_GROUPING} stickers — one weapon's worth` : 'Bind the selection into one grouping (Ctrl/⌘ + G)'"
+              @click="groupSelection"
+            >
               <Group class="h-3.5 w-3.5" /> Group
             </button>
             <button :class="BTN" class="justify-center" :disabled="!canUngroup" title="Break the selected groupings up (Ctrl/⌘ + Shift + G)" @click="ungroupSelection">
               <Ungroup class="h-3.5 w-3.5" /> Split
             </button>
-            <button :class="BTN" class="justify-center" :disabled="!sel.length" title="Keep the selection in the library below" @click="saveSelection">
+            <button
+              :class="BTN"
+              class="justify-center"
+              :disabled="!canSave"
+              :title="tooMany ? `A craft holds at most ${MAX_PER_GROUPING} stickers — one weapon's worth` : 'Keep the selection as a Sticker Craft — the weapon editor\'s sticker picker offers it'"
+              @click="saveSelection"
+            >
               <BookmarkPlus class="h-3.5 w-3.5" /> Save
             </button>
           </div>
         </section>
 
-        <!-- ON THE MAT — the layer list, top-most first. -->
+        <!-- ON THE MAT — the layer list, top-most first. Drag to reorder. -->
         <section class="sc-block">
           <header class="mb-2 flex items-baseline gap-2">
             <span class="text-f10 uppercase tracking-cs1 text-muted-foreground">{{ tr("inventory.stickerCrafts.onMat", "On the mat") }}</span>
-            <span class="ml-auto font-mono text-f10 text-muted-foreground/70">{{ stickers.length }} / {{ MAX_STICKERS }}</span>
+            <span class="ml-auto text-f10 text-muted-foreground/70">{{ stickers.length > 1 ? "Top first · drag to reorder" : "" }}</span>
           </header>
           <div v-if="!stickers.length" class="text-f11 text-muted-foreground/70">No stickers yet.</div>
-          <div class="flex flex-col gap-1">
-            <div v-for="lg in layerGroups" :key="lg.group.id" class="rounded-md border border-[#6fb3ff]/25">
-              <button
-                class="flex w-full items-center gap-1.5 px-2 py-1 text-left text-f10 uppercase tracking-cs1 text-[#9fcbff] transition-colors hover:text-foreground"
-                :title="'Select ' + lg.group.name"
-                @click="selectGroup(lg.group.id, $event.shiftKey)"
+          <div class="flex select-none flex-col gap-1">
+            <template v-for="(u, ui) in layerUnits" :key="u.kind === 'one' ? u.s.uid : u.group.id">
+              <div
+                v-if="u.kind === 'group'"
+                data-list="top"
+                class="rounded-md border border-[#6fb3ff]/25"
+                :class="dropClass('top', ui, layerUnits.length)"
               >
-                <Group class="h-3 w-3 flex-none" />
-                <span class="truncate">{{ lg.group.name }}</span>
-                <span class="ml-auto font-mono text-f9 text-muted-foreground">{{ lg.items.length }}</span>
-              </button>
-              <button
-                v-for="s in lg.items"
-                :key="s.uid"
-                class="sc-row pl-5"
-                :class="selected.has(s.uid) ? 'sc-row-on' : ''"
-                @click="selectLayer(s.uid, $event.shiftKey)"
+                <div
+                  class="flex w-full cursor-grab items-center gap-1.5 px-1.5 py-1 text-f10 uppercase tracking-cs1 text-[#9fcbff] transition-colors hover:text-foreground"
+                  :title="'Select ' + u.group.name + ' — drag to move it up or down'"
+                  @pointerdown="rowDown($event, 'top', ui, (shift) => selectGroup(u.group.id, shift))"
+                >
+                  <span class="sc-grip flex flex-none items-center self-stretch text-muted-foreground/60"><GripVertical class="h-3 w-3" /></span>
+                  <Group class="h-3 w-3 flex-none" />
+                  <span class="truncate">{{ u.group.name }}</span>
+                  <span class="ml-auto font-mono text-f9 text-muted-foreground">{{ u.members.length }} / {{ MAX_PER_GROUPING }}</span>
+                </div>
+                <div
+                  v-for="(s, mi) in [...u.members].reverse()"
+                  :key="s.uid"
+                  :data-list="'g:' + u.group.id"
+                  class="sc-row pl-4"
+                  :class="[selected.has(s.uid) ? 'sc-row-on' : '', dropClass('g:' + u.group.id, mi, u.members.length)]"
+                  @pointerdown="rowDown($event, 'g:' + u.group.id, mi, (shift) => selectLayer(s.uid, shift))"
+                >
+                  <span class="sc-grip flex flex-none items-center self-stretch text-muted-foreground/60"><GripVertical class="h-3 w-3" /></span>
+                  <img :src="s.image" alt="" class="h-6 w-6 flex-none object-contain" draggable="false" />
+                  <span class="truncate">{{ shortName(s.name) }}</span>
+                </div>
+              </div>
+              <div
+                v-else
+                data-list="top"
+                class="sc-row"
+                :class="[selected.has(u.s.uid) ? 'sc-row-on' : '', dropClass('top', ui, layerUnits.length)]"
+                @pointerdown="rowDown($event, 'top', ui, (shift) => selectLayer(u.s.uid, shift))"
               >
-                <img :src="s.image" alt="" class="h-6 w-6 flex-none object-contain" />
-                <span class="truncate">{{ shortName(s.name) }}</span>
-              </button>
-            </div>
-            <button
-              v-for="s in looseLayers"
-              :key="s.uid"
-              class="sc-row"
-              :class="selected.has(s.uid) ? 'sc-row-on' : ''"
-              @click="selectLayer(s.uid, $event.shiftKey)"
-            >
-              <img :src="s.image" alt="" class="h-6 w-6 flex-none object-contain" />
-              <span class="truncate">{{ shortName(s.name) }}</span>
-            </button>
+                <span class="sc-grip flex flex-none items-center self-stretch text-muted-foreground/60"><GripVertical class="h-3 w-3" /></span>
+                <img :src="u.s.image" alt="" class="h-6 w-6 flex-none object-contain" draggable="false" />
+                <span class="truncate">{{ shortName(u.s.name) }}</span>
+              </div>
+            </template>
           </div>
         </section>
 
-        <!-- LIBRARY — saved groupings, to lay down again. -->
+        <!-- LIBRARY — saved crafts, to lay down again or apply to a weapon. -->
         <section class="sc-block">
           <header class="mb-2 flex items-baseline gap-2">
-            <span class="text-f10 uppercase tracking-cs1 text-muted-foreground">{{ tr("inventory.stickerCrafts.library", "Saved groupings") }}</span>
+            <span class="text-f10 uppercase tracking-cs1 text-muted-foreground">{{ tr("inventory.stickerCrafts.library", "Saved crafts") }}</span>
             <span class="ml-auto font-mono text-f10 text-muted-foreground/70">{{ library.length }}</span>
           </header>
           <div v-if="!library.length" class="text-f11 text-muted-foreground/70">
-            Select stickers and press Save to keep a layout here.
+            Select up to {{ MAX_PER_GROUPING }} stickers and press Save. The weapon editor's sticker picker offers saved crafts under Sticker Crafts.
           </div>
           <div class="flex flex-col gap-2">
             <div v-for="entry in library" :key="entry.id" class="rounded-md border border-border bg-background/60 p-2">
-              <div class="relative mb-2 aspect-[2/1] w-full overflow-hidden rounded bg-[#183a31]">
-                <img
-                  v-for="p in savedPlan(entry)"
-                  :key="p.key"
-                  :src="p.image"
-                  alt=""
-                  class="absolute object-contain"
-                  :style="p.style"
-                />
+              <!-- The board's own top-down render of the craft. -->
+              <div class="relative mb-2 grid aspect-[2/1] w-full place-items-center overflow-hidden rounded bg-[#183a31]">
+                <img v-if="entry.preview" :src="entry.preview" alt="" class="h-full w-full object-cover" draggable="false" />
+                <Loader2 v-else class="h-4 w-4 animate-spin text-muted-foreground" />
               </div>
               <div class="flex items-center gap-1.5">
                 <input
@@ -880,6 +978,7 @@ const FIELD =
                   title="Rename"
                   @change="renameSaved(entry, ($event.target as HTMLInputElement).value)"
                 />
+                <span class="flex-none font-mono text-f9 text-muted-foreground">{{ entry.stickers.length }}</span>
                 <button class="grid h-6 w-7 flex-none place-items-center rounded-md border border-border text-muted-foreground tac-action" title="Lay it on the mat" @click="placeSaved(entry)">
                   <Plus class="h-3.5 w-3.5" />
                 </button>
@@ -899,6 +998,7 @@ const FIELD =
       hide-preview
       back-title="Back to the mat — nothing is added"
       @pick="addSticker"
+      @pick-craft="addCraft"
     />
   </div>
 </template>
@@ -914,14 +1014,14 @@ const FIELD =
 .sc-row {
   display: flex;
   width: 100%;
+  cursor: grab;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.375rem;
   border-radius: 0.375rem;
-  padding: 0.125rem 0.5rem;
-  text-align: left;
+  padding: 0.125rem 0.375rem;
   font-size: 11px;
   color: hsl(var(--muted-foreground));
-  transition: background-color 150ms, color 150ms;
+  transition: background-color 150ms, color 150ms, opacity 150ms;
 }
 .sc-row:hover {
   color: hsl(var(--foreground));
@@ -931,5 +1031,16 @@ const FIELD =
   color: hsl(var(--foreground));
   background: hsl(var(--tac-amber, 33 94% 58%) / 0.12);
   box-shadow: inset 2px 0 0 hsl(var(--tac-amber, 33 94% 58%));
+}
+/* The handle a finger can drag by; the rest of a row scrolls the list. */
+.sc-grip {
+  touch-action: none;
+}
+/* Where a dragged row will land: a bar on the edge it will take. */
+.sc-drop-before {
+  box-shadow: 0 -2px 0 hsl(var(--tac-amber, 33 94% 58%));
+}
+.sc-drop-after {
+  box-shadow: 0 2px 0 hsl(var(--tac-amber, 33 94% 58%));
 }
 </style>

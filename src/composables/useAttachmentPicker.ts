@@ -39,6 +39,7 @@ import {
 import type { FacetAxis } from "../components/CatalogFilters.vue";
 import { SEARCH_DEBOUNCE_MS } from "./useDebouncedSearch";
 import { usePersistedNumber } from "./usePersistedRef";
+import { MAX_PER_GROUPING, readLibrary, type SavedCraft } from "../stickerCraftsModel";
 import { useSortControl } from "./useSortControl";
 
 export const PICKER_PAGE = 120;
@@ -147,13 +148,29 @@ export function useAttachmentPicker(opts: AttachmentPickerOptions) {
   const pickerDone = computed(() => pickerResults.value.length >= pickerTotal.value);
 
   /**
-   * Which shelf the picker is browsing: the whole catalog, or your own drawer.
+   * Which shelf the picker is browsing: the whole catalog, your own drawer, or
+   * (stickers only) your saved Sticker Crafts.
    *
    * Owned mode is answered entirely from `inventory` — no fetch, no paging. The
    * client already holds every instance the user owns, and an attachment you own
    * is a few dozen rows next to a catalog of ten thousand.
    */
-  const pickerSource = ref<"all" | "owned">("all");
+  const pickerSource = ref<"all" | "owned" | "crafts">("all");
+
+  /**
+   * The Sticker Crafts shelf: layouts saved on the Sticker Crafts board, read
+   * out of this browser's storage each time a sticker picker opens (the board
+   * writes them there). Only the ones a weapon can take — five stickers at most.
+   */
+  const pickerCrafts = ref<SavedCraft[]>([]);
+  const pickerCraftRows = computed(() => {
+    const q = pickerQuery.value.trim().toLowerCase();
+    return q
+      ? pickerCrafts.value.filter(
+          (c) => c.name.toLowerCase().includes(q) || c.stickers.some((s) => s.name.toLowerCase().includes(q)),
+        )
+      : pickerCrafts.value;
+  });
 
   const pickerOwned = computed<PickerRow[]>(() => {
     const p = picker.value;
@@ -180,8 +197,11 @@ export function useAttachmentPicker(opts: AttachmentPickerOptions) {
       // make the common case the hard one.
       .sort((a, b) => Number(!!a.attachedName) - Number(!!b.attachedName) || byName(a.name, b.name));
   });
+  // Crafts are not rows of one attachment each; that shelf draws its own tiles.
   const pickerRows = computed<PickerRow[]>(() =>
-    pickerSource.value === "owned"
+    pickerSource.value === "crafts"
+      ? []
+      : pickerSource.value === "owned"
       ? pickerOwned.value
       : pickerResults.value.map((it) => ({
           key: `cat-${it.id}`,
@@ -398,6 +418,7 @@ export function useAttachmentPicker(opts: AttachmentPickerOptions) {
 
   function openPicker(kind: "sticker" | "charm" | "patch", slot = 0) {
     picker.value = { kind, slot };
+    pickerCrafts.value = kind === "sticker" ? readLibrary().filter((c) => c.stickers.length <= MAX_PER_GROUPING) : [];
     // Always opens on the catalog. Owned is the narrower shelf and is often
     // empty, and a picker that opened on "no results" would read as broken.
     pickerSource.value = "all";
@@ -448,6 +469,8 @@ export function useAttachmentPicker(opts: AttachmentPickerOptions) {
     pickerTotal,
     pickerRows,
     pickerOwned,
+    pickerCrafts,
+    pickerCraftRows,
     pickerNoun,
     attachCardSize,
     attachGridStyle,
