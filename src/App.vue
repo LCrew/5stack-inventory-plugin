@@ -6,7 +6,7 @@ import {
   Loader2, Search, LayoutGrid, Crosshair,
   Package, Hammer, Trash2, Copy, RotateCcw, Sparkles, Replace, RefreshCw, Pencil, Plus, X, Settings, Box, Clock, CircleDollarSign,
   Image as ImageIcon, Check, ExternalLink, SlidersHorizontal, ChevronUp, ChevronDown, ChevronLeft, ChevronRight, Palette, Link2,
-  Layers,
+  Layers, Sticker as StickerIcon,
 } from "lucide-vue-next";
 import {
   fetchCatalog,
@@ -96,6 +96,7 @@ import { activeFlags, flagValue, flagsVersion } from "./devFlags";
 // The catalog browser (its own screen) and the sticker/charm picker (an
 // overlay) are never on screen at load either: async, ~39kB off the boot chunk.
 const Armory = defineAsyncComponent(() => import("./components/Armory.vue"));
+const StickerCrafts = defineAsyncComponent(() => import("./components/StickerCrafts.vue"));
 import InventoryScreen from "./components/InventoryScreen.vue";
 import LoadoutGrid from "./components/LoadoutGrid.vue";
 const AttachmentPicker = defineAsyncComponent(() => import("./components/AttachmentPicker.vue"));
@@ -271,6 +272,7 @@ const team = ref<Team>("CT");
 //   /focus               focus view       /items/<id>/craft  craft editor
 //   /items               inventory        /items/<id>/3d     3D viewer
 //   /admin[/section]     admin            /craft/<skinId>    unsaved draft
+//   /sticker-crafts      sticker board
 const route = computed(() => parsePath(router.path.value));
 
 // Paths a modal was opened from, so closing it can go back. Declared up here
@@ -322,6 +324,7 @@ const SCREEN_ROUTE: Record<ReturnType<typeof screenFor>, Route> = {
   focus: { name: "focus" },
   inventory: { name: "inventory" },
   armory: { name: "armory" },
+  stickers: { name: "stickerCrafts" },
   admin: { name: "admin", section: "" },
 };
 const adminSection = computed(() => (route.value.name === "admin" ? route.value.section : ""));
@@ -381,11 +384,12 @@ const go = (to: string, options: { replace?: boolean; query?: Record<string, str
 // Loadout in the tab bar — so it slides in from the right and pushes Loadout
 // out to the left. Direction is read at transition time, when `view` already
 // holds the incoming screen, so enter/leave stay on the same axis.
-// Screens are ordered left-to-right: loadout, inventory, armory. Sliding by
+// Screens are ordered left-to-right: loadout, inventory, armory, then the
+// sticker board. Sliding by
 // that order is what makes the swap read as travel rather than a redraw — the
 // armory sits PAST the inventory (you get to it from there), so it arrives from
 // the right the way the inventory does from the loadout.
-const VIEW_ORDER: Record<string, number> = { grid: 0, focus: 0, inventory: 1, armory: 2, admin: 3 };
+const VIEW_ORDER: Record<string, number> = { grid: 0, focus: 0, inventory: 1, armory: 2, stickers: 3, admin: 4 };
 const viewDeeper = computed(() => (VIEW_ORDER[view.value] ?? 0) > 0);
 const viewEnterFrom = computed(() =>
   viewDeeper.value ? "opacity-0 translate-x-4" : "opacity-0 -translate-x-4",
@@ -4946,6 +4950,7 @@ const viewTabs = computed(() => [
     ? [
         { key: "inventory", label: "Inventory", icon: Package, to: "/items" },
         { key: "armory", label: "Craft", icon: Hammer, to: "/craft" },
+        { key: "stickers", label: "Sticker Crafts", icon: StickerIcon, to: "/sticker-crafts" },
       ]
     : []),
 ]);
@@ -8899,6 +8904,15 @@ if (MDEBUG) {
         :owned="ownedItemIds"
         :compact="isCompact"
         @pick="armoryPick"
+      />
+
+      <!-- ============ STICKER CRAFTS (sticker board) ============ -->
+      <StickerCrafts
+        v-else-if="view === 'stickers'"
+        key="stickers"
+        :inventory="inventory"
+        :attached-name="attachedName"
+        :compact="isCompact"
       />
 
       <!-- ============ INVENTORY VIEW ============ -->

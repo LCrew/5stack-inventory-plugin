@@ -87,6 +87,10 @@ export { loadPaintDef, type PaintDef } from "./paintComposite";
 // lazy import it already pays for (viewer3dLazy) rather than its own imports.
 export { compositeSizeCap, loadWeaponInputs, paintTextureUrl, weaponInputsAt } from "./paintComposite";
 export { compositeKey, storedCompositeUrls } from "./compositeStore";
+// The sticker board (stickerBoard.ts) draws its stickers through the same art
+// and material path as the weapon decals, so it borrows these rather than
+// keeping copies that could drift from them.
+export { loadThree, loadStickerTexture, stickerArtInfo };
 
 export type ThreeBundle = {
   THREE: typeof import("three");

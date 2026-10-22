@@ -253,6 +253,22 @@
       "approx_note": "No exact listing — this is the {note} one.",
       "estimate": "Rough estimate — {window} for {name}. Not a sale price.",
       "none": "No {source} listing for this item{bracket}."
+    },
+    "stickerCrafts": {
+      "title": "Sticker Crafts",
+      "experimental": "Experimental",
+      "clearConfirm": "Press again",
+      "clear": "Clear",
+      "add": "Add sticker",
+      "addShort": "Add",
+      "snap": "Snap",
+      "boardError": "The 3D board could not start.",
+      "empty": "The mat is empty",
+      "addFirst": "Add your first sticker",
+      "selection": "Selection",
+      "grouping": "Grouping",
+      "onMat": "On the mat",
+      "library": "Saved groupings"
     }
   }
 }

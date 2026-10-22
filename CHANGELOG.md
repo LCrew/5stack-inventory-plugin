@@ -7,6 +7,7 @@ The 3D model extraction is now at pipeline version 39, the same number as the in
 
 ### Features
 
+- **Sticker Crafts (experimental, `experimental` branch only)**: a fourth tab after Craft opens a 3D cutting mat ruled in centimetres. Add stickers from the same picker the editor uses, then drag, turn (Q / E, or Alt + wheel), size and wear them, and read their position off the mat's rulers or the X/Y fields. Select two or more and press Group to bind them into a grouping that moves, turns and sizes as one; Save keeps a layout in the library under the board, and + lays it down again. An Angled/Top switch and a half-centimetre Snap sit over the mat. The board and the library live in this browser only: nothing is saved to the inventory or sent to the game.
 - **Editable StatTrak kill count**: the craft editor has a Kills field under the StatTrak switch, and the 3D preview shows the number live. Saving an edit sends the count only if you changed it, so kills the game server counts while the editor is open are never overwritten.
 - **Craftable C4**: the C4's Craft tab now offers the plain C4, which takes stickers, a charm and a name tag. Items with no finishes, the C4 included, are no longer offered a float, pattern or StatTrak they can't have.
 - **Glove pattern control**: every painted glove gets the same pattern tools as weapons: type a number, roll the dice, scrub the rail with a live 3D preview, and "Compare with another". Newer (Gen2) finishes whose artwork moves with the pattern also get Placement bars (Shift X, Shift Y, Rotation).

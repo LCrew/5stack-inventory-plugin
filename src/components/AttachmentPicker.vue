@@ -23,6 +23,11 @@ import InfiniteSentinel from "./InfiniteSentinel.vue";
 const props = defineProps<{
   /** The screen's own state, created once in App.vue. See useAttachmentPicker. */
   view: AttachmentPickerView;
+  /** No 3D preview button on the tiles — for a caller with no preview stage
+   *  (Sticker Crafts, where picking IS the preview: it lands on the board). */
+  hidePreview?: boolean;
+  /** The Back button's tooltip; says what is underneath. */
+  backTitle?: string;
 }>();
 
 defineEmits<{
@@ -118,7 +123,7 @@ const {
              it must not do — the edit underneath is unsaved. -->
         <button
           class="flex flex-none items-center gap-1.5 rounded-md border border-border px-2.5 py-2 text-f10 uppercase tracking-cs1 text-muted-foreground tac-action"
-          title="Back to the editor — nothing is applied"
+          :title="backTitle ?? 'Back to the editor — nothing is applied'"
           @click="picker = null"
         >
           <X class="h-3.5 w-3.5" /> Back
@@ -201,6 +206,7 @@ const {
                propagation — otherwise picking is the only thing a tile can
                do, and choosing a holo sticker from a flat icon is a guess. -->
           <span
+            v-if="!hidePreview"
             role="button"
             tabindex="0"
             class="absolute right-1 top-1 z-[3] hidden items-center justify-center rounded border border-border bg-background/90 p-1 text-muted-foreground tac-action group-hover:flex"
