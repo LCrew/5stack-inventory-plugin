@@ -221,16 +221,32 @@ export function useStickerCraftPlacement(o: {
     el.setPointerCapture(e.pointerId);
     dragging.value = true;
     let spot: { u: number; v: number } | null = null;
-    const move = (ev: PointerEvent) => {
+    // One preview per frame, whatever the pointer's event rate. Each preview is
+    // a decal rebuild per sticker, and the first ones for a slot build their
+    // material from scratch; a rebuild per pointer event started far more of
+    // those than could ever finish.
+    let last: { x: number; y: number } | null = null;
+    let frame = 0;
+    const preview = () => {
+      frame = 0;
+      if (!last) return;
       const v = o.viewer();
-      spot = v?.stickerSpotAt(ev.clientX, ev.clientY) ?? null;
-      ghost.value = spot ? null : { x: ev.clientX, y: ev.clientY, image: p.entry.preview ?? p.entry.stickers[0]?.image ?? null };
+      spot = v?.stickerSpotAt(last.x, last.y) ?? null;
+      ghost.value = spot ? null : { x: last.x, y: last.y, image: p.entry.preview ?? p.entry.stickers[0]?.image ?? null };
       v?.setStickers(spot ? previewAt(p, spot) : o.placements());
+    };
+    const move = (ev: PointerEvent) => {
+      last = { x: ev.clientX, y: ev.clientY };
+      if (!frame) frame = requestAnimationFrame(preview);
     };
     const up = (ev: PointerEvent) => {
       el.removeEventListener("pointermove", move);
       el.removeEventListener("pointerup", up);
       el.removeEventListener("pointercancel", up);
+      cancelAnimationFrame(frame);
+      frame = 0;
+      // Where it was let go, not where the last frame happened to look.
+      spot = o.viewer()?.stickerSpotAt(ev.clientX, ev.clientY) ?? null;
       dragging.value = false;
       ghost.value = null;
       const c = o.craft.value;

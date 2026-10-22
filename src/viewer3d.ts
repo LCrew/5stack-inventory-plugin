@@ -6777,7 +6777,12 @@ async function buildViewer(
     const abort = (why: string): BuildResult => {
       const cur = decals.get(st.slot);
       if (cur?.seq === seq) {
-        if (prev) decals.set(st.slot, prev);
+        // Back to what is DRAWN, which is not always `prev`: prev may itself
+        // have been a build that was overtaken and thrown away before it drew
+        // (see "STILL WANTED?" below), and pointing at it would let a later
+        // request for that placement pass as "unchanged" with nothing on screen.
+        const drawn = liveMesh.get(st.slot)?.userData.decalKey as string | undefined;
+        if (drawn) decals.set(st.slot, { key: drawn, seq: prev?.seq ?? seq });
         else decals.delete(st.slot);
       }
       if (STICKER_LOG) {
@@ -6976,6 +6981,20 @@ async function buildViewer(
       // Through the weapon's sticker mask — only on the UV path, the one whose
       // geometry carries the body UV1 the mask is sampled at.
       const wepMask = uvCut ? await stickerMask() : null;
+      // STILL WANTED? The two awaits above are a new material's first build, and
+      // the slot can move on while they run: a newer build for it starts (the
+      // pointer kept moving), or it is removed outright. Adding this mesh anyway
+      // left it in the scene with nothing holding it — liveMesh only knows the
+      // newest — so a fast first drag (a Sticker Craft dropped onto the gun)
+      // strewed copies along the pointer's path that stayed until a remount.
+      const now = decals.get(st.slot);
+      if (disposed || !now || now.seq !== seq) {
+        geom.dispose();
+        mat.dispose();
+        return { status: "aborted" };
+      }
+      // And whatever a build that finished in the meantime put up is replaced.
+      disposeSlotMesh(st.slot);
       if (wepMask) applyStickerMask(mat, wepMask);
       mesh = new THREE.Mesh(geom, mat);
       mesh.userData.stickerSlot = st.slot;
@@ -6985,6 +7004,8 @@ async function buildViewer(
       scene.add(mesh);
       liveMesh.set(st.slot, mesh);
     }
+    // Which placement this mesh shows — what an abort falls back to.
+    mesh.userData.decalKey = key;
     // Anchor point, facing and on-screen size, kept for the grab test — see
     // pickSticker. The radius is what makes a big zoomed-in sticker grabbable
     // across its whole face instead of only near its centre.

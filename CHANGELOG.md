@@ -35,6 +35,7 @@ The 3D model extraction is now at pipeline version 39, the same number as the in
 - On a short window the item details panel ran down over the 3D view's first-person and screenshot buttons, StatTrak under the toggle. The panel now ends above them and scrolls.
 - A charm's pattern in the details panel's Applied list sat on a line of its own, reading as one more attachment. It now sits under the charm's name.
 - The focus view of a default-finish weapon showed Float and Pattern as "—", with a line across the bottom of the 3D view. A default finish has neither, so the row is gone.
+- Dropping a Sticker Craft onto a gun no longer leaves stray copies of its stickers along the path the pointer took. A sticker's first appearance on a gun builds its material, and when the sticker moved on before that finished, the unfinished build still landed and stayed. Such builds are now thrown away, and the drop preview updates once per frame.
 - The glove Craft list no longer includes ten gloves nobody can own: the eight bare models and the two stock pairs.
 - While editing, the item's name and estimated value sat on the very corner of the 3D view. They now stand clear of the edge, as in the focus view.
 
