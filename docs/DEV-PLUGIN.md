@@ -53,6 +53,26 @@ Same steps as any plugin
 an **Inventory (dev)** tab on player profiles. Clear the **Player Profile Tab**
 label in the form if you don't want that.
 
+## Which branch the dev copy runs
+
+The dev copy and the dev backend image build from ONE branch, named in the
+`push` trigger of `.github/workflows/dev-plugin.yml` and `dev-backend.yml`.
+Today that is **`experimental`**: the fork's `main` with upstream merged in,
+where untested features go first. `main` builds nothing while this is so;
+`checks` runs on both.
+
+To point it at another branch, change those two triggers on BOTH branches
+(a push runs the workflow file of the branch it lands on), allow the branch to
+deploy to Pages once, then push:
+
+```bash
+gh api -X POST repos/LCrew/5stack-inventory-plugin/environments/github-pages/deployment-branch-policies \
+  -f name=<branch> -f type=branch
+```
+
+After the switch, run the dev backend `update` (or re-run the dev-backend
+workflow) so its image comes from the same branch as the page.
+
 ## Is my change live?
 
 ⚙ **Plugin Settings** shows, under its title, "This page: build of …": the
