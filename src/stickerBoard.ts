@@ -69,18 +69,19 @@ const SNAP_H = 180;
 /**
  * The reflections the stickers see.
  *
- * A dim room with one softbox high along the mat's TOP edge (the far side, -z).
- * RoomEnvironment hung its lights overhead, and a camera looking straight down
- * sees exactly overhead in a flat sticker's reflection, so every foil and holo
- * flared white in the Top view. From up there the softbox still catches the
- * angled view's reflections — that is the glint a holo needs — while straight
- * up is dark ceiling.
+ * A soft light box: a lit ceiling and four broad, gentle softboxes, one along
+ * each edge of the mat. Foils and holos are mirrors, so they look as bright as
+ * whatever they reflect. RoomEnvironment hung hot panels overhead, and a
+ * camera looking straight down sees exactly overhead in a flat sticker, so the
+ * Top view flared white; one softbox on the far edge alone fixed that and left
+ * every foil reflecting a dark room, bright only at its edges. Nothing here is
+ * a hot spot, and nothing is dark.
  */
 function studioEnv(THREE: typeof ThreeNS) {
   const env = new THREE.Scene();
   const room = new THREE.Mesh(
     new THREE.BoxGeometry(120, 70, 120),
-    new THREE.MeshBasicMaterial({ color: 0x2a2f33, side: THREE.BackSide }),
+    new THREE.MeshBasicMaterial({ color: new THREE.Color(0.5, 0.52, 0.55), side: THREE.BackSide }),
   );
   room.position.y = 30;
   env.add(room);
@@ -93,8 +94,11 @@ function studioEnv(THREE: typeof ThreeNS) {
     m.lookAt(0, 0, 0);
     env.add(m);
   };
-  panel(80, 22, 3.4, [0, 34, -40]); // the softbox, along the top edge
-  panel(60, 10, 0.45, [0, 12, 46]); // a weak bounce off the near side
+  // One along each edge, low enough that straight down never looks into one.
+  panel(90, 30, 1.5, [0, 26, -48]);
+  panel(90, 30, 1.25, [0, 26, 48]);
+  panel(90, 30, 1.35, [-48, 26, 0]);
+  panel(90, 30, 1.35, [48, 26, 0]);
   return env;
 }
 
@@ -238,13 +242,15 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
   const stage = () => {
     const s = new THREE.Scene();
     s.environment = envTex;
-    s.environmentIntensity = 0.8;
-    // The key light comes in low over the TOP edge, like the softbox it pairs
-    // with, so the Top view never looks down its reflection either.
-    const sun = new THREE.DirectionalLight(0xffffff, 1.5);
-    sun.position.set(4, 26, -34);
-    s.add(sun);
-    s.add(new THREE.HemisphereLight(0xdfeee8, 0x0c1a16, 0.45));
+    s.environmentIntensity = 1;
+    // Four soft lamps, one over each edge, matching the softboxes: even light
+    // with no single direction for a sticker to flare in.
+    for (const [x, z, k] of [[0, -1, 0.55], [0, 1, 0.4], [-1, 0, 0.45], [1, 0, 0.45]] as const) {
+      const lamp = new THREE.DirectionalLight(0xffffff, k);
+      lamp.position.set(x * 30, 26, z * 30);
+      s.add(lamp);
+    }
+    s.add(new THREE.HemisphereLight(0xeef6f2, 0x1a2a24, 0.55));
     const slab = new THREE.Mesh(slabGeom, [edgeMat, edgeMat, topMat, edgeMat, edgeMat, edgeMat]);
     slab.position.y = -0.15;
     s.add(slab);

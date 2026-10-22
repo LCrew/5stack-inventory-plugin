@@ -2619,6 +2619,9 @@ export interface ViewerHandle {
   setStickers: (stickers: StickerPlacement[]) => void;
   /** Pulse a decal so the user can find it — no effect on the saved placement. */
   flashSticker: (slot: number) => void;
+  /** The sticker surface under a screen point, in offset space (uv1 - 0.5);
+   *  null off the gun or without sticker markup. */
+  stickerSpotAt: (clientX: number, clientY: number) => { u: number; v: number } | null;
   /** Resolves once the charm is actually on the model — a caller that needs to
    *  read something off it (charmAlbedoTile) has to know when it landed. */
   setCharm: (charm: CharmPlacement | null) => Promise<void>;
@@ -10358,6 +10361,25 @@ async function buildViewer(
       y: (hit.point.getComponent(AXIS_H) - baseH) / OFFSET_SCALE,
     };
   }
+  /**
+   * The point of the sticker surface under a screen position, in offset space
+   * (uv1 - 0.5) — what a slot's x/y measure once its anchor is subtracted.
+   * Null off the gun, or on a model with no sticker markup (no unwrap to measure
+   * in). For dropping a Sticker Craft, which seats several slots around one
+   * point; see the craft drop in App.vue.
+   */
+  function stickerSpotAt(clientX: number, clientY: number): { u: number; v: number } | null {
+    if (disposed || !uv1Meshes.length) return null;
+    const rect = el.getBoundingClientRect();
+    if (clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom) return null;
+    const ndc = new THREE.Vector2(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
+    raycaster.far = Infinity;
+    raycaster.setFromCamera(ndc, camera);
+    const hit = raycaster.intersectObjects(uv1Meshes, false)[0];
+    const uv = hit ? surfaceUv1(hit) : null;
+    return uv ? { u: round(uv.u - 0.5, 4), v: round(uv.v - 0.5, 4) } : null;
+  }
+
   /** Measure dragGrab for a slot from a hit under the pointer. */
   function takeStickerGrab(slot: number, hit: import("three").Intersection) {
     const at = liveMesh.get(slot)?.userData.stickerXY as [number, number] | undefined;
@@ -14601,6 +14623,7 @@ async function buildViewer(
     setInspectTime: (t) => setInspectTime(t),
     setStickers,
     flashSticker,
+    stickerSpotAt,
     setCharm: (c) => (charmWork = setCharm(c)),
     charmReady: () => charmWork,
     setPaintVariant: (wear, seed, proxy) => setPaintVariant(wear, seed, proxy),

@@ -165,7 +165,8 @@ import { useViewerStage, type StageIcon, type StageKey } from "./composables/use
 import { useDebouncedSearch } from "./composables/useDebouncedSearch";
 import { useInventoryView } from "./composables/useInventoryView";
 import { useAttachmentPicker, type PickerRow } from "./composables/useAttachmentPicker";
-import { STICKER_CM, type SavedCraft } from "./stickerCraftsModel";
+import type { SavedCraft } from "./stickerCraftsModel";
+import { useStickerCraftPlacement } from "./composables/useStickerCraftPlacement";
 import { usePersistedBool, usePersistedEnum, usePersistedNumber } from "./composables/usePersistedRef";
 import { accentSoft, ART_FADE_B, attachmentsOf, canInspect, CARD_ART, CARD_CHROME_PX, glowStyle, hasScratch, hasSeed, hasWear, isCustomizable, isReadOnly, itemName, RARITY_META, rarityName, rarityRank, selRing, STEAM_BLUE, stripName, weaponName, wearTier, wearPositionInTier } from "./itemVisuals";
 import { stackByDesign, TINT_SUFFIX } from "./decks";
@@ -3715,62 +3716,34 @@ async function moveSticker(from: number, to: number) {
   c.stickers[from] = b ? reanchor(b, to, from) : null;
 }
 /**
- * Lay a saved Sticker Craft onto the gun, from the sticker picker's Sticker
- * Crafts tab.
- *
- * Its stickers fill consecutive slots from the one being filled (pulled back if
- * they would run past the fifth), bottom-most first: slot order is draw order,
- * the same as the board's list order. Each lands where it sat on the board
- * relative to the craft's centre, and the centre lands where the slot being
- * filled is — its sticker if it has one, else its anchor.
- *
- * The board measures in footprints: STICKER_CM is one sticker, and on a gun one
- * sticker is 1/scale of the slot's unwrap (see buildDecal in viewer3d), with the
- * art's right along +u and its up along +v. So a sticker one footprint to the
- * right on the board is one footprint along +u here, whichever way the slot
- * faces, and the board's y (which runs DOWN) is -v. Rotation carries over as is:
- * the board turns clockwise for a positive number, as the game does. Offsets are
- * anchor-relative and re-expressed per slot, as in moveSticker.
+ * A saved Sticker Craft, from the sticker picker's Sticker Crafts tab. It waits
+ * in the Stickers panel until it is dragged onto the gun, and stays linked once
+ * it is down — see useStickerCraftPlacement for the drop, the link and the
+ * board-to-unwrap units.
  */
-async function applyStickerCraft(entry: SavedCraft) {
-  const c = craft.value;
+const craftDrop = useStickerCraftPlacement({
+  craft,
+  model: () => craftTarget.value?.model,
+  viewer: () => modalViewer.current(),
+  placements: craftStickerPlacements,
+  slotCount: stickerSlotCount,
+  show3d: () => {
+    if (modal3dAvailable.value) modal3d.value = true;
+  },
+});
+// Top-level for the template, which only unwraps refs it can see directly.
+const {
+  pending: craftPending,
+  link: craftLink,
+  ghost: craftGhost,
+  pendingSlots: craftPendingSlots,
+  linkedSlots: craftLinkedSlots,
+} = craftDrop;
+function applyStickerCraft(entry: SavedCraft) {
   const p = picker.value;
-  if (!c || !p || p.kind !== "sticker" || !entry.stickers.length) return;
-  const n = Math.min(entry.stickers.length, stickerSlotCount);
-  const start = Math.max(0, Math.min(p.slot, stickerSlotCount - n));
-  const model = craftTarget.value?.model;
-  const geo = model ? await fetchStickerGeometry(model) : null;
-  if (craft.value !== c || picker.value !== p) return;
-  const body = c.skin.legacyPaint && c.skin.paintMaterial ? "body_legacy" : "body_hd";
-  const mine = (geo?.slots ?? []).filter((s) => s.mesh === body);
-  const anchors = mine.length ? mine : (geo?.slots ?? []);
-  const first = anchors.reduce<(typeof anchors)[number] | undefined>((lo, s) => (!lo || s.index < lo.index ? s : lo), undefined);
-  const anchorOf = (slot: number) => anchors.find((s) => s.index === slot) ?? first;
-  const fit = (v: number, r?: [number, number]) => Math.round((r ? Math.min(r[1], Math.max(r[0], v)) : v) * 1e4) / 1e4;
-  const home = anchorOf(p.slot);
-  const here = c.stickers[p.slot];
-  const cu = (home?.offset[0] ?? 0) + (here?.x ?? 0);
-  const cv = (home?.offset[1] ?? 0) + (here?.y ?? 0);
-  entry.stickers.slice(0, n).forEach((s, i) => {
-    const slot = start + i;
-    const a = anchorOf(slot);
-    // Unwrap units per board centimetre, at this slot's sticker size.
-    const k = 1 / (STICKER_CM * (a?.scale || 1));
-    c.stickers[slot] = {
-      id: s.id,
-      name: s.name,
-      image: s.image,
-      inst: null,
-      // No markup for this model: nothing to measure against, so the slots'
-      // own default spots, as for any sticker picked one at a time.
-      x: a ? fit(cu + s.x * k - a.offset[0], geo?.bounds?.x) : null,
-      y: a ? fit(cv - s.y * k - a.offset[1], geo?.bounds?.y) : null,
-      r: Math.round(s.rot * 2) / 2,
-      w: s.wear,
-    };
-  });
+  if (!p || p.kind !== "sticker") return;
   picker.value = null;
-  if (modal3dAvailable.value) modal3d.value = true;
+  void craftDrop.pickCraft(entry, p.slot);
 }
 /** The sticker tile being dragged onto another, for the reorder. */
 const stickerDragFrom = ref<number | null>(null);
@@ -3927,6 +3900,8 @@ async function mountModalViewer() {
       // live, and confirm sends the same offsets to the game server.
       onStickerPlaced(slot: number, x: number, y: number) {
         const st = craft.value?.stickers[slot];
+        // A craft's stickers move together; the rest follow this one.
+        if (st) craftDrop.followMove(slot, x, y);
         if (st) {
           st.x = x;
           st.y = y;
@@ -3934,6 +3909,7 @@ async function mountModalViewer() {
       },
       onStickerRotated(slot: number, r: number) {
         const st = craft.value?.stickers[slot];
+        if (st) craftDrop.followTurn(slot, r);
         if (st) st.r = r;
       },
       onCharmPlaced(x: number, y: number, z: number) {
@@ -10543,6 +10519,42 @@ if (MDEBUG) {
                   @click="advancedPlacement = !advancedPlacement"
                 >{{ advancedPlacement ? 'Hide' : 'Advanced' }}</button>
               </div>
+              <!-- A picked Sticker Craft, waiting to be dragged onto the gun —
+                   see useStickerCraftPlacement. The whole card is the handle. -->
+              <div
+                v-if="craftPending"
+                class="mb-2 flex cursor-grab items-center gap-2 rounded-md border border-dashed border-[color:var(--acc)] bg-background/70 p-1.5"
+                style="touch-action: none"
+                :title="'Drag onto the gun to place ' + craftPending.entry.name"
+                @pointerdown="craftDrop.startDrag"
+              >
+                <div class="grid h-10 w-20 flex-none place-items-center overflow-hidden rounded bg-[#183a31]">
+                  <img v-if="craftPending.entry.preview" :src="craftPending.entry.preview" alt="" class="h-full w-full object-cover" draggable="false" />
+                  <Layers v-else class="h-4 w-4 text-muted-foreground" />
+                </div>
+                <div class="min-w-0 flex-1">
+                  <div class="truncate text-f11 text-foreground">{{ craftPending.entry.name }}</div>
+                  <div class="text-f9 uppercase tracking-cs1 text-[color:var(--acc)]">
+                    Drag onto the gun · slot{{ craftPending.slots.length > 1 ? 's' : '' }} {{ craftPending.slots[0] + 1 }}<template v-if="craftPending.slots.length > 1">–{{ craftPending.slots[craftPending.slots.length - 1] + 1 }}</template>
+                  </div>
+                </div>
+                <button
+                  class="grid h-6 w-6 flex-none place-items-center rounded text-muted-foreground transition-colors hover:text-foreground"
+                  title="Put it back — nothing is placed"
+                  @pointerdown.stop
+                  @click="craftDrop.cancel()"
+                ><X class="h-3.5 w-3.5" /></button>
+              </div>
+              <!-- A placed craft: its stickers move and turn as one in 3D. -->
+              <div v-else-if="craftLink" class="mb-1.5 flex items-center gap-1.5 text-f9 uppercase tracking-cs1 text-[#9fcbff]">
+                <Link2 class="h-3 w-3 flex-none" />
+                <span class="truncate">{{ craftLink.name }} · moves as one</span>
+                <button
+                  class="ml-auto flex-none uppercase text-muted-foreground/70 transition-colors hover:text-foreground"
+                  title="Let these stickers move one at a time again"
+                  @click="craftDrop.unlink()"
+                >Unlink</button>
+              </div>
               <div class="grid gap-1.5" :style="{ gridTemplateColumns: `repeat(${stickerSlotCount}, minmax(0, 1fr))` }">
                 <!-- Draggable onto each other: slot order is draw order, so this is
                      how one overlapping sticker goes over another — see
@@ -10555,6 +10567,8 @@ if (MDEBUG) {
                     st ? 'border-border bg-background' : 'border-dashed border-border/60 text-muted-foreground/50 hover:border-[color:var(--acc)] hover:text-[color:var(--acc)]',
                     stickerDropOn === idx && stickerDragFrom !== idx && '!border-solid !border-[color:var(--acc)]',
                     stickerDragFrom === idx && 'opacity-40',
+                    craftPendingSlots.has(idx) && '!border-dashed !border-[color:var(--acc)]',
+                    craftLinkedSlots.has(idx) && 'shadow-[inset_0_-2px_0_#6fb3ff]',
                   ]"
                   :title="st ? st.name + ' (slot ' + (idx + 1) + ') — drag onto another slot to reorder; later slots draw on top' : 'Add a sticker in slot ' + (idx + 1)"
                   :draggable="!!st"
@@ -11247,6 +11261,17 @@ if (MDEBUG) {
          no fade at all. -->
     <AttachmentPicker v-if="picker" :view="pickerView" @pick="pickAttachment" @preview="openPreview3d" @pick-craft="applyStickerCraft" />
     </Transition>
+    <!-- A Sticker Craft being dragged while it is off the gun: its card follows
+         the pointer. Over the gun the stickers themselves are the preview.
+         Above everything, the way a dragged thing is. A SIBLING of the picker's
+         Transition, for the same one-child reason as the preview below. -->
+    <img
+      v-if="craftGhost?.image"
+      :src="craftGhost.image"
+      alt=""
+      class="pointer-events-none fixed h-12 w-24 -translate-x-1/2 -translate-y-1/2 rounded object-cover opacity-80 shadow-lg"
+      :style="{ left: craftGhost.x + 'px', top: craftGhost.y + 'px', zIndex: Z.confirm + 1 }"
+    />
 
     <!-- Attachment preview — a SIBLING of the picker's Transition, not a
          child of it: <Transition> takes exactly one child, and nesting this

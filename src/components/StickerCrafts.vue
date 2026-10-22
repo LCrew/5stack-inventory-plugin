@@ -45,6 +45,7 @@ import {
   GRID_W,
   MAX_ON_BOARD,
   MAX_PER_GROUPING,
+  PREVIEW_VERSION,
   cleanSticker,
   readJson,
   readLibrary,
@@ -437,7 +438,10 @@ async function renderPreview(id: string) {
   try {
     const url = await b.snapshot(toRaw(entry.stickers).map((s) => toRaw(s)));
     const now = library.value.find((e) => e.id === id);
-    if (now) now.preview = url;
+    if (now) {
+      now.preview = url;
+      now.previewV = PREVIEW_VERSION;
+    }
   } catch {
     /* no preview is a plainer card, not an error */
   }
@@ -481,8 +485,31 @@ function placeSaved(entry: SavedCraft) {
 function renameSaved(entry: SavedCraft, name: string) {
   if (name.trim()) entry.name = name.trim().slice(0, 40);
 }
+// Deleting a saved craft, or taking a grouping off the mat, can't be walked
+// back either: the first press arms the button for a few seconds, the second
+// does it. One armed button at a time.
+const armed = ref<string | null>(null);
+let armTimer: ReturnType<typeof setTimeout> | undefined;
+/** True when this press should go ahead; false when it only armed the button. */
+function pressAgain(key: string): boolean {
+  if (armed.value === key) {
+    armed.value = null;
+    clearTimeout(armTimer);
+    return true;
+  }
+  armed.value = key;
+  clearTimeout(armTimer);
+  armTimer = setTimeout(() => (armed.value = null), 3000);
+  return false;
+}
 function deleteSaved(id: string) {
+  if (!pressAgain("lib:" + id)) return;
   library.value = library.value.filter((e) => e.id !== id);
+}
+/** The trash button under Selection: a whole grouping in it asks twice. */
+function removeSelectionAsked() {
+  if (sel.value.some((s) => s.group) && !pressAgain("remove")) return;
+  removeSelection();
 }
 
 // ---- adding stickers --------------------------------------------------------------
@@ -601,8 +628,9 @@ onMounted(async () => {
     }
     board.value = b;
     b.sync(toRaw(stickers.value).map((s) => toRaw(s)), toRaw(selected.value));
-    // Crafts saved before previews existed get theirs now, one at a time.
-    for (const e of library.value.filter((x) => !x.preview).map((x) => x.id)) {
+    // Crafts saved before previews existed, or drawn in an older look, get a
+    // fresh one now, one at a time. The old picture stays up until it lands.
+    for (const e of library.value.filter((x) => !x.preview || x.previewV !== PREVIEW_VERSION).map((x) => x.id)) {
       if (board.value !== b) break;
       await renderPreview(e);
     }
@@ -666,6 +694,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("pointercancel", rowUp);
   clearTimeout(saveTimer);
   clearTimeout(clearTimer);
+  clearTimeout(armTimer);
   // Land a save that was still waiting on its debounce.
   saveBoard();
   board.value?.dispose();
@@ -851,7 +880,11 @@ const FIELD =
               <button :class="ICON_BTN" title="Bring to front" @click="restack('front')"><BringToFront class="h-3.5 w-3.5" /></button>
               <button :class="ICON_BTN" title="Send to back" @click="restack('back')"><SendToBack class="h-3.5 w-3.5" /></button>
               <button :class="ICON_BTN" title="Duplicate (Ctrl/⌘ + D)" @click="duplicateSelection"><Copy class="h-3.5 w-3.5" /></button>
-              <button :class="ICON_BTN" title="Remove from the mat (Delete)" @click="removeSelection"><Trash2 class="h-3.5 w-3.5" /></button>
+              <button
+                :class="[ICON_BTN, armed === 'remove' ? '!border-destructive/60 !text-destructive' : '']"
+                :title="armed === 'remove' ? 'Press again to take the grouping off the mat' : 'Remove from the mat (Delete)'"
+                @click="removeSelectionAsked"
+              ><Trash2 class="h-3.5 w-3.5" /></button>
             </div>
           </template>
         </section>
@@ -982,8 +1015,14 @@ const FIELD =
                 <button class="grid h-6 w-7 flex-none place-items-center rounded-md border border-border text-muted-foreground tac-action" title="Lay it on the mat" @click="placeSaved(entry)">
                   <Plus class="h-3.5 w-3.5" />
                 </button>
-                <button class="grid h-6 w-7 flex-none place-items-center rounded-md border border-border text-muted-foreground tac-action" title="Delete from the library" @click="deleteSaved(entry.id)">
-                  <Trash2 class="h-3.5 w-3.5" />
+                <button
+                  class="grid h-6 flex-none place-items-center rounded-md border text-muted-foreground tac-action"
+                  :class="armed === 'lib:' + entry.id ? 'w-auto border-destructive/60 px-1.5 text-f9 uppercase tracking-cs1 !text-destructive' : 'w-7 border-border'"
+                  :title="armed === 'lib:' + entry.id ? 'Press again to delete ' + entry.name : 'Delete from the library'"
+                  @click="deleteSaved(entry.id)"
+                >
+                  <template v-if="armed === 'lib:' + entry.id">{{ tr("inventory.stickerCrafts.clearConfirm", "Press again") }}</template>
+                  <Trash2 v-else class="h-3.5 w-3.5" />
                 </button>
               </div>
             </div>

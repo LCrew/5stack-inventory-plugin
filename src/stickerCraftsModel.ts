@@ -54,7 +54,15 @@ export interface SavedCraft {
   /** A top-down render from the board, as a data URL. Absent until the board
    *  has drawn one (crafts saved before previews existed). */
   preview?: string;
+  /** The PREVIEW_VERSION it was drawn at; an older one is redrawn. */
+  previewV?: number;
 }
+
+/**
+ * Bump when the board's look changes (light, materials), so stored previews are
+ * redrawn the next time the board is open instead of showing the old look.
+ */
+export const PREVIEW_VERSION = 2;
 
 export const BOARD_KEY = "cs2inv.stickerCrafts.board";
 export const LIBRARY_KEY = "cs2inv.stickerCrafts.library";
@@ -108,7 +116,7 @@ export function readLibrary(): SavedCraft[] {
       name: typeof e.name === "string" ? e.name : "Grouping",
       savedAt: num(e.savedAt, 0),
       stickers,
-      ...(typeof e.preview === "string" && e.preview.startsWith("data:image/") ? { preview: e.preview } : {}),
+      ...(typeof e.preview === "string" && e.preview.startsWith("data:image/") ? { preview: e.preview, previewV: num(e.previewV, 1) } : {}),
     }];
   });
 }
