@@ -44,8 +44,7 @@ const where = computed(() => {
       ? `Needs room for ${n.value} · the mat has room for ${props.room}`
       : `Needs ${n.value} empty slots · this gun has ${props.room}`;
   }
-  if (props.plan) return planLine(props.plan);
-  return props.target === "mat" ? "Lays on the mat" : "";
+  return props.plan ? planLine(props.plan) : "";
 });
 </script>
 
@@ -87,7 +86,8 @@ const where = computed(() => {
       <div class="truncate text-f13 font-semibold text-foreground">{{ craft.name }}</div>
       <div class="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-f11 text-muted-foreground">
         <span>{{ n }} {{ n === 1 ? "sticker" : "stickers" }}</span>
-        <span v-if="published" class="flex items-center gap-1 text-foreground"><Globe class="h-3.5 w-3.5" /> In the store</span>
+        <!-- Not when the caller's own switch below already says so. -->
+        <span v-if="published && !$slots.actions" class="flex items-center gap-1 text-foreground"><Globe class="h-3.5 w-3.5" /> In the store</span>
         <span v-if="published && score" class="font-mono" :title="`${score.ups} up · ${score.downs} down`">▲ {{ score.ups }} · ▼ {{ score.downs }}</span>
       </div>
       <!-- What is in it: every sticker, named, in slot order — on a phone there
@@ -136,9 +136,9 @@ const where = computed(() => {
           class="tac-action flex flex-none items-center rounded-md border border-border px-3 text-f11 uppercase tracking-cs1 text-foreground disabled:pointer-events-none disabled:text-muted-foreground disabled:opacity-60"
           :class="isCompact ? 'h-9' : 'h-8'"
           :disabled="!fits"
-          :title="fits ? 'Use this craft' : where"
+          :title="fits ? (target === 'mat' ? 'Place it on the mat' : 'Use this craft') : where"
           @click="emit('use')"
-        >{{ fits ? "Use" : "Doesn't fit" }}</button>
+        >{{ fits ? (target === "mat" ? "Place" : "Use") : "Doesn't fit" }}</button>
       </div>
     </div>
   </div>

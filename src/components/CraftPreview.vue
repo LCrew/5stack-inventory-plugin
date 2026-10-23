@@ -149,10 +149,10 @@ const where = computed(() => {
           :style="CTA_STYLE"
           class="ml-auto"
           :disabled="!fits"
-          :title="fits ? 'Use this craft' : where"
+          :title="fits ? (target === 'mat' ? 'Lay it on the mat' : 'Use this craft') : where"
           @click="emit('use')"
         >
-          Use this craft
+          {{ target === "mat" ? "Place on mat" : "Use this craft" }}
         </button>
       </div>
     </div>

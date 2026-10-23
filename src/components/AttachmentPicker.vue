@@ -18,7 +18,7 @@ import { isCompact } from "../responsive";
 import { ATTACH_SORTS } from "../sortModes";
 import { Z } from "../zLayers";
 import { PICKER_PAGE, type AttachmentPickerView, type PickerRow } from "../composables/useAttachmentPicker";
-import type { SavedCraft, StoreCraft } from "../stickerCraftsModel";
+import { MAX_PER_GROUPING, type SavedCraft, type StoreCraft } from "../stickerCraftsModel";
 import CatalogFilters from "./CatalogFilters.vue";
 import CraftTile from "./CraftTile.vue";
 import CraftPreview from "./CraftPreview.vue";
@@ -32,6 +32,11 @@ const props = defineProps<{
   hidePreview?: boolean;
   /** The Back button's tooltip; says what is underneath. */
   backTitle?: string;
+  /** The Back button's word, when "Back" alone doesn't say where to. */
+  backLabel?: string;
+  /** The heading, for a caller that opens it on a shelf ("Craft Store");
+   *  "Pick a sticker" otherwise. */
+  title?: string;
   /** Where a pick goes: a gun's sticker slots (the editor, the default) or the
    *  Sticker Crafts mat. Only the words change — room, footer, empty shelf. */
   target?: "gun" | "mat";
@@ -139,7 +144,7 @@ function useCraft(c: SavedCraft | StoreCraft) {
            search, each full width. In one row Back and search ran off the
            screen, and with no Esc key Back is the only way out. -->
       <div class="mb-3 flex items-center" :class="isCompact ? 'flex-wrap gap-2' : 'gap-3'">
-        <span class="text-f11 font-semibold uppercase tracking-cs1" :class="isCompact ? 'order-1' : ''">Pick a {{ picker.kind }}</span>
+        <span class="text-f11 font-semibold uppercase tracking-cs1" :class="isCompact ? 'order-1' : ''">{{ title ?? 'Pick a ' + picker.kind }}</span>
         <!-- Catalog vs your own drawer. Owned counts the SPARES, not the
              total: the question this shelf answers is "have I got one going
              spare", and a badge counting ones already stuck to a gun would
@@ -192,7 +197,7 @@ function useCraft(c: SavedCraft | StoreCraft) {
           :title="backTitle ?? 'Back to the editor — nothing is applied'"
           @click="picker = null"
         >
-          <X class="h-3.5 w-3.5" /> Back
+          <X class="h-3.5 w-3.5" /> {{ backLabel ?? "Back" }}
         </button>
       </div>
 
@@ -202,11 +207,13 @@ function useCraft(c: SavedCraft | StoreCraft) {
       <!-- What there is room for first, then whose crafts, then the size filter
            — labelled, so its 1–5 don't read as the gun's slot numbers. -->
       <div v-if="pickerSource === 'crafts'" class="mb-3 flex flex-wrap items-center gap-2">
-        <span class="text-f11 text-foreground" :class="isCompact ? 'w-full' : ''">
-          <template v-if="onMat">Room on the mat: {{ craftRoom }} {{ craftRoom === 1 ? "sticker" : "stickers" }}</template>
+        <!-- On the mat the room only matters when it is short: "5" read as the
+             mat's size, when it is a craft's. -->
+        <span v-if="!onMat || craftRoom < MAX_PER_GROUPING" class="order-none text-f11 text-foreground" :class="isCompact ? 'w-full' : ''">
+          <template v-if="onMat">Room on the mat: {{ craftRoom }} more {{ craftRoom === 1 ? "sticker" : "stickers" }}</template>
           <template v-else>This gun: {{ craftRoom }} empty {{ craftRoom === 1 ? "slot" : "slots" }}</template>
         </span>
-        <div class="flex flex-none items-center gap-0.5 rounded-md border border-border p-0.5" :class="isCompact ? 'w-full' : ''">
+        <div class="order-1 flex flex-none items-center gap-0.5 rounded-md border border-border p-0.5" :class="isCompact ? 'min-w-0 flex-1' : ''">
           <button
             v-for="sc in (['mine', 'store'] as const)"
             :key="sc"
@@ -216,7 +223,7 @@ function useCraft(c: SavedCraft | StoreCraft) {
             @click="craftsScope = sc"
           >{{ sc === 'mine' ? 'Mine' : 'Craft Store' }}</button>
         </div>
-        <div class="flex flex-none items-center gap-0.5 rounded-md border border-border p-0.5">
+        <div class="flex flex-none items-center gap-0.5 rounded-md border border-border p-0.5" :class="isCompact ? 'order-3' : 'order-2'">
           <span class="px-1.5 text-f10 uppercase tracking-cs1 text-muted-foreground">Stickers</span>
           <button
             v-for="c in [0, 1, 2, 3, 4, 5]"
@@ -227,7 +234,7 @@ function useCraft(c: SavedCraft | StoreCraft) {
             @click="craftCount = c"
           >{{ c === 0 ? 'All' : c }}</button>
         </div>
-        <div v-if="craftsScope === 'store'" class="flex flex-none items-center gap-0.5 rounded-md border border-border p-0.5" :class="isCompact ? '' : 'ml-auto'">
+        <div v-if="craftsScope === 'store'" class="flex flex-none items-center gap-0.5 rounded-md border border-border p-0.5" :class="isCompact ? 'order-2' : 'order-3 ml-auto'">
           <button
             v-for="so in (['top', 'new'] as const)"
             :key="so"
@@ -237,6 +244,10 @@ function useCraft(c: SavedCraft | StoreCraft) {
             @click="storeSort = so"
           >{{ so === 'top' ? 'Top' : 'New' }}</button>
         </div>
+      </div>
+
+      <div v-if="pickerSource === 'crafts' && onMat && craftsScope === 'store'" class="mb-3 text-f11 text-muted-foreground">
+        Lay any craft on the mat, change it if you like, then Save as craft to keep your own copy.
       </div>
 
       <!-- Facets. THE shared bar — same component the armory uses, so a rarity
@@ -460,7 +471,7 @@ function useCraft(c: SavedCraft | StoreCraft) {
              regardless, so the grid above never resizes either way. -->
         <template v-else-if="pickerSource === 'crafts'">
           <span v-if="craftRows.length && !isCompact" class="text-f11 normal-case tracking-normal">
-            {{ onMat ? "Use lays the craft on the mat as a group." : "Use holds the craft over the gun — drag it into place, or press Place to put it on its slots." }}
+            {{ onMat ? "Place lays the craft on the mat as a group, where you can change it." : "Use holds the craft over the gun — drag it into place, or press Place to put it on its slots." }}
           </span>
         </template>
         <template v-else-if="!pickerRows.length"></template>

@@ -23,6 +23,8 @@ import {
   BringToFront,
   Check,
   ChevronUp,
+  Cloud,
+  CloudOff,
   Copy,
   Globe,
   GripVertical,
@@ -33,6 +35,7 @@ import {
   Loader2,
   Lock,
   Magnet,
+  Pencil,
   Plus,
   RefreshCw,
   RotateCcw,
@@ -56,6 +59,7 @@ import {
   MAX_ON_BOARD,
   MAX_PER_GROUPING,
   PREVIEW_VERSION,
+  STICKER_CM,
   deleteCraft,
   loadStickerCrafts,
   saveBoard as storeBoard,
@@ -66,6 +70,7 @@ import {
   type CraftSticker,
   type Grouping,
   type SavedCraft,
+  type StoreCraft,
 } from "../stickerCraftsModel";
 import type { StickerBoard } from "../stickerBoard";
 import AttachmentPicker from "./AttachmentPicker.vue";
@@ -544,6 +549,7 @@ function settleUndo() {
 }
 function offerUndo(label: string, undo: () => void, commit?: () => void) {
   settleUndo();
+  notice.value = null;
   undoable.value = { label, undo, commit };
   undoTimer = setTimeout(settleUndo, UNDO_MS);
 }
@@ -681,21 +687,69 @@ function updateCraft() {
   say(published.value.has(entry.id) ? `Updated “${entry.name}” — the Craft Store has the new layout` : `Updated “${entry.name}”`);
 }
 /** Lay a saved craft down in the middle of the mat, as a grouping again. */
-function placeSaved(entry: SavedCraft) {
-  if (stickers.value.length + entry.stickers.length > MAX_ON_BOARD) return;
-  const g = entry.stickers.length > 1 ? { id: newId(), name: entry.name } : null;
+/**
+ * Where a whole craft lands: the middle of the mat when it is clear there, else
+ * the first spot of a 6.5 cm lattice where none of its stickers comes near one
+ * already down and all of them stay on the grid — so a second craft no longer
+ * lands on the first. Nowhere clear: the middle.
+ */
+function craftSpot(list: { x: number; y: number }[]): { x: number; y: number } {
+  const half = STICKER_CM / 2;
+  const clear = (cx: number, cy: number) =>
+    list.every((s) => {
+      const x = cx + s.x;
+      const y = cy + s.y;
+      return (
+        x >= half && x <= GRID_W - half && y >= half && y <= GRID_H - half &&
+        !stickers.value.some((o) => Math.hypot(o.x - x, o.y - y) < STICKER_CM * 0.9)
+      );
+    });
+  const mid = { x: GRID_W / 2, y: GRID_H / 2 };
+  if (clear(mid.x, mid.y)) return mid;
+  for (let y = 6; y <= GRID_H - 2; y += 6.5) {
+    for (let x = 6; x <= GRID_W - 2; x += 6.5) if (clear(x, y)) return { x, y };
+  }
+  return mid;
+}
+/** Someone else's craft from the store, not one of yours. */
+const othersCraft = (entry: SavedCraft | StoreCraft) => "author" in entry && !(entry as StoreCraft).mine;
+/**
+ * Lay a craft down on the mat, as a grouping again, selected. One of yours
+ * stays linked to it (Update writes back); someone else's from the store is a
+ * copy to make your own, named so. False when the mat has no room for it.
+ */
+function placeSaved(entry: SavedCraft | StoreCraft): boolean {
+  if (stickers.value.length + entry.stickers.length > MAX_ON_BOARD) return false;
+  const theirs = othersCraft(entry);
+  const g = entry.stickers.length > 1 ? { id: newId(), name: theirs ? `${entry.name} (my copy)` : entry.name } : null;
   if (g) groups.value = [...groups.value, g];
+  const at = craftSpot(entry.stickers);
   const made = entry.stickers.map((s) => ({
     ...toRaw(s),
     uid: newId(),
-    x: clampX(GRID_W / 2 + s.x),
-    y: clampY(GRID_H / 2 + s.y),
+    x: clampX(at.x + s.x),
+    y: clampY(at.y + s.y),
     group: g?.id ?? null,
-    craft: entry.id,
+    craft: theirs ? null : entry.id,
   }));
   stickers.value = [...stickers.value, ...made];
   selected.value = new Set(made.map((s) => s.uid));
   board.value?.flash(made.map((s) => s.uid));
+  return true;
+}
+/** Lay it down and say what now: the panel back at Edit, where the save is. */
+function layDown(entry: SavedCraft | StoreCraft) {
+  if (!placeSaved(entry)) {
+    say(`No room for “${entry.name}” — the mat holds ${MAX_ON_BOARD} stickers`, true);
+    return;
+  }
+  if (props.compact) panelTab.value = "edit";
+  else asideEl.value?.scrollTo({ top: 0, behavior: "smooth" });
+  say(
+    othersCraft(entry)
+      ? `“${entry.name}” is on the mat — move or change it, then Save as craft to keep your own copy`
+      : `“${entry.name}” is on the mat — change it, then Update to save over it`,
+  );
 }
 function renameSaved(entry: SavedCraft, name: string) {
   if (!name.trim()) return;
@@ -774,8 +828,12 @@ function openCrafts(scope: "mine" | "store") {
   pickerView.pickerSource.value = "crafts";
   pickerView.craftsScope.value = scope;
 }
-/** The panel lists the newest few; Browse opens them all. */
+/** The panel lists the newest few; See all opens them all. */
 const LIBRARY_SHOWN = 5;
+/** The picker says what it is showing: on a crafts shelf it is no sticker picker. */
+const pickerTitle = computed(() =>
+  pickerView.pickerSource.value !== "crafts" ? undefined : pickerView.craftsScope.value === "store" ? "Craft Store" : "Your crafts",
+);
 /**
  * Where a new sticker lands: the first free cell of a 6.5 cm lattice across the
  * mat, so a few picked in a row lie side by side instead of on top of each
@@ -811,9 +869,22 @@ function addSticker(row: PickerRow) {
   board.value?.flash([s.uid]);
 }
 /** The picker's Sticker Crafts tab, opened from here: lay the craft on the mat. */
-function addCraft(entry: SavedCraft) {
+function addCraft(entry: SavedCraft | StoreCraft) {
   picker.value = null;
-  placeSaved(entry);
+  layDown(entry);
+}
+/** A craft's name being edited on its picker tile (See all). */
+const renaming = ref<string | null>(null);
+/** v-focus: the rename field takes the keyboard, its text selected. */
+const vFocus = {
+  mounted: (el: HTMLInputElement) => {
+    el.focus();
+    el.select();
+  },
+};
+function finishRename(entry: SavedCraft, name: string) {
+  renaming.value = null;
+  renameSaved(entry, name);
 }
 
 // ---- the board ----------------------------------------------------------------------
@@ -989,6 +1060,7 @@ const PANEL_TABS = [
   { id: "layers", label: "Layers" },
   { id: "saved", label: "Saved" },
 ] as const;
+const asideEl = ref<HTMLElement | null>(null);
 const PANEL_PILL =
   "relative z-[1] flex h-9 items-center justify-center rounded-md px-2 text-f10 uppercase tracking-cs1 transition-colors";
 const VIEWS = [
@@ -1043,13 +1115,21 @@ const FIELD =
         v-if="loaded && home === 'local'"
         class="flex-none rounded border border-[#e0a24a]/50 px-1.5 py-0.5 text-f8 uppercase tracking-cs1 text-[#e0a24a]"
         title="This backend can't keep Sticker Crafts on your account yet, so they're saved in this browser only. Updating the dev backend fixes it."
-      >{{ tr("inventory.stickerCrafts.localOnly", "This browser only") }}</span>
+      >{{ compact ? tr("inventory.stickerCrafts.localShort", "Local") : tr("inventory.stickerCrafts.localOnly", "This browser only") }}</span>
       <span
         v-else-if="loaded && sync !== 'idle'"
-        class="flex-none text-f9 uppercase tracking-cs1"
+        class="flex flex-none items-center text-f9 uppercase tracking-cs1"
         :class="sync === 'error' ? 'text-destructive' : 'text-muted-foreground/70'"
-        :title="sync === 'error' ? 'The last change did not reach the server. The next change will try again.' : 'Kept on your account — the same on every browser and device'"
-      >{{ sync === 'saving' ? tr("inventory.stickerCrafts.saving", "Saving…") : sync === 'error' ? tr("inventory.stickerCrafts.notSaved", "Not saved") : tr("inventory.stickerCrafts.saved", "Saved") }}</span>
+        :title="sync === 'error' ? 'The last change did not reach the server. The next change will try again.' : sync === 'saving' ? 'Saving to your account' : 'Kept on your account — the same on every browser and device'"
+      >
+        <!-- An icon on a phone: the word pushed the header's buttons off screen. -->
+        <template v-if="compact">
+          <Loader2 v-if="sync === 'saving'" class="h-3.5 w-3.5 animate-spin" />
+          <CloudOff v-else-if="sync === 'error'" class="h-3.5 w-3.5" />
+          <Cloud v-else class="h-3.5 w-3.5" />
+        </template>
+        <template v-else>{{ sync === 'saving' ? tr("inventory.stickerCrafts.saving", "Saving…") : sync === 'error' ? tr("inventory.stickerCrafts.notSaved", "Not saved") : tr("inventory.stickerCrafts.saved", "Saved") }}</template>
+      </span>
       <div class="ml-auto flex items-center gap-2">
         <button
           :class="BTN"
@@ -1224,6 +1304,7 @@ const FIELD =
 
       <!-- ============ SIDEBAR ============ -->
       <aside
+        ref="asideEl"
         class="sc-panel flex min-w-0 flex-col gap-3 overflow-y-auto overflow-x-hidden p-3"
         :class="compact ? 'min-h-0 flex-1 border-t border-border' : 'w-[300px] flex-none border-l border-border'"
       >
@@ -1454,85 +1535,154 @@ const FIELD =
           </div>
         </section>
 
-        <!-- LIBRARY — saved crafts, to lay down again or apply to a weapon. -->
+        <!-- LIBRARY — saved crafts, to lay down again or apply to a weapon. The
+             newest one as a card, the next four as rows, the rest a press away
+             full-screen (See all). -->
         <section v-show="!compact || panelTab === 'saved'" class="sc-block">
           <header class="mb-2 flex items-baseline gap-2">
             <span class="text-f10 uppercase tracking-cs1 text-muted-foreground">{{ tr("inventory.stickerCrafts.library", "Saved crafts") }}</span>
-            <span class="ml-auto font-mono text-f10 text-muted-foreground/70">{{ library.length }}</span>
+            <span class="font-mono text-f10 text-muted-foreground/70">
+              <template v-if="library.length > LIBRARY_SHOWN">{{ LIBRARY_SHOWN }} of {{ library.length }}</template>
+              <template v-else>{{ library.length }}</template>
+            </span>
+            <button
+              v-if="library.length > LIBRARY_SHOWN"
+              class="ml-auto flex-none text-f10 uppercase tracking-cs1 text-muted-foreground transition-colors hover:text-foreground"
+              :class="compact ? 'h-8 px-1' : ''"
+              :title="`See all ${library.length} of your crafts`"
+              @click="openCrafts('mine')"
+            >{{ tr("inventory.stickerCrafts.seeAll", "See all") }}</button>
           </header>
           <div v-if="!library.length" class="text-f11 text-muted-foreground/70">
             {{ compact ? `Tick up to ${MAX_PER_GROUPING} stickers in the list and tap Save as craft.` : `Shift-click up to ${MAX_PER_GROUPING} stickers and press Save as craft.` }}
             Then open any gun's sticker slot and choose Sticker Crafts.
           </div>
           <div class="flex flex-col gap-2">
-            <div
-              v-for="entry in library.slice(0, LIBRARY_SHOWN)"
-              :key="entry.id"
-              :data-craft="entry.id"
-              class="rounded-md border bg-background/60 p-2 transition-[border-color,box-shadow] duration-500"
-              :class="justSaved === entry.id ? 'animate-cell-in border-[color:var(--acc)] shadow-[0_0_0_1px_var(--acc)]' : 'border-border'"
-            >
-              <!-- The board's own top-down render of the craft. -->
-              <div class="relative mb-2 grid aspect-[2/1] w-full place-items-center overflow-hidden rounded bg-[#183a31]">
-                <img v-if="entry.preview" :src="entry.preview" alt="" class="h-full w-full object-cover" draggable="false" />
-                <Loader2 v-else class="h-4 w-4 animate-spin text-muted-foreground" />
+            <template v-for="(entry, ei) in library.slice(0, LIBRARY_SHOWN)" :key="entry.id">
+              <!-- The newest: the full card. -->
+              <div
+                v-if="ei === 0"
+                :data-craft="entry.id"
+                class="rounded-md border bg-background/60 p-2 transition-[border-color,box-shadow] duration-500"
+                :class="justSaved === entry.id ? 'animate-cell-in border-[color:var(--acc)] shadow-[0_0_0_1px_var(--acc)]' : 'border-border'"
+              >
+                <!-- The board's own top-down render of the craft. -->
+                <div class="relative mb-2 grid aspect-[2/1] w-full place-items-center overflow-hidden rounded bg-[#183a31]">
+                  <img v-if="entry.preview" :src="entry.preview" alt="" class="h-full w-full object-cover" draggable="false" />
+                  <Loader2 v-else class="h-4 w-4 animate-spin text-muted-foreground" />
+                </div>
+                <div class="mb-1.5 flex items-center gap-1.5">
+                  <input
+                    :class="FIELD"
+                    class="flex-1 font-sans text-f11"
+                    :value="entry.name"
+                    maxlength="40"
+                    title="Rename"
+                    @change="renameSaved(entry, ($event.target as HTMLInputElement).value)"
+                  />
+                  <span class="flex-none font-mono text-f9 text-muted-foreground">{{ entry.stickers.length }} {{ entry.stickers.length === 1 ? "sticker" : "stickers" }}</span>
+                </div>
+                <div class="flex items-center gap-1.5">
+                  <!-- In the Craft Store or not: everyone on the panel can browse,
+                       rate and use a public craft from their sticker picker. A
+                       switch with its state in words, busy while it is sent. -->
+                  <button
+                    class="flex flex-none items-center gap-1.5 rounded-md border border-border px-2 text-f9 uppercase tracking-cs1 tac-action disabled:opacity-35"
+                    :class="[published.has(entry.id) ? 'tac-on' : 'text-muted-foreground', compact ? 'h-9' : 'h-7']"
+                    :disabled="home !== 'server' || publishing.has(entry.id)"
+                    :aria-pressed="published.has(entry.id)"
+                    :title="home !== 'server' ? 'The Craft Store needs the updated backend' : published.has(entry.id) ? 'In the Craft Store — click to make it private again' : 'Private — click to publish it to the Craft Store, where everyone on the panel can see, rate and use it'"
+                    @click="togglePublish(entry)"
+                  >
+                    <Loader2 v-if="publishing.has(entry.id)" class="h-3.5 w-3.5 animate-spin" />
+                    <Globe v-else-if="published.has(entry.id)" class="h-3.5 w-3.5" />
+                    <Lock v-else class="h-3.5 w-3.5" />
+                    {{ published.has(entry.id) ? tr("inventory.stickerCrafts.inStore", "In store") : tr("inventory.stickerCrafts.private", "Private") }}
+                  </button>
+                  <button
+                    class="grid flex-none place-items-center rounded-md border border-border text-muted-foreground tac-action"
+                    :class="compact ? 'h-9 w-10' : 'h-7 w-8'"
+                    title="Delete from your crafts — you can undo it for a few seconds"
+                    @click="deleteSaved(entry.id)"
+                  >
+                    <Trash2 class="h-3.5 w-3.5" />
+                  </button>
+                  <button
+                    class="ml-auto flex flex-none items-center gap-1 rounded-md border border-border px-2 text-f9 uppercase tracking-cs1 text-foreground tac-action"
+                    :class="compact ? 'h-9' : 'h-7'"
+                    title="Lay it on the mat, to change it or start from it"
+                    @click="layDown(entry)"
+                  >
+                    <Plus class="h-3.5 w-3.5" /> {{ tr("inventory.stickerCrafts.toMat", "Place on mat") }}
+                  </button>
+                </div>
               </div>
-              <div class="mb-1.5 flex items-center gap-1.5">
-                <input
-                  :class="FIELD"
-                  class="flex-1 font-sans text-f11"
-                  :value="entry.name"
-                  maxlength="40"
-                  title="Rename"
-                  @change="renameSaved(entry, ($event.target as HTMLInputElement).value)"
-                />
-                <span class="flex-none font-mono text-f9 text-muted-foreground">{{ entry.stickers.length }} {{ entry.stickers.length === 1 ? "sticker" : "stickers" }}</span>
+              <!-- The next four: a row each, so the list stays short. -->
+              <div
+                v-else
+                :data-craft="entry.id"
+                class="flex items-center gap-2 rounded-md border bg-background/60 p-1.5 transition-[border-color,box-shadow] duration-500"
+                :class="justSaved === entry.id ? 'animate-cell-in border-[color:var(--acc)] shadow-[0_0_0_1px_var(--acc)]' : 'border-border'"
+              >
+                <div class="grid h-12 w-24 flex-none place-items-center overflow-hidden rounded bg-[#183a31]">
+                  <img v-if="entry.preview" :src="entry.preview" alt="" class="h-full w-full object-cover" draggable="false" />
+                  <Loader2 v-else class="h-4 w-4 animate-spin text-muted-foreground" />
+                </div>
+                <div class="flex min-w-0 flex-1 flex-col gap-1">
+                  <input
+                    :class="FIELD"
+                    class="font-sans text-f11"
+                    :value="entry.name"
+                    maxlength="40"
+                    title="Rename"
+                    @change="renameSaved(entry, ($event.target as HTMLInputElement).value)"
+                  />
+                  <div class="flex items-center gap-1">
+                    <span class="mr-auto font-mono text-f9 text-muted-foreground">{{ entry.stickers.length }} {{ entry.stickers.length === 1 ? "sticker" : "stickers" }}</span>
+                    <button
+                      class="grid flex-none place-items-center rounded-md border border-border tac-action disabled:opacity-35"
+                      :class="[published.has(entry.id) ? 'tac-on' : 'text-muted-foreground', compact ? 'h-9 w-10' : 'h-6 w-7']"
+                      :disabled="home !== 'server' || publishing.has(entry.id)"
+                      :aria-pressed="published.has(entry.id)"
+                      :aria-label="published.has(entry.id) ? 'In the Craft Store' : 'Private'"
+                      :title="home !== 'server' ? 'The Craft Store needs the updated backend' : published.has(entry.id) ? 'In the Craft Store — click to make it private again' : 'Private — click to publish it to the Craft Store'"
+                      @click="togglePublish(entry)"
+                    >
+                      <Loader2 v-if="publishing.has(entry.id)" class="h-3.5 w-3.5 animate-spin" />
+                      <Globe v-else-if="published.has(entry.id)" class="h-3.5 w-3.5" />
+                      <Lock v-else class="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      class="grid flex-none place-items-center rounded-md border border-border text-muted-foreground tac-action"
+                      :class="compact ? 'h-9 w-10' : 'h-6 w-7'"
+                      aria-label="Delete"
+                      title="Delete from your crafts — you can undo it for a few seconds"
+                      @click="deleteSaved(entry.id)"
+                    >
+                      <Trash2 class="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      class="grid flex-none place-items-center rounded-md border border-border text-foreground tac-action"
+                      :class="compact ? 'h-9 w-10' : 'h-6 w-7'"
+                      aria-label="Place on mat"
+                      title="Place on the mat"
+                      @click="layDown(entry)"
+                    >
+                      <Plus class="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                </div>
               </div>
-              <div class="flex items-center gap-1.5">
-                <!-- In the Craft Store or not: everyone on the panel can browse,
-                     rate and use a public craft from their sticker picker. A
-                     switch with its state in words, busy while it is sent. -->
-                <button
-                  class="flex flex-none items-center gap-1.5 rounded-md border border-border px-2 text-f9 uppercase tracking-cs1 tac-action disabled:opacity-35"
-                  :class="[published.has(entry.id) ? 'tac-on' : 'text-muted-foreground', compact ? 'h-9' : 'h-7']"
-                  :disabled="home !== 'server' || publishing.has(entry.id)"
-                  :aria-pressed="published.has(entry.id)"
-                  :title="home !== 'server' ? 'The Craft Store needs the updated backend' : published.has(entry.id) ? 'In the Craft Store — click to make it private again' : 'Private — click to publish it to the Craft Store, where everyone on the panel can see, rate and use it'"
-                  @click="togglePublish(entry)"
-                >
-                  <Loader2 v-if="publishing.has(entry.id)" class="h-3.5 w-3.5 animate-spin" />
-                  <Globe v-else-if="published.has(entry.id)" class="h-3.5 w-3.5" />
-                  <Lock v-else class="h-3.5 w-3.5" />
-                  {{ published.has(entry.id) ? tr("inventory.stickerCrafts.inStore", "In store") : tr("inventory.stickerCrafts.private", "Private") }}
-                </button>
-                <button
-                  class="ml-auto flex flex-none items-center gap-1 rounded-md border border-border px-2 text-f9 uppercase tracking-cs1 text-muted-foreground tac-action"
-                  :class="compact ? 'h-9' : 'h-7'"
-                  title="Place on the mat"
-                  @click="placeSaved(entry)"
-                >
-                  <Plus class="h-3.5 w-3.5" /> {{ tr("inventory.stickerCrafts.toMat", "Mat") }}
-                </button>
-                <button
-                  class="grid flex-none place-items-center rounded-md border border-border text-muted-foreground tac-action"
-                  :class="compact ? 'h-9 w-10' : 'h-7 w-8'"
-                  title="Delete from your crafts — you can undo it for a few seconds"
-                  @click="deleteSaved(entry.id)"
-                >
-                  <Trash2 class="h-3.5 w-3.5" />
-                </button>
-              </div>
-            </div>
+            </template>
           </div>
-          <!-- The newest five here; all of them a press away, full-screen. -->
           <button
             v-if="library.length > LIBRARY_SHOWN"
             :class="BTN"
             class="mt-2 w-full justify-center"
-            :title="`See all ${library.length} of your crafts — place, publish or delete any of them`"
+            :title="`See all ${library.length} of your crafts — place, publish, rename or delete any of them`"
             @click="openCrafts('mine')"
           >
-            <LayoutGrid class="h-3.5 w-3.5" /> {{ tr("inventory.stickerCrafts.browseAll", "Browse all") }} {{ library.length }}
+            <LayoutGrid class="h-3.5 w-3.5" /> {{ tr("inventory.stickerCrafts.seeAllN", "See all") }} {{ library.length }} crafts
           </button>
         </section>
       </aside>
@@ -1540,7 +1690,11 @@ const FIELD =
 
     <!-- The inventory's toast, bottom centre: Undo for what was just
          removed, and a word on a publish or an update. -->
-    <div class="pointer-events-none fixed bottom-5 left-1/2 flex w-max max-w-[calc(100vw-2rem)] -translate-x-1/2 flex-col items-center gap-2" :style="{ zIndex: picker ? Z.pickerToast : Z.toast }">
+    <div
+      class="pointer-events-none fixed left-1/2 flex w-max max-w-[calc(100vw-2rem)] -translate-x-1/2 flex-col items-center gap-2"
+      :class="picker ? 'bottom-16' : 'bottom-5'"
+      :style="{ zIndex: picker ? Z.pickerToast : Z.toast }"
+    >
       <Transition
         enter-active-class="transition duration-200"
         enter-from-class="opacity-0 translate-y-2"
@@ -1577,6 +1731,8 @@ const FIELD =
       :view="pickerView"
       hide-preview
       target="mat"
+      :title="pickerTitle"
+      :back-label="compact ? undefined : 'Back to the mat'"
       back-title="Back to the mat — nothing is added"
       @pick="addSticker"
       @pick-craft="addCraft"
@@ -1584,6 +1740,19 @@ const FIELD =
       <!-- Opened from here, your crafts are managed from their tiles too: the
            panel lists only the newest five. -->
       <template #craftActions="{ craft }">
+        <input
+          v-if="renaming === craft.id"
+          :class="FIELD"
+          class="min-w-0 flex-1 font-sans text-f13"
+          :value="craft.name"
+          maxlength="40"
+          aria-label="New name"
+          v-focus
+          @keydown.enter.prevent="finishRename(craft, ($event.target as HTMLInputElement).value)"
+          @keydown.esc.stop.prevent="renaming = null"
+          @blur="finishRename(craft, ($event.target as HTMLInputElement).value)"
+        />
+        <template v-else>
         <button
           class="flex flex-none items-center gap-1.5 rounded-md border border-border px-2 text-f10 uppercase tracking-cs1 tac-action disabled:opacity-35"
           :class="[published.has(craft.id) ? 'tac-on' : 'text-muted-foreground', compact ? 'h-9' : 'h-7']"
@@ -1598,13 +1767,24 @@ const FIELD =
           {{ published.has(craft.id) ? tr("inventory.stickerCrafts.inStore", "In store") : tr("inventory.stickerCrafts.private", "Private") }}
         </button>
         <button
-          class="ml-auto flex flex-none items-center gap-1.5 rounded-md border border-border px-2 text-f10 uppercase tracking-cs1 text-muted-foreground tac-action"
+          class="grid flex-none place-items-center rounded-md border border-border text-muted-foreground tac-action"
+          :class="compact ? 'h-9 w-10' : 'h-7 w-8'"
+          aria-label="Rename"
+          title="Rename"
+          @click="renaming = craft.id"
+        >
+          <Pencil class="h-3.5 w-3.5" />
+        </button>
+        <!-- Beside the switch, away from Place in the other corner. -->
+        <button
+          class="flex flex-none items-center gap-1.5 rounded-md border border-border px-2 text-f10 uppercase tracking-cs1 text-muted-foreground tac-action"
           :class="compact ? 'h-9' : 'h-7'"
           title="Delete from your crafts — you can undo it for a few seconds"
           @click="deleteSaved(craft.id)"
         >
           <Trash2 class="h-3.5 w-3.5" /> {{ tr("inventory.stickerCrafts.delete", "Delete") }}
         </button>
+        </template>
       </template>
     </AttachmentPicker>
   </div>
