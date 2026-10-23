@@ -2,14 +2,16 @@
 // A Sticker Craft in 3D, before using it — opened from a craft tile's picture in
 // the sticker picker (Mine or the Craft Store).
 //
-// The single-sticker preview's panel, made for a group: the craft lies on one
-// larger sheet of sticker backing (mountCraftSheet in stickerBoard.ts), lit and
-// shaded as on the Sticker Crafts board, and tilting it shows the foils and
-// holos the way a gun will. Under it: how many stickers it takes, its votes when
-// it is a store craft, and Use.
-import { computed, onBeforeUnmount, onMounted, ref, shallowRef } from "vue";
+// The single-sticker preview's own viewer, given a group: the same quad model,
+// camera, framing, studio light and slow turn, with the craft laid on one
+// larger sheet of its stickers' backing (ViewerOpts.decalGroup in viewer3d).
+// Under it: how many stickers it takes, its votes when it is a store craft,
+// and Use.
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { ArrowBigDown, ArrowBigUp, Loader2, X } from "lucide-vue-next";
 import { Z } from "../zLayers";
+import { useViewerMount } from "../composables/useViewerMount";
+import { QUAD_MODELS } from "../viewerModel";
 import type { SavedCraft, StoreCraft } from "../stickerCraftsModel";
 
 const props = defineProps<{
@@ -27,24 +29,24 @@ const emit = defineEmits<{
 
 const store = computed(() => ("author" in props.craft ? (props.craft as StoreCraft) : null));
 const stageEl = ref<HTMLElement | null>(null);
-const sheet = shallowRef<{ dispose(): void } | null>(null);
-const busy = ref(true);
 const failed = ref<string | null>(null);
-
-onMounted(async () => {
-  try {
-    const { mountCraftSheet } = await import("../stickerBoard");
-    if (!stageEl.value) return;
-    const s = await mountCraftSheet(stageEl.value, props.craft.stickers);
-    if (!stageEl.value) return s.dispose();
-    sheet.value = s;
-  } catch (e) {
-    failed.value = e instanceof Error ? e.message : String(e);
-  } finally {
-    busy.value = false;
-  }
+const viewer = useViewerMount({
+  label: "craft preview",
+  host: () => stageEl.value,
+  onError: (e) => (failed.value = e instanceof Error ? e.message : String(e)),
 });
-onBeforeUnmount(() => sheet.value?.dispose());
+const busy = viewer.busy;
+// The single-sticker preview's own options (openPreview3d in App.vue), with
+// the craft in place of one decal.
+onMounted(() =>
+  viewer.mount(QUAD_MODELS.sticker, () => ({
+    kind: "sticker",
+    decalGroup: props.craft.stickers.map((s) => ({ image: s.image, wear: s.wear, x: s.x, y: s.y, rot: s.rot })),
+    frame: "fit",
+    interactive: false,
+  })),
+);
+onBeforeUnmount(() => viewer.teardown());
 
 const n = computed(() => props.craft.stickers.length);
 </script>
@@ -76,8 +78,9 @@ const n = computed(() => props.craft.stickers.length);
           <X class="h-4 w-4" />
         </button>
       </div>
-      <!-- The same studio backdrop the single-sticker preview sits on. -->
-      <div class="relative aspect-[4/3] w-full" style="background: linear-gradient(180deg, #8f979e 0%, #a7a59f 100%)">
+      <!-- The single-sticker preview's stage, wider: a craft is a strip. The
+           viewer paints its own studio backdrop. -->
+      <div class="relative aspect-[4/3] w-full bg-background">
         <div ref="stageEl" class="absolute inset-0" />
         <div v-if="busy" class="pointer-events-none absolute inset-0 grid place-items-center">
           <Loader2 class="h-5 w-5 animate-spin text-muted-foreground" />

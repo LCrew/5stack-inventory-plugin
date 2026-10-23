@@ -3238,6 +3238,131 @@ const PRESENTATION: Record<ViewerKind, Presentation> = {
  */
 const NEVER_POSE = /^(bindpose|ref|a_.*)$/i;
 
+/** One sticker of a craft on its sheet — see ViewerOpts.decalGroup. */
+export type DecalGroupItem = { image: string; wear?: number; x: number; y: number; rot: number };
+/** The board's sticker footprint, in its cm, and the standalone quad's, in ours. */
+const CRAFT_FOOTPRINT_CM = 5;
+const QUAD_SIZE = 0.1;
+
+/**
+ * The stand-in for a whole Sticker Craft: one sheet of backing, rounded like a
+ * die-cut sheet, with every sticker quad laid on it where the craft has it.
+ *
+ * Each sticker is the single quad's 10cm square, on the sheet's plane and a
+ * hair in front of the one before (draw order, as on the board and on a gun).
+ * The sheet is sized to the craft's footprint plus a margin and shows plain
+ * paper until dressDecalGroup binds the backing art. Same depth trick as the
+ * single quad: the stickers stand slightly proud, so "fit" has a box to frame.
+ */
+function buildDecalGroup(THREE: typeof import("three"), items: DecalGroupItem[]) {
+  const group = new THREE.Group();
+  const k = QUAD_SIZE / CRAFT_FOOTPRINT_CM;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  items.forEach((it, i) => {
+    const geom = new THREE.PlaneGeometry(QUAD_SIZE, QUAD_SIZE);
+    const mat = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      roughness: 0.55,
+      metalness: 0,
+    });
+    mat.name = "sticker_quad";
+    const mesh = new THREE.Mesh(geom, mat);
+    mesh.name = "sticker_quad";
+    mesh.userData.decalIndex = i;
+    // Board y runs down the mat; the sheet's y runs up the screen.
+    mesh.position.set(it.x * k, -it.y * k, 0.0004 * (i + 1));
+    mesh.rotation.z = (-it.rot * Math.PI) / 180;
+    mesh.renderOrder = i + 1;
+    group.add(mesh);
+    // The footprint's turned extent, for the sheet's size.
+    const a = (it.rot * Math.PI) / 180;
+    const e = (QUAD_SIZE / 2) * (Math.abs(Math.cos(a)) + Math.abs(Math.sin(a)));
+    minX = Math.min(minX, mesh.position.x - e);
+    maxX = Math.max(maxX, mesh.position.x + e);
+    minY = Math.min(minY, mesh.position.y - e);
+    maxY = Math.max(maxY, mesh.position.y + e);
+  });
+  const margin = QUAD_SIZE * 0.2;
+  const w = maxX - minX + margin * 2;
+  const h = maxY - minY + margin * 2;
+  const r = Math.min(QUAD_SIZE * 0.15, w / 4, h / 4);
+  const shape = new THREE.Shape();
+  shape.moveTo(-w / 2 + r, -h / 2);
+  shape.lineTo(w / 2 - r, -h / 2);
+  shape.quadraticCurveTo(w / 2, -h / 2, w / 2, -h / 2 + r);
+  shape.lineTo(w / 2, h / 2 - r);
+  shape.quadraticCurveTo(w / 2, h / 2, w / 2 - r, h / 2);
+  shape.lineTo(-w / 2 + r, h / 2);
+  shape.quadraticCurveTo(-w / 2, h / 2, -w / 2, h / 2 - r);
+  shape.lineTo(-w / 2, -h / 2 + r);
+  shape.quadraticCurveTo(-w / 2, -h / 2, -w / 2 + r, -h / 2);
+  const backGeom = new THREE.ShapeGeometry(shape, 6);
+  const backMat = new THREE.MeshStandardMaterial({ color: 0xe4e6e8, side: THREE.DoubleSide, roughness: 0.9, metalness: 0 });
+  backMat.name = "sticker_backing";
+  const back = new THREE.Mesh(backGeom, backMat);
+  back.name = "sticker_backing";
+  back.userData.decalBacking = { w, h };
+  back.position.set((minX + maxX) / 2, (minY + maxY) / 2, -0.0006);
+  group.add(back);
+  return group;
+}
+
+/**
+ * Dress a craft's sheet: every sticker with its art and real shading, the sheet
+ * with the backing art of the first sticker that names one.
+ *
+ * The backing is ONE image over the whole sheet, scaled to cover it with its
+ * proportions kept (the overflow is cropped), the way a single sticker's square
+ * backing sits behind it — not tiled, which repeated its print across a long
+ * sheet. A clone of the cached texture carries the mapping, so the single
+ * preview that shares the cache keeps its own.
+ */
+async function dressDecalGroup(THREE: typeof import("three"), object: import("three").Object3D, items: DecalGroupItem[]) {
+  let backingPath: string | null = null;
+  await Promise.all(
+    items.map(async (it, i) => {
+      const mesh = object.children.find((c) => c.userData.decalIndex === i) as import("three").Mesh | undefined;
+      if (!mesh) return;
+      const [info, loaded] = await Promise.all([stickerArtInfo(it.image), loadStickerTexture(it.image)]);
+      if (!loaded) {
+        mesh.visible = false;
+        return;
+      }
+      if (!backingPath && info.sfx?.backing) backingPath = info.sfx.backing;
+      const mat = mesh.material as import("three").MeshStandardMaterial;
+      mat.map = loaded.tex;
+      mat.needsUpdate = true;
+      await applyStickerSfx(THREE, mat, info.sfx, it.wear ?? 0, paintTextureUrl, { expandAlpha: loaded.realStickerArt });
+    }),
+  );
+  const back = object.children.find((c) => c.userData.decalBacking) as import("three").Mesh | undefined;
+  if (!back || !backingPath) return;
+  const tex = await loadTexture(paintTextureUrl(backingPath)).catch(() => null);
+  if (!tex) return;
+  const { w, h } = back.userData.decalBacking as { w: number; h: number };
+  const img = tex.image as { width?: number; height?: number } | undefined;
+  const aspect = img?.width && img?.height ? img.width / img.height : 1;
+  // ShapeGeometry's uv is the shape's own coordinates, centred on the sheet.
+  // Cover: the image's span is the sheet's along the tighter axis.
+  const spanX = w / h > aspect ? w : h * aspect;
+  const spanY = spanX / aspect;
+  const mine = tex.clone();
+  mine.wrapS = mine.wrapT = THREE.ClampToEdgeWrapping;
+  mine.repeat.set(1 / spanX, 1 / spanY);
+  mine.offset.set(0.5, 0.5);
+  mine.needsUpdate = true;
+  const bm = back.material as import("three").MeshStandardMaterial;
+  bm.map = mine;
+  bm.color.set(0xffffff);
+  bm.needsUpdate = true;
+}
+
 /**
  * The stand-in mesh for a sticker or a patch.
  *
@@ -3418,6 +3543,14 @@ export interface ViewerOpts {
    * slot's own scratch amount, the same 0..1 the weapon decals take.
    */
   decal?: { image: string; wear?: number } | null;
+  /**
+   * A STICKER CRAFT on one sheet of backing — `kind: "sticker"`, in place of
+   * `decal`. Laid out as the Sticker Crafts board has it: x/y in cm from the
+   * craft's centre (y running down), rot in degrees clockwise, and one sticker
+   * footprint is the standalone quad's 10cm. Everything else about the preview
+   * (framing, light, turn) is the single sticker's. See buildDecalGroup.
+   */
+  decalGroup?: DecalGroupItem[] | null;
   /**
    * Show the FOREARMS a glove is modelled on — `kind: "glove"` only.
    *
@@ -3696,7 +3829,10 @@ async function buildViewer(
   // material the weapon decals use. `gltf` is faked rather than special-cased
   // downstream so the rest of buildViewer sees an ordinary scene.
   const gltf = isQuadModel(model)
-    ? { scene: buildDecalQuad(THREE, kind), animations: [] as import("three").AnimationClip[] }
+    ? {
+        scene: opts?.decalGroup?.length ? buildDecalGroup(THREE, opts.decalGroup) : buildDecalQuad(THREE, kind),
+        animations: [] as import("three").AnimationClip[],
+      }
     : await loadGltf(model, {
         legacy: !!opts?.legacyPaint,
         painted: !!weaponPaint,
@@ -4477,7 +4613,10 @@ async function buildViewer(
   // csgo_weapon_sticker shading — the same material path the weapon decals take,
   // so a sticker previewed on its own and the same sticker on a gun cannot drift
   // apart. Wear comes through as the slot's own scratch amount.
-  if (isQuadModel(model) && opts?.decal?.image) {
+  if (isQuadModel(model) && opts?.decalGroup?.length) {
+    await dressDecalGroup(THREE, object, opts.decalGroup);
+    object.updateMatrixWorld(true);
+  } else if (isQuadModel(model) && opts?.decal?.image) {
     const { image, wear } = opts.decal;
     const info = await stickerArtInfo(image);
     const loaded = await loadStickerTexture(image);
