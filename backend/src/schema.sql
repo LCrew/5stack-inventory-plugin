@@ -456,3 +456,33 @@ CREATE TABLE IF NOT EXISTS inventory.sticker_crafts (
   updated_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (steam_id, kind, doc_key)
 );
+
+-- The CRAFT STORE: Sticker Crafts their authors chose to publish, for anyone on
+-- the panel to browse and use. A published craft is a SNAPSHOT of the author's
+-- saved craft, refreshed whenever they change it (stickerCrafts.ts), so the
+-- store never has to read another account's private documents. The author's
+-- name and picture are copied in at publish time from the panel's players
+-- table, the same way a card would print them.
+--
+-- craft_id is the craft's own id (a client UUID); the owner check on every write
+-- is what stops one account publishing over another's id.
+CREATE TABLE IF NOT EXISTS inventory.sticker_craft_store (
+  craft_id text PRIMARY KEY,
+  steam_id bigint NOT NULL,
+  author_name text NOT NULL,
+  author_avatar text,
+  body jsonb NOT NULL,
+  sticker_count smallint NOT NULL,
+  published_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS sticker_craft_store_steam_id ON inventory.sticker_craft_store (steam_id);
+
+-- One vote per account per published craft: +1 or -1. Removing a vote deletes
+-- the row; unpublishing a craft deletes its votes.
+CREATE TABLE IF NOT EXISTS inventory.sticker_craft_votes (
+  craft_id text NOT NULL,
+  steam_id bigint NOT NULL,
+  vote smallint NOT NULL CHECK (vote IN (-1, 1)),
+  PRIMARY KEY (craft_id, steam_id)
+);

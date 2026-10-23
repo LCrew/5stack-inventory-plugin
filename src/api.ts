@@ -1656,11 +1656,11 @@ export const activatePreset = (id: string) =>
  * Read through the asset walk like every other response, so a sticker image
  * stored as `/images/…` comes back on this deployment's origin and version.
  */
-export async function fetchStickerCrafts(): Promise<{ board: unknown; crafts: unknown[] } | null> {
+export async function fetchStickerCrafts(): Promise<{ board: unknown; crafts: unknown[]; published?: string[] } | null> {
   const response = await fetch(`${API_BASE}/api/sticker-crafts`, { credentials: "include" });
   if (response.status === 404) return null;
   if (!response.ok) throw new Error(`Sticker Crafts didn't load (${response.status}).`);
-  return resolveAssetPaths(await response.json()) as { board: unknown; crafts: unknown[] };
+  return resolveAssetPaths(await response.json()) as { board: unknown; crafts: unknown[]; published?: string[] };
 }
 export const saveStickerBoard = (board: object) =>
   request<{ ok: true }>("/sticker-crafts/board", { method: "PUT", body: JSON.stringify(board) });
@@ -1689,3 +1689,33 @@ export const saveItemCraftGroup = (itemId: number | string, group: object) =>
   });
 export const deleteItemCraftGroup = (itemId: number | string) =>
   request<{ ok: true }>(`/sticker-crafts/groups/${encodeURIComponent(String(itemId))}`, { method: "DELETE" });
+
+/**
+ * The Craft Store: crafts their authors published, best or newest first. `max`
+ * keeps to crafts of at most that many stickers, `count` to exactly that many.
+ * Null when this backend has no store (an older image answers 404).
+ */
+export async function fetchCraftStore(params: {
+  sort?: "top" | "new";
+  max?: number;
+  count?: number;
+  q?: string;
+  offset?: number;
+  limit?: number;
+}): Promise<{ items: unknown[] } | null> {
+  const qs = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) if (v !== undefined && v !== "" && v !== 0) qs.set(k, String(v));
+  const response = await fetch(`${API_BASE}/api/sticker-crafts/store?${qs}`, { credentials: "include" });
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(`The Craft Store didn't load (${response.status}).`);
+  return resolveAssetPaths(await response.json()) as { items: unknown[] };
+}
+export const publishCraft = (id: string) =>
+  request<{ ok: true }>(`/sticker-crafts/store/${encodeURIComponent(id)}`, { method: "PUT", body: "{}" });
+export const unpublishCraft = (id: string) =>
+  request<{ ok: true }>(`/sticker-crafts/store/${encodeURIComponent(id)}`, { method: "DELETE" });
+export const voteCraft = (id: string, vote: -1 | 0 | 1) =>
+  request<{ ups: number; downs: number; score: number; myVote: -1 | 0 | 1 }>(
+    `/sticker-crafts/store/${encodeURIComponent(id)}/vote`,
+    { method: "POST", body: JSON.stringify({ vote }) },
+  );

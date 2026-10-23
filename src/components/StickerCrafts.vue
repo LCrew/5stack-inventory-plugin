@@ -22,6 +22,7 @@ import {
   BookmarkPlus,
   BringToFront,
   Copy,
+  Globe,
   GripVertical,
   Group,
   Loader2,
@@ -50,6 +51,7 @@ import {
   loadStickerCrafts,
   saveBoard as storeBoard,
   saveCraft as storeCraft,
+  setPublished,
   type BoardSticker,
   type CraftsHome,
   type CraftSticker,
@@ -83,6 +85,8 @@ const newId = () =>
 const groups = ref<Grouping[]>([]);
 const stickers = ref<BoardSticker[]>([]);
 const library = ref<SavedCraft[]>([]);
+/** Ids of your crafts that are in the Craft Store. */
+const published = ref<Set<string>>(new Set());
 const selected = ref<Set<string>>(new Set());
 const snap = usePersistedBool("cs2inv.stickerCrafts.snap", true);
 const boardView = ref<"angled" | "top">("angled");
@@ -121,6 +125,7 @@ async function loadAll() {
     groups.value = got.board.groups;
     stickers.value = got.board.stickers;
     library.value = got.library;
+    published.value = got.published;
     normalize();
   } catch (e) {
     loadError.value = e instanceof Error ? e.message : String(e);
@@ -546,9 +551,28 @@ function pressAgain(key: string): boolean {
   armTimer = setTimeout(() => (armed.value = null), 3000);
   return false;
 }
+/**
+ * Put a craft in the Craft Store for everyone on the panel, or take it out. The
+ * store copies the craft as it is SAVED, so its latest save goes first.
+ */
+async function togglePublish(entry: SavedCraft) {
+  if (!loaded.value || home.value !== "server") return;
+  const on = !published.value.has(entry.id);
+  const write = (async () => {
+    if (on) await storeCraft(home.value, entry, library.value);
+    await setPublished(entry.id, on);
+    const next = new Set(published.value);
+    if (on) next.add(entry.id);
+    else next.delete(entry.id);
+    published.value = next;
+  })();
+  await track(write);
+}
 function deleteSaved(id: string) {
   if (!pressAgain("lib:" + id)) return;
   library.value = library.value.filter((e) => e.id !== id);
+  // Deleting takes it out of the store too (the server does both).
+  if (published.value.has(id)) published.value = new Set([...published.value].filter((x) => x !== id));
   if (loaded.value) void track(deleteCraft(home.value, id, library.value));
 }
 /** The trash button under Selection: a whole grouping in it asks twice. */
@@ -563,6 +587,8 @@ const pickerView = useAttachmentPicker({
   inventory: toRef(props, "inventory"),
   attachedName: (inst) => props.attachedName(inst),
   fail: (e) => (pickerError.value = e instanceof Error ? e.message : String(e)),
+  // A craft laid on the mat needs room on it, and is a grouping of five at most.
+  craftRoom: () => Math.min(MAX_PER_GROUPING, MAX_ON_BOARD - stickers.value.length),
 });
 const { picker, openPicker } = pickerView;
 /**
@@ -1093,6 +1119,17 @@ const FIELD =
                   @change="renameSaved(entry, ($event.target as HTMLInputElement).value)"
                 />
                 <span class="flex-none font-mono text-f9 text-muted-foreground">{{ entry.stickers.length }}</span>
+                <!-- In the Craft Store or not: everyone on the panel can browse,
+                     rate and use a public craft from their sticker picker. -->
+                <button
+                  class="grid h-6 w-7 flex-none place-items-center rounded-md border border-border tac-action disabled:opacity-35"
+                  :class="published.has(entry.id) ? 'tac-on text-[#9fcbff]' : 'text-muted-foreground'"
+                  :disabled="home !== 'server'"
+                  :title="home !== 'server' ? 'The Craft Store needs the updated backend' : published.has(entry.id) ? 'Public in the Craft Store — click to take it down' : 'Publish to the Craft Store — everyone on the panel can see, rate and use it'"
+                  @click="togglePublish(entry)"
+                >
+                  <Globe class="h-3.5 w-3.5" />
+                </button>
                 <button class="grid h-6 w-7 flex-none place-items-center rounded-md border border-border text-muted-foreground tac-action" title="Lay it on the mat" @click="placeSaved(entry)">
                   <Plus class="h-3.5 w-3.5" />
                 </button>

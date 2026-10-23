@@ -4504,7 +4504,17 @@ watch(
 // across this file: the Escape chain unwinds through it, the craft modal's
 // backdrop click closes back to the editor rather than discarding the edit, the
 // deep-link reader opens it, and the 3D editor checks it before mounting.
-const pickerView = useAttachmentPicker({ inventory, attachedName, fail });
+const pickerView = useAttachmentPicker({
+  inventory,
+  attachedName,
+  fail,
+  // A Sticker Craft goes into the gun's free slots (counting the one being
+  // filled), so that is how many stickers one may bring.
+  craftRoom: (slot) => {
+    const st = (craft.value?.stickers ?? []).slice(0, stickerSlotCount);
+    return stickerSlotCount - st.filter(Boolean).length + (st[slot] ? 1 : 0);
+  },
+});
 const { picker, openPicker } = pickerView;
 
 // "1.2k" over "1204" — the compact count badge. It sat beside the attachment

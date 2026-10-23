@@ -15,8 +15,12 @@
 import {
   deleteItemCraftGroup,
   deleteStickerCraft,
+  fetchCraftStore,
   fetchItemCraftGroup,
   fetchStickerCrafts,
+  publishCraft,
+  unpublishCraft,
+  voteCraft,
   saveItemCraftGroup,
   saveStickerBoard,
   saveStickerCraft,
@@ -185,14 +189,21 @@ export type CraftsHome = "server" | "local";
  * backend can't keep them. An account found empty takes this browser's copies
  * once (see the header). Throws when the backend could not be reached at all.
  */
-export async function loadStickerCrafts(): Promise<{ board: BoardDoc; library: SavedCraft[]; home: CraftsHome }> {
+export async function loadStickerCrafts(): Promise<{
+  board: BoardDoc;
+  library: SavedCraft[];
+  home: CraftsHome;
+  /** Ids of the crafts this account has in the Craft Store. */
+  published: Set<string>;
+}> {
   const doc = await fetchStickerCrafts();
   const localBoard = cleanBoard(readJson(BOARD_KEY));
   const localLibrary = (() => {
     const raw = readJson(LIBRARY_KEY);
     return (Array.isArray(raw) ? raw : []).map(cleanCraft).filter((c): c is SavedCraft => !!c);
   })();
-  if (doc === null) return { board: localBoard, library: localLibrary, home: "local" };
+  if (doc === null) return { board: localBoard, library: localLibrary, home: "local", published: new Set() };
+  const published = new Set(Array.isArray(doc.published) ? doc.published.filter((x): x is string => typeof x === "string") : []);
   const board = cleanBoard(doc.board);
   const library = (Array.isArray(doc.crafts) ? doc.crafts : [])
     .map(cleanCraft)
@@ -202,9 +213,9 @@ export async function loadStickerCrafts(): Promise<{ board: BoardDoc; library: S
   const hasLocal = localBoard.stickers.length > 0 || localLibrary.length > 0;
   if (empty && hasLocal && readJson(UPLOADED_KEY) !== 1) {
     await uploadLocal(localBoard, localLibrary);
-    return { board: localBoard, library: localLibrary, home: "server" };
+    return { board: localBoard, library: localLibrary, home: "server", published };
   }
-  return { board, library, home: "server" };
+  return { board, library, home: "server", published };
 }
 
 /** The one-time upload of what this browser held before the account did. */
@@ -265,3 +276,58 @@ export async function saveItemGroup(itemId: number | string, group: ItemGroup | 
     writeJson(ON_ITEMS_KEY, all);
   }
 }
+
+// ---- the Craft Store -------------------------------------------------------
+
+export type CraftAuthor = { steamId: string; name: string; avatar: string | null };
+/** A published craft, as the store lists it: the craft, who made it, and its votes. */
+export interface StoreCraft extends SavedCraft {
+  stickerCount: number;
+  author: CraftAuthor;
+  ups: number;
+  downs: number;
+  score: number;
+  /** The viewer's own vote. */
+  myVote: -1 | 0 | 1;
+  /** The viewer is its author (no voting on your own). */
+  mine: boolean;
+}
+
+function cleanStoreCraft(raw: unknown): StoreCraft | null {
+  const c = cleanCraft(raw);
+  if (!c) return null;
+  const r = raw as Partial<StoreCraft> & { author?: Partial<CraftAuthor> };
+  const vote = Number(r.myVote);
+  return {
+    ...c,
+    stickerCount: c.stickers.length,
+    author: {
+      steamId: String(r.author?.steamId ?? ""),
+      name: typeof r.author?.name === "string" && r.author.name ? r.author.name : "Player",
+      avatar: typeof r.author?.avatar === "string" && /^https?:\/\//.test(r.author.avatar) ? r.author.avatar : null,
+    },
+    ups: num(r.ups, 0),
+    downs: num(r.downs, 0),
+    score: num(r.score, 0),
+    myVote: vote === 1 ? 1 : vote === -1 ? -1 : 0,
+    mine: r.mine === true,
+  };
+}
+
+/** Published crafts. Null when this backend has no store. */
+export async function loadCraftStore(params: {
+  sort: "top" | "new";
+  max?: number;
+  count?: number;
+  q?: string;
+}): Promise<StoreCraft[] | null> {
+  const got = await fetchCraftStore({ ...params, limit: 100 });
+  if (!got) return null;
+  return (Array.isArray(got.items) ? got.items : []).map(cleanStoreCraft).filter((c): c is StoreCraft => !!c);
+}
+/** Put one of your saved crafts in the store, or take it out. */
+export async function setPublished(id: string, on: boolean) {
+  if (on) await publishCraft(id);
+  else await unpublishCraft(id);
+}
+export const vote = (id: string, v: -1 | 0 | 1) => voteCraft(id, v);

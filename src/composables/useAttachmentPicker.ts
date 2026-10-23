@@ -39,7 +39,14 @@ import {
 import type { FacetAxis } from "../components/CatalogFilters.vue";
 import { SEARCH_DEBOUNCE_MS } from "./useDebouncedSearch";
 import { usePersistedNumber } from "./usePersistedRef";
-import { MAX_PER_GROUPING, loadLibrary, type SavedCraft } from "../stickerCraftsModel";
+import {
+  MAX_PER_GROUPING,
+  loadCraftStore,
+  loadStickerCrafts,
+  vote,
+  type SavedCraft,
+  type StoreCraft,
+} from "../stickerCraftsModel";
 import { useSortControl } from "./useSortControl";
 
 export const PICKER_PAGE = 120;
@@ -95,6 +102,12 @@ export interface AttachmentPickerOptions {
   attachedName: (inst?: InventoryItem | null) => string | null;
   /** App's notification funnel (useI18n) — a failed search is a toast, not a throw. */
   fail: (e: unknown) => void;
+  /**
+   * How many stickers a Sticker Craft may bring, picked for this slot: the gun's
+   * free slots, counting the one being filled. A gun with three stickers already
+   * on takes a craft of two at most. Five when not given.
+   */
+  craftRoom?: (slot: number) => number;
 }
 
 export function useAttachmentPicker(opts: AttachmentPickerOptions) {
@@ -158,21 +171,95 @@ export function useAttachmentPicker(opts: AttachmentPickerOptions) {
   const pickerSource = ref<"all" | "owned" | "crafts">("all");
 
   /**
-   * The Sticker Crafts shelf: layouts saved on the Sticker Crafts board, read
-   * out of this browser's storage each time a sticker picker opens (the board
-   * writes them there). Only the ones a weapon can take — five stickers at most.
+   * The Sticker Crafts shelf, two ways: MINE, the layouts saved on your Sticker
+   * Crafts board, and the CRAFT STORE, everyone's published ones with their
+   * authors and votes. Both are kept on the account, so they arrive a moment
+   * after the picker opens.
    */
+  const craftsScope = ref<"mine" | "store">("mine");
   const pickerCrafts = ref<SavedCraft[]>([]);
-  /** The crafts are kept on the account, so the shelf arrives a moment late. */
+  /** Which of yours are in the store, for their "Public" mark. */
+  const craftsPublished = ref<Set<string>>(new Set());
   const pickerCraftsLoading = ref(false);
+  /** How many stickers a craft may bring here — see AttachmentPickerOptions.craftRoom. */
+  const craftRoom = computed(() =>
+    Math.max(0, Math.min(MAX_PER_GROUPING, picker.value ? (opts.craftRoom?.(picker.value.slot) ?? MAX_PER_GROUPING) : MAX_PER_GROUPING)),
+  );
+  /** The sticker-count filter: 0 is "everything that fits", 1..5 exactly that many. */
+  const craftCount = ref(0);
+  const fitsCount = (n: number) => n <= craftRoom.value && (!craftCount.value || n === craftCount.value);
   const pickerCraftRows = computed(() => {
     const q = pickerQuery.value.trim().toLowerCase();
-    return q
-      ? pickerCrafts.value.filter(
-          (c) => c.name.toLowerCase().includes(q) || c.stickers.some((s) => s.name.toLowerCase().includes(q)),
-        )
-      : pickerCrafts.value;
+    return pickerCrafts.value.filter(
+      (c) =>
+        fitsCount(c.stickers.length) &&
+        (!q || c.name.toLowerCase().includes(q) || c.stickers.some((s) => s.name.toLowerCase().includes(q))),
+    );
   });
+  const storeSort = ref<"top" | "new">("top");
+  const storeRows = ref<StoreCraft[]>([]);
+  const storeLoading = ref(false);
+  /** This backend has no store (an older image). */
+  const storeMissing = ref(false);
+  let storeToken = 0;
+  let storeTimer: ReturnType<typeof setTimeout> | undefined;
+  async function storeFetch() {
+    clearTimeout(storeTimer);
+    if (!picker.value || picker.value.kind !== "sticker") return;
+    const token = ++storeToken;
+    storeLoading.value = true;
+    try {
+      const rows = await loadCraftStore({
+        sort: storeSort.value,
+        max: craftRoom.value,
+        count: craftCount.value || undefined,
+        q: pickerQuery.value.trim() || undefined,
+      });
+      if (token !== storeToken) return;
+      storeMissing.value = rows === null;
+      storeRows.value = rows ?? [];
+    } catch (e) {
+      if (token === storeToken) opts.fail(e);
+    } finally {
+      if (token === storeToken) storeLoading.value = false;
+    }
+  }
+  // The store answers the filters server-side; every change asks again. Typing
+  // waits for a pause, like the catalog's search.
+  watch([craftsScope, storeSort, craftCount], () => {
+    if (craftsScope.value === "store" && pickerSource.value === "crafts") void storeFetch();
+  });
+  watch(pickerSource, (src) => {
+    if (src === "crafts" && craftsScope.value === "store") void storeFetch();
+  });
+  watch(pickerQuery, () => {
+    if (pickerSource.value !== "crafts" || craftsScope.value !== "store") return;
+    clearTimeout(storeTimer);
+    storeTimer = setTimeout(storeFetch, SEARCH_DEBOUNCE_MS);
+  });
+  onBeforeUnmount(() => clearTimeout(storeTimer));
+  /**
+   * Vote a store craft up or down; the same vote again takes it back. Shown at
+   * once and put right from the server's answer, or undone if it fails.
+   */
+  async function voteOn(c: StoreCraft, v: -1 | 1) {
+    if (c.mine) return;
+    const before = { ups: c.ups, downs: c.downs, score: c.score, myVote: c.myVote };
+    const next = c.myVote === v ? 0 : v;
+    c.ups += (next === 1 ? 1 : 0) - (c.myVote === 1 ? 1 : 0);
+    c.downs += (next === -1 ? 1 : 0) - (c.myVote === -1 ? 1 : 0);
+    c.score = c.ups - c.downs;
+    c.myVote = next;
+    try {
+      const r = await vote(c.id, next);
+      Object.assign(c, { ups: r.ups, downs: r.downs, score: r.score, myVote: r.myVote });
+    } catch (e) {
+      Object.assign(c, before);
+      opts.fail(e);
+    }
+  }
+  /** The craft open in the 3D preview, if any (CraftPreview.vue). */
+  const previewCraft = ref<SavedCraft | StoreCraft | null>(null);
 
   const pickerOwned = computed<PickerRow[]>(() => {
     const p = picker.value;
@@ -422,11 +509,18 @@ export function useAttachmentPicker(opts: AttachmentPickerOptions) {
     picker.value = { kind, slot };
     pickerCrafts.value = [];
     pickerCraftsLoading.value = kind === "sticker";
+    craftsScope.value = "mine";
+    craftCount.value = 0;
+    storeRows.value = [];
+    storeMissing.value = false;
+    previewCraft.value = null;
     if (kind === "sticker") {
       const opened = picker.value;
-      loadLibrary()
-        .then((list) => {
-          if (picker.value === opened) pickerCrafts.value = list.filter((c) => c.stickers.length <= MAX_PER_GROUPING);
+      loadStickerCrafts()
+        .then(({ library, published }) => {
+          if (picker.value !== opened) return;
+          pickerCrafts.value = library.filter((c) => c.stickers.length <= MAX_PER_GROUPING);
+          craftsPublished.value = published;
         })
         .catch(() => {})
         .finally(() => {
@@ -486,6 +580,18 @@ export function useAttachmentPicker(opts: AttachmentPickerOptions) {
     pickerCrafts,
     pickerCraftsLoading,
     pickerCraftRows,
+    craftsPublished,
+    craftsScope,
+    craftRoom,
+    craftCount,
+    fitsCount,
+    storeSort,
+    storeRows,
+    storeLoading,
+    storeMissing,
+    storeFetch,
+    voteOn,
+    previewCraft,
     pickerNoun,
     attachCardSize,
     attachGridStyle,

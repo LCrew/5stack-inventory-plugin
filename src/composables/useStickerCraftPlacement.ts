@@ -165,16 +165,26 @@ export function useStickerCraftPlacement(o: {
   }
 
   /**
-   * The picker's answer: hold the craft over the gun, ready to drag on. It
-   * fills consecutive slots from the one being filled, pulled back if they
-   * would run past the last; bottom-most first, since slot order is draw order.
+   * The slots a craft of n stickers goes into: FREE ones — the gun's own
+   * stickers are never overwritten — starting with the slot being filled (which
+   * counts as free: picking for a full slot means replacing it), then the free
+   * ones after it, then before it. Returned in slot order, because slot order
+   * is draw order and the craft's bottom sticker must take the lowest. Null when
+   * there aren't enough (the picker only offers crafts that fit).
    */
+  function freeSlots(c: CraftForm, slot: number, n: number): number[] | null {
+    const free = (s: number) => s === slot || !c.stickers[s];
+    const all = Array.from({ length: o.slotCount }, (_, i) => i);
+    const order = [slot, ...all.filter((s) => s > slot && free(s)), ...all.filter((s) => s < slot && free(s))];
+    return order.length >= n ? order.slice(0, n).sort((a, b) => a - b) : null;
+  }
+
+  /** The picker's answer: hold the craft over the gun, ready to drag on. */
   async function pickCraft(entry: SavedCraft, slot: number) {
     const c = o.craft.value;
     if (!c || !entry.stickers.length) return;
-    const n = Math.min(entry.stickers.length, o.slotCount);
-    const start = Math.max(0, Math.min(slot, o.slotCount - n));
-    const slots = Array.from({ length: n }, (_, i) => start + i);
+    const slots = freeSlots(c, slot, entry.stickers.length);
+    if (!slots) return;
     const frame = await frameFor(c);
     if (o.craft.value !== c) return;
     if (!frame) {

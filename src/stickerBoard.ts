@@ -188,6 +188,96 @@ function drawMat(): HTMLCanvasElement {
   return cv;
 }
 
+/** A renderer with the board's colour pipeline, its canvas in `container`. */
+function makeRenderer(THREE: typeof ThreeNS, container: HTMLElement) {
+  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  renderer.toneMapping = THREE.NeutralToneMapping;
+  renderer.setClearColor(0x000000, 0);
+  const canvas = renderer.domElement;
+  canvas.style.width = "100%";
+  canvas.style.height = "100%";
+  canvas.style.display = "block";
+  canvas.style.touchAction = "none";
+  canvas.style.userSelect = "none";
+  canvas.style.setProperty("-webkit-user-select", "none");
+  canvas.style.setProperty("-webkit-touch-callout", "none");
+  container.appendChild(canvas);
+  return { renderer, canvas };
+}
+
+/** The studio's reflections, prefiltered for this renderer. */
+function makeEnv(THREE: typeof ThreeNS, renderer: ThreeNS.WebGLRenderer) {
+  const pmrem = new THREE.PMREMGenerator(renderer);
+  const envScene = studioEnv(THREE);
+  const envTex = pmrem.fromScene(envScene, 0.04).texture;
+  envScene.traverse((o) => {
+    const m = o as ThreeNS.Mesh;
+    if (!m.isMesh) return;
+    m.geometry.dispose();
+    (m.material as ThreeNS.Material).dispose();
+  });
+  return { pmrem, envTex };
+}
+
+/** The board's light: the reflections, four soft lamps and the overhead one. */
+function addLights(THREE: typeof ThreeNS, s: ThreeNS.Scene, envTex: ThreeNS.Texture) {
+  s.environment = envTex;
+  s.environmentIntensity = 1;
+  // Four soft lamps, one over each edge, matching the softboxes: even light
+  // with no single direction for a sticker to flare in.
+  for (const [x, z, k] of [[0, -1, 0.55], [0, 1, 0.4], [-1, 0, 0.45], [1, 0, 0.45]] as const) {
+    const lamp = new THREE.DirectionalLight(0xffffff, k);
+    lamp.position.set(x * 30, 26, z * 30);
+    s.add(lamp);
+  }
+  // The overhead lamp's direct share, as off-centre as its softbox.
+  const overhead = new THREE.DirectionalLight(0xffffff, 0.35);
+  overhead.position.set(12, 55, -10);
+  s.add(overhead);
+  s.add(new THREE.HemisphereLight(0xeef6f2, 0x1a2a24, 0.55));
+}
+
+/**
+ * A sticker's material: its art and the real sticker shading at this wear.
+ * The ink fractions come back with it, for outlines and framing.
+ */
+async function stickerMaterial(THREE: typeof ThreeNS, image: string, wear: number) {
+  const [loaded, info] = await Promise.all([loadStickerTexture(image), stickerArtInfo(image)]);
+  const mat = new THREE.MeshStandardMaterial({
+    color: 0xffffff,
+    transparent: true,
+    // Every sticker skips the depth buffer, so draw order alone decides which
+    // lies on top — the same rule as slot order on a gun.
+    depthWrite: false,
+    roughness: 0.55,
+    metalness: 0,
+  });
+  let inkW = 1;
+  let inkH = 1;
+  if (loaded) {
+    mat.map = loaded.tex;
+    inkW = loaded.aspect >= 1 ? 1 : loaded.aspect;
+    inkH = loaded.aspect >= 1 ? 1 / loaded.aspect : 1;
+    await applyStickerSfx(THREE, mat, info.sfx, wear, paintTextureUrl, { expandAlpha: loaded.realStickerArt });
+  } else {
+    mat.color.set(0x55605c);
+  }
+  return { mat, inkW, inkH, backing: info.sfx?.backing ?? null };
+}
+
+/** A sticker's footprint on the mat — its ink box, turned — as an extent about its centre. */
+function extent(rot: number, inkW: number, inkH: number) {
+  const hw = (STICKER_CM * inkW) / 2;
+  const hh = (STICKER_CM * inkH) / 2;
+  const a = (rot * Math.PI) / 180;
+  return {
+    ex: Math.abs(hw * Math.cos(a)) + Math.abs(hh * Math.sin(a)),
+    ey: Math.abs(hw * Math.sin(a)) + Math.abs(hh * Math.cos(a)),
+  };
+}
+
 /** One sticker's scene node: a flat quad plus its selection outline. */
 type Node = {
   root: ThreeNS.Group;
@@ -210,30 +300,8 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
   const bundle: ThreeBundle = await loadThree();
   const { THREE, OrbitControls } = bundle;
 
-  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-  renderer.outputColorSpace = THREE.SRGBColorSpace;
-  renderer.toneMapping = THREE.NeutralToneMapping;
-  renderer.setClearColor(0x000000, 0);
-  const canvas = renderer.domElement;
-  canvas.style.width = "100%";
-  canvas.style.height = "100%";
-  canvas.style.display = "block";
-  canvas.style.touchAction = "none";
-  canvas.style.userSelect = "none";
-  canvas.style.setProperty("-webkit-user-select", "none");
-  canvas.style.setProperty("-webkit-touch-callout", "none");
-  container.appendChild(canvas);
-
-  const pmrem = new THREE.PMREMGenerator(renderer);
-  const envScene = studioEnv(THREE);
-  const envTex = pmrem.fromScene(envScene, 0.04).texture;
-  envScene.traverse((o) => {
-    const m = o as ThreeNS.Mesh;
-    if (!m.isMesh) return;
-    m.geometry.dispose();
-    (m.material as ThreeNS.Material).dispose();
-  });
+  const { renderer, canvas } = makeRenderer(THREE, container);
+  const { pmrem, envTex } = makeEnv(THREE, renderer);
 
   // The mat: a thin slab, its top face printed, its edges plain.
   const matTex = new THREE.CanvasTexture(drawMat());
@@ -246,20 +314,7 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
   /** A lit scene holding the mat: the board's, and a snapshot's of its own. */
   const stage = () => {
     const s = new THREE.Scene();
-    s.environment = envTex;
-    s.environmentIntensity = 1;
-    // Four soft lamps, one over each edge, matching the softboxes: even light
-    // with no single direction for a sticker to flare in.
-    for (const [x, z, k] of [[0, -1, 0.55], [0, 1, 0.4], [-1, 0, 0.45], [1, 0, 0.45]] as const) {
-      const lamp = new THREE.DirectionalLight(0xffffff, k);
-      lamp.position.set(x * 30, 26, z * 30);
-      s.add(lamp);
-    }
-    // The overhead lamp's direct share, as off-centre as its softbox.
-    const overhead = new THREE.DirectionalLight(0xffffff, 0.35);
-    overhead.position.set(12, 55, -10);
-    s.add(overhead);
-    s.add(new THREE.HemisphereLight(0xeef6f2, 0x1a2a24, 0.55));
+    addLights(THREE, s, envTex);
     const slab = new THREE.Mesh(slabGeom, [edgeMat, edgeMat, topMat, edgeMat, edgeMat, edgeMat]);
     slab.position.y = -0.15;
     s.add(slab);
@@ -456,34 +511,6 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
   const placeholderMat = () =>
     new THREE.MeshBasicMaterial({ color: 0x9fb8ad, transparent: true, opacity: 0.25, depthWrite: false });
 
-  /**
-   * A sticker's material: its art and the real sticker shading at this wear.
-   * The ink fractions come back with it, for the outline.
-   */
-  async function stickerMaterial(image: string, wear: number) {
-    const [loaded, info] = await Promise.all([loadStickerTexture(image), stickerArtInfo(image)]);
-    const mat = new THREE.MeshStandardMaterial({
-      color: 0xffffff,
-      transparent: true,
-      // Every sticker skips the depth buffer, so draw order alone decides which
-      // lies on top — the same rule as slot order on a gun.
-      depthWrite: false,
-      roughness: 0.55,
-      metalness: 0,
-    });
-    let inkW = 1;
-    let inkH = 1;
-    if (loaded) {
-      mat.map = loaded.tex;
-      inkW = loaded.aspect >= 1 ? 1 : loaded.aspect;
-      inkH = loaded.aspect >= 1 ? 1 / loaded.aspect : 1;
-      await applyStickerSfx(THREE, mat, info.sfx, wear, paintTextureUrl, { expandAlpha: loaded.realStickerArt });
-    } else {
-      mat.color.set(0x55605c);
-    }
-    return { mat, inkW, inkH };
-  }
-
   function makeNode(s: BoardSticker): Node {
     const root = new THREE.Group();
     const mesh = new THREE.Mesh(quadGeom, placeholderMat());
@@ -503,7 +530,7 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
     const token = ++node.token;
     node.image = s.image;
     node.wear = s.wear;
-    const built = await stickerMaterial(s.image, s.wear).catch(() => null);
+    const built = await stickerMaterial(THREE, s.image, s.wear).catch(() => null);
     if (!built) return;
     if (token !== node.token || disposed) {
       built.mat.dispose();
@@ -524,17 +551,6 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
     node.root.rotation.y = (-s.rot * Math.PI) / 180;
     node.outline.scale.set(STICKER_CM * node.inkW + 0.3, 1, STICKER_CM * node.inkH + 0.3);
   }
-
-  /** A sticker's footprint on the mat — its ink box, turned — as an extent about its centre. */
-  const extent = (rot: number, inkW: number, inkH: number) => {
-    const hw = (STICKER_CM * inkW) / 2;
-    const hh = (STICKER_CM * inkH) / 2;
-    const a = (rot * Math.PI) / 180;
-    return {
-      ex: Math.abs(hw * Math.cos(a)) + Math.abs(hh * Math.sin(a)),
-      ey: Math.abs(hw * Math.sin(a)) + Math.abs(hh * Math.cos(a)),
-    };
-  };
 
   /** A dashed box round every group that has a member selected. */
   function drawGroups() {
@@ -624,7 +640,7 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
    */
   async function snapshot(list: CraftSticker[]): Promise<string> {
     const snap = stage();
-    const made = await Promise.all(list.map((s) => stickerMaterial(s.image, s.wear).catch(() => null)));
+    const made = await Promise.all(list.map((s) => stickerMaterial(THREE, s.image, s.wear).catch(() => null)));
     let minX = Infinity;
     let minY = Infinity;
     let maxX = -Infinity;
@@ -746,6 +762,156 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
       topMat.dispose();
       edgeMat.dispose();
       matTex.dispose();
+      envTex.dispose();
+      pmrem.dispose();
+      renderer.dispose();
+      renderer.forceContextLoss();
+      canvas.remove();
+    },
+  };
+}
+
+/**
+ * A craft on its own sticker sheet — the 3D look before using one, from the
+ * sticker picker's Sticker Crafts tab (CraftPreview.vue).
+ *
+ * The single-sticker preview shows its art on the die-cut paper backing it is
+ * peeled from; this is the same idea for a whole craft: one larger sheet of
+ * that backing (the first sticker's own, tiled at its own scale) with the
+ * stickers laid on it as they sit on the mat. Same light and the same sticker
+ * shading as the board, so a holo shown here moves the way it does there. Orbit
+ * to tilt it; nothing is editable.
+ */
+export async function mountCraftSheet(container: HTMLElement, stickers: CraftSticker[]): Promise<{ dispose(): void }> {
+  const { THREE, OrbitControls } = await loadThree();
+  const { renderer, canvas } = makeRenderer(THREE, container);
+  const { pmrem, envTex } = makeEnv(THREE, renderer);
+  const scene = new THREE.Scene();
+  addLights(THREE, scene, envTex);
+
+  const made = await Promise.all(stickers.map((s) => stickerMaterial(THREE, s.image, s.wear).catch(() => null)));
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  stickers.forEach((s, i) => {
+    const { ex, ey } = extent(s.rot, made[i]?.inkW ?? 1, made[i]?.inkH ?? 1);
+    minX = Math.min(minX, s.x - ex);
+    maxX = Math.max(maxX, s.x + ex);
+    minY = Math.min(minY, s.y - ey);
+    maxY = Math.max(maxY, s.y + ey);
+  });
+  if (!Number.isFinite(minX)) [minX, maxX, minY, maxY] = [-2.5, 2.5, -2.5, 2.5];
+  const cx = (minX + maxX) / 2;
+  const cy = (minY + maxY) / 2;
+  // The sheet: the craft's own bounds and a backing margin round them, with the
+  // rounded corners of a die-cut sheet.
+  const margin = 1.4;
+  const w = maxX - minX + margin * 2;
+  const h = maxY - minY + margin * 2;
+  const r = Math.min(1, w / 4, h / 4);
+  const shape = new THREE.Shape();
+  shape.moveTo(-w / 2 + r, -h / 2);
+  shape.lineTo(w / 2 - r, -h / 2);
+  shape.quadraticCurveTo(w / 2, -h / 2, w / 2, -h / 2 + r);
+  shape.lineTo(w / 2, h / 2 - r);
+  shape.quadraticCurveTo(w / 2, h / 2, w / 2 - r, h / 2);
+  shape.lineTo(-w / 2 + r, h / 2);
+  shape.quadraticCurveTo(-w / 2, h / 2, -w / 2, h / 2 - r);
+  shape.lineTo(-w / 2, -h / 2 + r);
+  shape.quadraticCurveTo(-w / 2, -h / 2, -w / 2 + r, -h / 2);
+  const sheetGeom = new THREE.ShapeGeometry(shape, 6);
+  // Flat, like the mat: shape +y becomes the mat's -z, the top of the view.
+  sheetGeom.rotateX(-Math.PI / 2);
+  const sheetMat = new THREE.MeshStandardMaterial({ color: 0xe4e6e8, roughness: 0.9, metalness: 0, side: THREE.DoubleSide });
+  const sheet = new THREE.Mesh(sheetGeom, sheetMat);
+  scene.add(sheet);
+  // The backing's own paper, when the first sticker names one. ShapeGeometry's
+  // uv is the shape's own coordinates (cm), so one repeat per backing width
+  // keeps the pattern at the scale it has behind a single sticker.
+  const backing = made.find((m) => m?.backing)?.backing ?? null;
+  let backingTex: ThreeNS.Texture | null = null;
+  if (backing) {
+    backingTex = await new THREE.TextureLoader().loadAsync(paintTextureUrl(backing)).catch(() => null);
+    if (backingTex) {
+      backingTex.colorSpace = THREE.SRGBColorSpace;
+      backingTex.wrapS = backingTex.wrapT = THREE.RepeatWrapping;
+      const tile = STICKER_CM * 1.16;
+      backingTex.repeat.set(1 / tile, 1 / tile);
+      sheetMat.map = backingTex;
+      sheetMat.color.set(0xffffff);
+      sheetMat.needsUpdate = true;
+    }
+  }
+
+  const quad = new THREE.PlaneGeometry(1, 1);
+  quad.rotateX(-Math.PI / 2);
+  stickers.forEach((s, i) => {
+    const built = made[i];
+    if (!built) return;
+    const mesh = new THREE.Mesh(quad, built.mat);
+    mesh.scale.set(STICKER_CM, 1, STICKER_CM);
+    mesh.position.set(s.x - cx, 0.03, s.y - cy);
+    mesh.rotation.y = (-s.rot * Math.PI) / 180;
+    mesh.renderOrder = i + 1;
+    scene.add(mesh);
+  });
+
+  const camera = new THREE.PerspectiveCamera(30, 1, 0.5, 400);
+  const controls = new OrbitControls(camera, canvas);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.12;
+  controls.enablePan = false;
+  // A card in the hand: tilt it to catch the light, never turn it over.
+  controls.minPolarAngle = 0;
+  controls.maxPolarAngle = Math.PI * 0.42;
+  // A slight lean, as the single-sticker preview has: the sheet reads as a
+  // surface, and a holo or foil catches the light from the start.
+  const dir = new THREE.Vector3(0.08, 1, 0.42).normalize();
+  let fitted = false;
+  const resize = () => {
+    const cw = Math.max(1, container.clientWidth);
+    const ch = Math.max(1, container.clientHeight);
+    renderer.setSize(cw, ch, false);
+    camera.aspect = cw / ch;
+    camera.updateProjectionMatrix();
+    if (!fitted) {
+      const t = Math.tan((camera.fov * Math.PI) / 360);
+      const d = Math.max(h / 2 / t, w / 2 / (t * camera.aspect)) * 1.3;
+      camera.position.copy(dir).multiplyScalar(d);
+      controls.target.set(0, 0, 0);
+      controls.minDistance = d * 0.45;
+      controls.maxDistance = d * 2;
+      controls.update();
+      fitted = true;
+    }
+    dirty = true;
+  };
+  let dirty = true;
+  const ro = new ResizeObserver(resize);
+  ro.observe(container);
+  resize();
+  controls.addEventListener("change", () => (dirty = true));
+  let raf = 0;
+  const frame = () => {
+    raf = requestAnimationFrame(frame);
+    if (controls.update()) dirty = true;
+    if (!dirty) return;
+    dirty = false;
+    renderer.render(scene, camera);
+  };
+  raf = requestAnimationFrame(frame);
+
+  return {
+    dispose() {
+      cancelAnimationFrame(raf);
+      ro.disconnect();
+      controls.dispose();
+      for (const m of made) m?.mat.dispose();
+      quad.dispose();
+      sheetGeom.dispose();
+      sheetMat.dispose();
+      backingTex?.dispose();
       envTex.dispose();
       pmrem.dispose();
       renderer.dispose();

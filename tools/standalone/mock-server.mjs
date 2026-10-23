@@ -99,6 +99,32 @@ const COMPOSITES = new Map();
 const ADMIN = process.env.MOCK_ADMIN !== "0";
 /** Sticker Crafts storage (backend/src/stickerCrafts.ts), in memory for one run. */
 const CRAFTS = { board: null, crafts: new Map(), groups: new Map() };
+/**
+ * The Craft Store, in memory: craft id -> { body, author, votes, publishedAt }.
+ * The caller is author "1"; one craft by "Bob" is there from the start so the
+ * store has something to browse.
+ */
+const ME = "1";
+const STORE = new Map([
+  ["seed-bob", {
+    body: {
+      id: "seed-bob", name: "Bob's duo", savedAt: 1,
+      stickers: [
+        { id: 1944, name: "Sticker | Howling Dawn", image: "/images/howling_dawn_19900048.webp", x: -3, y: 0, rot: -10, wear: 0 },
+        { id: 6387, name: "Sticker | Ace Devil (Foil)", image: "/images/ace_devil_foil_bae4859b.webp", x: 3, y: 1, rot: 12, wear: 0 },
+      ],
+    },
+    author: { steamId: "2", name: "Bob", avatar: "https://avatars.steamstatic.com/fef49e7fa7e1997310d705b2a6158ff8dc1cdfeb_full.jpg" },
+    votes: new Map([["3", 1], ["4", 1], ["5", -1]]),
+    publishedAt: "2026-10-20T10:00:00.000Z",
+  }],
+]);
+const storeItem = (id, e) => {
+  const vs = [...e.votes.values()];
+  const ups = vs.filter((v) => v === 1).length;
+  const downs = vs.filter((v) => v === -1).length;
+  return { ...e.body, id, stickerCount: e.body.stickers.length, publishedAt: e.publishedAt, author: e.author, ups, downs, score: ups - downs, myVote: e.votes.get(ME) ?? 0, mine: e.author.steamId === ME };
+};
 const PREBAKE = process.env.MOCK_PREBAKE !== "0";
 const readBody = async (req) => {
   const chunks = [];
@@ -308,7 +334,40 @@ createServer(async (req, res) => {
       if (process.env.MOCK_CRAFTS === "off") return status(res, 404, { error: "not found" });
       const body = req.method === "PUT" ? JSON.parse((await readBody(req)).toString() || "{}") : null;
       if (p === "/api/sticker-crafts" && req.method === "GET") {
-        return json(res, { board: CRAFTS.board, crafts: [...CRAFTS.crafts.values()] });
+        const published = [...STORE].filter(([, e]) => e.author.steamId === ME).map(([id]) => id);
+        return json(res, { board: CRAFTS.board, crafts: [...CRAFTS.crafts.values()], published });
+      }
+      if (p === "/api/sticker-crafts/store" && req.method === "GET") {
+        const max = Number(url.searchParams.get("max")) || 5;
+        const count = Number(url.searchParams.get("count")) || 0;
+        const q = (url.searchParams.get("q") ?? "").toLowerCase();
+        let items = [...STORE].map(([id, e]) => storeItem(id, e))
+          .filter((c) => c.stickerCount <= max && (!count || c.stickerCount === count))
+          .filter((c) => !q || c.name.toLowerCase().includes(q) || c.author.name.toLowerCase().includes(q));
+        items = url.searchParams.get("sort") === "new"
+          ? items.sort((a, b) => b.publishedAt.localeCompare(a.publishedAt))
+          : items.sort((a, b) => b.score - a.score || b.publishedAt.localeCompare(a.publishedAt));
+        return json(res, { items });
+      }
+      const st = p.match(/^\/api\/sticker-crafts\/store\/([^/]+)(\/vote)?$/);
+      if (st) {
+        const [, id, isVote] = st;
+        if (isVote) {
+          const e = STORE.get(id);
+          if (!e) return status(res, 404, { error: "That craft isn't published." });
+          if (e.author.steamId === ME) return status(res, 400, { error: "You can't vote on your own craft." });
+          const v = JSON.parse((await readBody(req)).toString() || "{}").vote;
+          if (v === 0) e.votes.delete(ME);
+          else e.votes.set(ME, v);
+          const it = storeItem(id, e);
+          return json(res, { ups: it.ups, downs: it.downs, score: it.score, myVote: it.myVote });
+        }
+        if (req.method === "PUT") {
+          const body = CRAFTS.crafts.get(id);
+          if (!body) return status(res, 404, { error: "Save the craft before publishing it." });
+          STORE.set(id, { body, author: { steamId: ME, name: "You (mock)", avatar: null }, votes: STORE.get(id)?.votes ?? new Map(), publishedAt: new Date().toISOString() });
+        } else STORE.delete(id);
+        return json(res, { ok: true });
       }
       if (p === "/api/sticker-crafts/board" && req.method === "PUT") {
         CRAFTS.board = body;
@@ -316,8 +375,13 @@ createServer(async (req, res) => {
       }
       const c = p.match(/^\/api\/sticker-crafts\/crafts\/([^/]+)$/);
       if (c) {
-        if (req.method === "PUT") CRAFTS.crafts.set(c[1], body);
-        else CRAFTS.crafts.delete(c[1]);
+        if (req.method === "PUT") {
+          CRAFTS.crafts.set(c[1], body);
+          if (STORE.has(c[1])) STORE.get(c[1]).body = body;
+        } else {
+          CRAFTS.crafts.delete(c[1]);
+          STORE.delete(c[1]);
+        }
         return json(res, { ok: true });
       }
       const g = p.match(/^\/api\/sticker-crafts\/groups\/(\d+)$/);
