@@ -96,6 +96,10 @@ export function useStickerCraftPlacement(o: {
   slotCount: number;
   /** Bring the 3D stage up — the drop needs it. */
   show3d: () => void;
+  /** A craft is waiting over the gun (the camera can close in on the stickers). */
+  onWait?: () => void;
+  /** It went down (`placed`), or was put back. */
+  onSettle?: (placed: boolean) => void;
 }) {
   const pending = ref<PendingCraft | null>(null);
   const group = ref<CraftGroup | null>(null);
@@ -265,11 +269,14 @@ export function useStickerCraftPlacement(o: {
     }
     pending.value = { entry, slots: plan.slots, moves: plan.moves, members: membersOf(entry, plan.slots, frame), frame };
     o.show3d();
+    o.onWait?.();
   }
   const cancel = () => {
+    const was = !!pending.value;
     pending.value = null;
     ghost.value = null;
     o.viewer()?.setStickers(o.placements());
+    if (was) o.onSettle?.(false);
   };
 
   /** What the gun shows with the craft seated at a spot: the stickers as they
@@ -296,6 +303,7 @@ export function useStickerCraftPlacement(o: {
     }
     group.value = { name: p.entry.name, members: p.members, frame: p.frame, cu: spot.u, cv: spot.v, turn: 0, linked: true };
     pending.value = null;
+    o.onSettle?.(true);
   }
 
   /**

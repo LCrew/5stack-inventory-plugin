@@ -2804,6 +2804,14 @@ export interface ViewerHandle {
    */
   resetCamera: (side?: "home" | "front" | "back") => void;
   /**
+   * The camera onto the gun's sticker surface, for a Sticker Craft waiting to
+   * be dragged on — at the whole-gun view a craft over the gun was a few
+   * pixels across. "in" eases there from wherever the camera is (once; again
+   * is a no-op), "back" eases back to where it was (the craft was put back),
+   * "stay" keeps the close view (it was placed, and is adjusted from there).
+   */
+  frameStickers: (mode: "in" | "back" | "stay") => void;
+  /**
    * Stop drawing without unmounting — for a viewer that is still on the page but
    * behind something. See the note on `suspended`: a modal over the focus view
    * otherwise leaves two viewers rendering, one of them invisible.
@@ -6435,6 +6443,122 @@ async function buildViewer(
     if (exact) return { mk: exact, shared: false };
     return { mk: firstAnchor, shared: !!firstAnchor };
   };
+
+  // ---- framing the sticker surface ---------------------------------------------
+  /**
+   * The world box of the gun's sticker surface: every vertex whose UV1 lies
+   * within a sticker of any slot's anchor. Measured once per mount — the same
+   * offset space the drags place in (uv - 0.5), so it is where a craft lands.
+   */
+  let stickerBox: import("three").Box3 | null | undefined;
+  const stickerArea = () => {
+    if (stickerBox !== undefined) return stickerBox;
+    if (!anchors.length || !uv1Meshes.length) return (stickerBox = null);
+    const box = new THREE.Box3();
+    const p = new THREE.Vector3();
+    for (const mesh of uv1Meshes) {
+      const geom = mesh.geometry as import("three").BufferGeometry;
+      const uv = geom.getAttribute("uv1") ?? geom.getAttribute("uv2");
+      const pos = geom.getAttribute("position");
+      if (!uv || !pos) continue;
+      mesh.updateMatrixWorld();
+      for (let i = 0; i < uv.count; i++) {
+        const du = uv.getX(i) - 0.5;
+        const dv = uv.getY(i) - 0.5;
+        const near = anchors.some((a) => {
+          const r = 1 / Math.max(a.scale, 1e-6);
+          return Math.abs(du - a.offset[0]) < r && Math.abs(dv - a.offset[1]) < r;
+        });
+        if (!near) continue;
+        box.expandByPoint(p.fromBufferAttribute(pos, i).applyMatrix4(mesh.matrixWorld));
+      }
+    }
+    return (stickerBox = box.isEmpty() ? null : box);
+  };
+  type CamPose = { pos: import("three").Vector3; target: import("three").Vector3; zoom: number; pan: import("three").Vector2 };
+  const poseNow = (): CamPose => ({
+    pos: camera.position.clone(),
+    target: controls.target.clone(),
+    zoom: camera.zoom,
+    pan: panPx.clone(),
+  });
+  /** An eased camera move, stepped by the render loop; a grab ends it. */
+  let camFlight: { t0: number; ms: number; from: CamPose; to: CamPose } | null = null;
+  /** Where the camera was before frameStickers("in"), for "back". */
+  let stickerReturn: CamPose | null = null;
+  const stepCamFlight = () => {
+    const f = camFlight;
+    if (!f) return;
+    const t = Math.min(1, (performance.now() - f.t0) / f.ms);
+    const k = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+    controls.target.lerpVectors(f.from.target, f.to.target, k);
+    // Round the target, not through it: the direction turns, the standoff eases.
+    const d0 = f.from.pos.clone().sub(f.from.target);
+    const d1 = f.to.pos.clone().sub(f.to.target);
+    const len = d0.length() + (d1.length() - d0.length()) * k;
+    const dir = d0.normalize().lerp(d1.normalize(), k);
+    if (dir.lengthSq() < 1e-8) dir.copy(d1);
+    camera.position.copy(controls.target).addScaledVector(dir.normalize(), len);
+    camera.zoom = f.from.zoom + (f.to.zoom - f.from.zoom) * k;
+    camera.updateProjectionMatrix();
+    panPx.lerpVectors(f.from.pan, f.to.pan, k);
+    applyPan();
+    if (t >= 1) camFlight = null;
+  };
+  controls.addEventListener("start", () => (camFlight = null));
+  function frameStickers(mode: "in" | "back" | "stay") {
+    if (disposed) return;
+    if (mode === "stay") {
+      stickerReturn = null;
+      return;
+    }
+    if (mode === "back") {
+      if (stickerReturn) camFlight = { t0: performance.now(), ms: 550, from: poseNow(), to: stickerReturn };
+      stickerReturn = null;
+      return;
+    }
+    if (stickerReturn) return;
+    const box = stickerArea();
+    if (!box) return;
+    stickerReturn = poseNow();
+    // From the home side — the side the slots are on — measured in that
+    // camera's own frame: the box's extent across the view, and its centre's
+    // offset from the target.
+    const look = camera.clone();
+    look.position.copy(homeCamPos);
+    look.lookAt(homeTarget);
+    look.updateMatrixWorld();
+    const t = homeTarget.clone().applyMatrix4(look.matrixWorldInverse);
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+    const c = new THREE.Vector3();
+    for (let i = 0; i < 8; i++) {
+      c.set(i & 1 ? box.max.x : box.min.x, i & 2 ? box.max.y : box.min.y, i & 4 ? box.max.z : box.min.z);
+      c.applyMatrix4(look.matrixWorldInverse);
+      minX = Math.min(minX, c.x);
+      maxX = Math.max(maxX, c.x);
+      minY = Math.min(minY, c.y);
+      maxY = Math.max(maxY, c.y);
+    }
+    const halfH = (camera.top - camera.bottom) / 2;
+    const aspect = (camera.right - camera.left) / Math.max(1e-6, camera.top - camera.bottom);
+    // The sticker surface across about 60% of the pane.
+    const need = Math.max((maxY - minY) / 2, (maxX - minX) / 2 / aspect) / 0.6;
+    const zoom = clamp(halfH / Math.max(need, 1e-6), controls.minZoom, controls.maxZoom);
+    // Pan is the picture's own move in CSS pixels (x right, y down): bring the
+    // box's centre to the middle.
+    const wpp = (camera.top - camera.bottom) / zoom / Math.max(1, cssH);
+    const cx = (minX + maxX) / 2 - t.x;
+    const cy = (minY + maxY) / 2 - t.y;
+    camFlight = {
+      t0: performance.now(),
+      ms: 650,
+      from: poseNow(),
+      to: { pos: homeCamPos.clone(), target: homeTarget.clone(), zoom, pan: new THREE.Vector2(-cx / wpp, cy / wpp) },
+    };
+  }
 
   // ---- Sticker decals ----------------------------------------------------------
   // How many world units one TEXCOORD_1 unit spans, taken as the median over
@@ -14711,6 +14835,7 @@ async function buildViewer(
     // Before anything reads the rig or the clip this frame — a preset applied
     // between applyInspect and clearInspect would be reverted by the latter.
     syncLiveSettings();
+    stepCamFlight();
     controls.update();
     // The arms, if there are any. BEFORE stepInspect and the charm: the weapon
     // is parented to a hand bone in this mode, so its world transform for this
@@ -14929,6 +15054,7 @@ async function buildViewer(
       target: controls.target.toArray() as [number, number, number],
     }),
     resetCamera: (side) => resetCamera(side),
+    frameStickers: (mode) => frameStickers(mode),
     setSuspended: (on) => {
       if (on === suspended || disposed) return;
       suspended = on;

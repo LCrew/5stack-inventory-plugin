@@ -278,6 +278,42 @@ async function stickerMaterial(THREE: typeof ThreeNS, image: string, wear: numbe
   return { mat, inkW, inkH, backing: info.sfx?.backing ?? null };
 }
 
+/** The turn handle's picture: a dark disc with a light rim and a turning arrow. */
+function drawTurnHandle(): HTMLCanvasElement {
+  const n = 96;
+  const c = document.createElement("canvas");
+  c.width = n;
+  c.height = n;
+  const g = c.getContext("2d")!;
+  g.fillStyle = "rgba(16, 22, 20, 0.92)";
+  g.beginPath();
+  g.arc(n / 2, n / 2, n / 2 - 4, 0, Math.PI * 2);
+  g.fill();
+  g.lineWidth = 5;
+  g.strokeStyle = "#d9e4de";
+  g.stroke();
+  // Three quarters of a circle, and its head.
+  const r = n * 0.24;
+  const a0 = -Math.PI * 0.35;
+  const a1 = a0 + Math.PI * 1.45;
+  g.lineWidth = 7;
+  g.lineCap = "round";
+  g.beginPath();
+  g.arc(n / 2, n / 2, r, a0, a1);
+  g.stroke();
+  const hx = n / 2 + r * Math.cos(a1);
+  const hy = n / 2 + r * Math.sin(a1);
+  const t = a1 + Math.PI / 2;
+  g.fillStyle = "#d9e4de";
+  g.beginPath();
+  g.moveTo(hx + Math.cos(t) * 13, hy + Math.sin(t) * 13);
+  g.lineTo(hx + Math.cos(t + 2.2) * 11, hy + Math.sin(t + 2.2) * 11);
+  g.lineTo(hx + Math.cos(t - 2.2) * 11, hy + Math.sin(t - 2.2) * 11);
+  g.closePath();
+  g.fill();
+  return c;
+}
+
 /** A sticker's footprint on the mat — its ink box, turned — as an extent about its centre. */
 function extent(rot: number, inkW: number, inkH: number) {
   const hw = (STICKER_CM * inkW) / 2;
@@ -405,6 +441,8 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
    */
   type Gesture =
     | { kind: "move"; id: number; uid: string; from: { x: number; y: number }; moved: boolean }
+    /** The turn handle: around the selection's centre `c`, `d` cm out. */
+    | { kind: "spin"; id: number; c: { x: number; y: number }; d: number; last: number; total: number; moved: boolean }
     | { kind: "turn"; id: number; x0: number; moved: boolean; uid: string | null; wasSelected: boolean; alt: boolean }
     | { kind: "press"; id: number; x: number; y: number };
   let gesture: Gesture | null = null;
@@ -420,6 +458,16 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
   const onDown = (e: PointerEvent) => {
     if (e.button !== 0 || gesture) return;
     setNdc(e);
+    // The turn handle sits over everything, so it is asked first.
+    if (handle.visible && raycaster.intersectObject(handle, false).length) {
+      const f = selectionFrame();
+      const at = boardPoint();
+      if (f && at) {
+        gesture = { kind: "spin", id: e.pointerId, c: f.c, d: f.d, last: angleAt(f.c, at), total: 0, moved: false };
+        capture(e.pointerId);
+        return;
+      }
+    }
     const uid = hitSticker();
     if (e.shiftKey && (uid || selectedNow.size)) {
       const wasSelected = !!uid && selectedNow.has(uid);
@@ -460,10 +508,31 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
           cb.turnStart();
         }
         cb.turn(dx * TURN_PER_PX);
+      } else if (g.kind === "spin") {
+        const at = boardPoint();
+        if (!at) return;
+        const a = angleAt(g.c, at);
+        // Accumulated, so a full circle and more is a full circle and more.
+        let step = a - g.last;
+        if (step > 180) step -= 360;
+        else if (step < -180) step += 360;
+        g.last = a;
+        g.total += step;
+        if (!g.moved) {
+          g.moved = true;
+          cb.turnStart();
+        }
+        cb.turn(g.total);
+        dirty = true;
       }
       return;
     }
     if (e.pointerType === "mouse" && !gesture) {
+      if (handle.visible && raycaster.intersectObject(handle, false).length) {
+        canvas.style.cursor = "grab";
+        hoverUid = null;
+        return;
+      }
       const hit = hitSticker();
       canvas.style.cursor = e.shiftKey && (hit || selectedNow.size) ? "ew-resize" : hit ? "grab" : "";
       hoverUid = hit;
@@ -479,6 +548,10 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
     if (g.kind === "move") {
       if (g.moved) cb.dragEnd();
       release(e.pointerId);
+    } else if (g.kind === "spin") {
+      if (g.moved) cb.turnEnd();
+      release(e.pointerId);
+      dirty = true;
     } else if (g.kind === "turn") {
       if (g.moved) cb.turnEnd();
       // A Shift-click on one that was already picked takes it back out.
@@ -545,6 +618,75 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
   const groupMat = new THREE.LineDashedMaterial({ color: GROUP_LINE, dashSize: 0.5, gapSize: 0.35, depthTest: false, transparent: true });
   const groupLines = new THREE.Group();
   scene.add(groupLines);
+
+  // ---- the turn handle ------------------------------------------------------------
+  // A round grip above the selection, on a stem from its top edge: drag it round
+  // to turn the selection about its centre — what Shift + drag does with a
+  // mouse, for a finger that has no Shift. Drawn over everything and kept the
+  // same size on screen, so it is a target a thumb can hit at any zoom.
+  const HANDLE_PX = 36;
+  const HANDLE_GAP_PX = 30;
+  const handleTex = new THREE.CanvasTexture(drawTurnHandle());
+  handleTex.colorSpace = THREE.SRGBColorSpace;
+  const handleMat = new THREE.SpriteMaterial({ map: handleTex, depthTest: false, transparent: true });
+  const handle = new THREE.Sprite(handleMat);
+  handle.renderOrder = 10_003;
+  handle.visible = false;
+  scene.add(handle);
+  const stemGeom = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
+  const stemMat = new THREE.LineBasicMaterial({ color: GROUP_LINE, depthTest: false, transparent: true, opacity: 0.75 });
+  const stem = new THREE.Line(stemGeom, stemMat);
+  stem.renderOrder = 10_002;
+  stem.visible = false;
+  scene.add(stem);
+  /** Degrees from +x toward +y (down the mat) — clockwise seen from above. */
+  const angleAt = (c: { x: number; y: number }, p: { x: number; y: number }) =>
+    (Math.atan2(p.y - c.y, p.x - c.x) * 180) / Math.PI;
+  /** World units per CSS pixel at a point, for this camera and pane. */
+  const worldPerPx = (p: ThreeNS.Vector3) => {
+    const h = Math.max(1, canvas.clientHeight);
+    return (2 * camera.position.distanceTo(p) * Math.tan((camera.fov * Math.PI) / 360)) / h;
+  };
+  /**
+   * The selection's turning centre — the mean of its centres, the pivot
+   * StickerCrafts turns about — and how far above it (toward the mat's top
+   * edge) the handle stands: past the selection's box by HANDLE_GAP_PX.
+   */
+  function selectionFrame(): { c: { x: number; y: number }; d: number } | null {
+    const list = [...selectedNow].map((uid) => current.get(uid)).filter((s): s is BoardSticker => !!s);
+    if (!list.length) return null;
+    const c = { x: list.reduce((a, s) => a + s.x, 0) / list.length, y: list.reduce((a, s) => a + s.y, 0) / list.length };
+    let top = Infinity;
+    for (const s of list) {
+      const node = nodes.get(s.uid);
+      top = Math.min(top, s.y - extent(s.rot, node?.inkW ?? 1, node?.inkH ?? 1).ey);
+    }
+    const at = new THREE.Vector3(c.x - GRID_W / 2, 0, top - GRID_H / 2);
+    return { c, d: c.y - top + HANDLE_GAP_PX * worldPerPx(at) };
+  }
+  /** Stand the handle where it belongs this frame: above the selection, or —
+   *  mid-turn — swung round with the pointer. */
+  function placeHandle() {
+    const g = gesture?.kind === "spin" ? gesture : null;
+    const f = g ? { c: g.c, d: g.d } : selectionFrame();
+    handle.visible = stem.visible = !!f && !!selectedNow.size;
+    if (!f || !handle.visible) return;
+    // (0, -d) turned clockwise by the turn so far.
+    const a = ((g?.total ?? 0) * Math.PI) / 180;
+    const hx = f.c.x + f.d * Math.sin(a);
+    const hy = f.c.y - f.d * Math.cos(a);
+    handle.position.set(hx - GRID_W / 2, 0.3, hy - GRID_H / 2);
+    handle.scale.setScalar(HANDLE_PX * worldPerPx(handle.position));
+    // The stem runs from the selection's top edge, along the same line.
+    const gap = HANDLE_GAP_PX * worldPerPx(handle.position);
+    const ex = f.c.x + (f.d - gap) * Math.sin(a);
+    const ey = f.c.y - (f.d - gap) * Math.cos(a);
+    const pos = stemGeom.getAttribute("position") as ThreeNS.BufferAttribute;
+    pos.setXYZ(0, ex - GRID_W / 2, 0.2, ey - GRID_H / 2);
+    pos.setXYZ(1, handle.position.x, 0.2, handle.position.z);
+    pos.needsUpdate = true;
+    stemGeom.computeBoundingSphere();
+  }
 
   const placeholderMat = () =>
     new THREE.MeshBasicMaterial({ color: 0x9fb8ad, transparent: true, opacity: 0.25, depthWrite: false });
@@ -801,6 +943,7 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
     if (glow.step(now, glowing(), lit)) dirty = true;
     if (!dirty) return;
     dirty = false;
+    placeHandle();
     renderer.render(scene, camera);
   };
   controls.addEventListener("change", () => (dirty = true));
@@ -833,6 +976,10 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
       for (const l of groupLines.children) (l as ThreeNS.Line).geometry.dispose();
       quadGeom.dispose();
       groupMat.dispose();
+      handleTex.dispose();
+      handleMat.dispose();
+      stemGeom.dispose();
+      stemMat.dispose();
       slabGeom.dispose();
       topMat.dispose();
       edgeMat.dispose();

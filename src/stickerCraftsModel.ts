@@ -61,10 +61,13 @@ export interface BoardSticker {
   wear: number;
   /** The grouping it belongs to, if any. */
   group: string | null;
+  /** The saved craft it was laid down from or saved into — the one "Update"
+   *  writes the layout back to. Absent on a sticker that is in no craft. */
+  craft?: string | null;
 }
 
 /** A sticker of a saved craft: x/y are cm from the craft's own centre. */
-export type CraftSticker = Omit<BoardSticker, "uid" | "group">;
+export type CraftSticker = Omit<BoardSticker, "uid" | "group" | "craft">;
 
 /** A grouping kept in the library, bottom-most sticker first (draw order). */
 export interface SavedCraft {
@@ -171,7 +174,8 @@ function cleanBoard(raw: unknown): BoardDoc {
     if (!s) return [];
     const r = raw as Partial<BoardSticker>;
     const group = typeof r.group === "string" && groups.some((g) => g.id === r.group) ? r.group : null;
-    return [{ ...s, uid: typeof r.uid === "string" ? r.uid : newId(), group }];
+    const craft = typeof r.craft === "string" ? r.craft : null;
+    return [{ ...s, uid: typeof r.uid === "string" ? r.uid : newId(), group, craft }];
   });
   return { stickers, groups };
 }

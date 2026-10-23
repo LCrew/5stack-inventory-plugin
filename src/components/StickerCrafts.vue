@@ -22,13 +22,18 @@ import {
   BookmarkPlus,
   BringToFront,
   Check,
+  ChevronUp,
   Copy,
   Globe,
   GripVertical,
   Group,
+  ListChecks,
+  ListPlus,
   Loader2,
+  Lock,
   Magnet,
   Plus,
+  RefreshCw,
   RotateCcw,
   RotateCw,
   ScanEye,
@@ -64,6 +69,7 @@ import type { StickerBoard } from "../stickerBoard";
 import AttachmentPicker from "./AttachmentPicker.vue";
 import PillTabs from "./PillTabs.vue";
 import { CTA_CLASS, CTA_STYLE } from "../ctaButton";
+import { Z } from "../zLayers";
 
 const props = defineProps<{
   /** Every owned row — the picker's Owned shelf reads it. */
@@ -260,6 +266,45 @@ const selectGroup = (id: string, shift: boolean) => {
   selected.value = shift ? new Set([...selected.value, ...ids]) : new Set(ids);
 };
 const selectLayer = (uid: string, shift: boolean) => pick(uid, { shift, alt: true });
+// ---- a finger's selection -------------------------------------------------------
+// No Shift, no Alt on a phone. "Add" makes a tap on the mat add to the
+// selection (a press on one already in it keeps it, so a drag still carries
+// the lot), and the chooser lists the mat — a whole grouping, one sticker of
+// one, a loose one — for what Alt-click and Shift-click reach on a desktop.
+const tapAdd = ref(false);
+const chooser = ref(false);
+function pickFromBoard(uid: string | null, mods: { shift: boolean; alt: boolean }) {
+  if (tapAdd.value && uid) {
+    if (!selected.value.has(uid)) pick(uid, { shift: true, alt: mods.alt });
+    return;
+  }
+  pick(uid, mods);
+}
+/** Select these: instead of the selection, or added to it with Add on. */
+function choose(ids: string[]) {
+  selected.value = tapAdd.value ? new Set([...selected.value, ...ids]) : new Set(ids);
+  if (!tapAdd.value) chooser.value = false;
+}
+const chooseAll = () => {
+  selectAll();
+  chooser.value = false;
+};
+const chooseNone = () => {
+  selected.value = new Set();
+  chooser.value = false;
+};
+const chooseGroup = (id: string) => choose(members(id).map((m) => m.uid));
+const chooseOne = (uid: string) => choose([uid]);
+watch(
+  () => props.compact,
+  (c) => {
+    if (!c) {
+      tapAdd.value = false;
+      chooser.value = false;
+    }
+  },
+);
+
 /** A finger has no Shift: the layer list's tick boxes add and take away. */
 const tickLayer = (uid: string) => selectLayer(uid, true);
 const tickGroup = (id: string) => {
@@ -344,11 +389,16 @@ function renameGroup(id: string, name: string) {
   const g = groups.value.find((x) => x.id === id);
   if (g && name.trim()) g.name = name.trim().slice(0, 40);
 }
+/** Take the selection off the mat, behind an Undo. */
 function removeSelection() {
   if (!sel.value.length) return;
+  const n = sel.value.length;
+  const label = n === 1 ? `Removed “${shortName(sel.value[0].name)}”` : `Removed ${n} stickers`;
+  const back = matSnapshot();
   stickers.value = stickers.value.filter((s) => !selected.value.has(s.uid));
   selected.value = new Set();
   pruneGroups();
+  offerUndo(label, () => restoreMat(back));
 }
 /** Copies land 1 cm down-right. Whole groupings copied become new groupings. */
 function duplicateSelection() {
@@ -366,7 +416,8 @@ function duplicateSelection() {
       }
       group = remap.get(s.group)!;
     }
-    made.push({ ...toRaw(s), uid: newId(), x: clampX(s.x + 1), y: clampY(s.y + 1), group });
+    // A copy is in no saved craft: Update stays with the originals.
+    made.push({ ...toRaw(s), uid: newId(), x: clampX(s.x + 1), y: clampY(s.y + 1), group, craft: null });
   }
   stickers.value = [...stickers.value, ...made];
   selected.value = new Set(made.map((s) => s.uid));
@@ -473,21 +524,58 @@ const dropClass = (list: string, idx: number, count: number) => {
   ].join(" ");
 };
 
-// Clearing everything is the one action here that can't be walked back, so it
-// asks twice: the first press arms it for a few seconds.
-const clearArmed = ref(false);
-let clearTimer: ReturnType<typeof setTimeout> | undefined;
+// ---- undo and notices ----------------------------------------------------------
+// The panel's way with a delete (the inventory's Undo toast): it happens at
+// once, and for a few seconds it can be taken back. One at a time — a second
+// delete settles the first. A saved craft's server delete waits out the window
+// (`commit`), so Undo never has anything to put back on the server.
+type Undoable = { label: string; undo: () => void; commit?: () => void };
+const undoable = ref<Undoable | null>(null);
+let undoTimer: ReturnType<typeof setTimeout> | undefined;
+const UNDO_MS = 6000;
+function settleUndo() {
+  const u = undoable.value;
+  undoable.value = null;
+  clearTimeout(undoTimer);
+  u?.commit?.();
+}
+function offerUndo(label: string, undo: () => void, commit?: () => void) {
+  settleUndo();
+  undoable.value = { label, undo, commit };
+  undoTimer = setTimeout(settleUndo, UNDO_MS);
+}
+function runUndo() {
+  const u = undoable.value;
+  if (!u) return;
+  undoable.value = null;
+  clearTimeout(undoTimer);
+  u.undo();
+}
+/** A word on what just happened — published, updated, or a write that failed. */
+const notice = ref<{ text: string; error?: boolean } | null>(null);
+let noticeTimer: ReturnType<typeof setTimeout> | undefined;
+function say(text: string, error = false) {
+  notice.value = { text, error };
+  clearTimeout(noticeTimer);
+  noticeTimer = setTimeout(() => (notice.value = null), error ? 6000 : 3500);
+}
+/** The mat as it stands, to put back. */
+const matSnapshot = () => ({
+  stickers: stickers.value.map((s) => ({ ...toRaw(s) })),
+  groups: groups.value.map((g) => ({ ...g })),
+});
+function restoreMat(m: ReturnType<typeof matSnapshot>) {
+  stickers.value = m.stickers;
+  groups.value = m.groups;
+  selected.value = new Set();
+}
 function clearBoard() {
-  if (!clearArmed.value) {
-    clearArmed.value = true;
-    clearTimeout(clearTimer);
-    clearTimer = setTimeout(() => (clearArmed.value = false), 3000);
-    return;
-  }
-  clearArmed.value = false;
+  if (!stickers.value.length) return;
+  const back = matSnapshot();
   stickers.value = [];
   groups.value = [];
   selected.value = new Set();
+  offerUndo("Cleared the mat", () => restoreMat(back));
 }
 
 // ---- the library ------------------------------------------------------------------
@@ -519,33 +607,74 @@ function uniqueName(base: string) {
 /** The card just saved: scrolled to and lit, so Save visibly did something. */
 const justSaved = ref<string | null>(null);
 let justSavedTimer: ReturnType<typeof setTimeout> | undefined;
+/** The selection as a craft's stickers: about its own centre, in draw order
+ *  (bottom first — on a gun that becomes slot order). */
+function selectionLayout(): CraftSticker[] {
+  const c = centroid(sel.value);
+  return sel.value.map((s): CraftSticker => ({
+    id: s.id,
+    name: s.name,
+    image: s.image,
+    x: Math.round((s.x - c.x) * 100) / 100,
+    y: Math.round((s.y - c.y) * 100) / 100,
+    rot: s.rot,
+    wear: s.wear,
+  }));
+}
+/**
+ * The saved craft the selection can write back to: the one craft its stickers
+ * came from (laid down from it, or saved into it). Stickers from no craft may
+ * join it; stickers from two different crafts make it ambiguous, and then only
+ * Save as new is offered.
+ */
+const updateTarget = computed<SavedCraft | null>(() => {
+  if (!canSave.value) return null;
+  const from = new Set(sel.value.map((s) => s.craft).filter((c): c is string => !!c));
+  if (from.size !== 1) return null;
+  const [id] = from;
+  return library.value.find((e) => e.id === id) ?? null;
+});
+/** Light the card a save wrote, and bring it into view. */
+function showSaved(id: string) {
+  justSaved.value = id;
+  clearTimeout(justSavedTimer);
+  justSavedTimer = setTimeout(() => (justSaved.value = null), 1600);
+  if (props.compact) panelTab.value = "saved";
+  void nextTick(() =>
+    rootEl.value?.querySelector(`[data-craft="${id}"]`)?.scrollIntoView({ block: "nearest", behavior: "smooth" }),
+  );
+}
 function saveSelection() {
   if (!canSave.value) return;
-  const c = centroid(sel.value);
   const entry: SavedCraft = {
     id: newId(),
     name: uniqueName(selGroup.value?.name ?? `Craft ${library.value.length + 1}`),
     savedAt: Date.now(),
-    // Draw order, bottom first: on a gun that becomes slot order.
-    stickers: sel.value.map((s): CraftSticker => ({
-      id: s.id,
-      name: s.name,
-      image: s.image,
-      x: Math.round((s.x - c.x) * 100) / 100,
-      y: Math.round((s.y - c.y) * 100) / 100,
-      rot: s.rot,
-      wear: s.wear,
-    })),
+    stickers: selectionLayout(),
   };
   library.value = [entry, ...library.value];
+  // These stickers are that craft now: the next change can Update it.
+  patchSelected((s) => (s.craft = entry.id));
   persistCraft(entry);
   void renderPreview(entry.id);
-  justSaved.value = entry.id;
-  clearTimeout(justSavedTimer);
-  justSavedTimer = setTimeout(() => (justSaved.value = null), 1600);
-  void nextTick(() =>
-    rootEl.value?.querySelector(`[data-craft="${entry.id}"]`)?.scrollIntoView({ block: "nearest", behavior: "smooth" }),
-  );
+  showSaved(entry.id);
+}
+/** Write the selection back over the craft it came from. A published craft's
+ *  store copy follows (the server refreshes it on every save). */
+function updateCraft() {
+  const entry = updateTarget.value;
+  if (!entry) return;
+  entry.stickers = selectionLayout();
+  entry.savedAt = Date.now();
+  // The old picture is the old layout: draw it again.
+  delete entry.preview;
+  delete entry.previewV;
+  library.value = [...library.value];
+  patchSelected((s) => (s.craft = entry.id));
+  persistCraft(entry);
+  void renderPreview(entry.id);
+  showSaved(entry.id);
+  say(published.value.has(entry.id) ? `Updated “${entry.name}” — the Craft Store has the new layout` : `Updated “${entry.name}”`);
 }
 /** Lay a saved craft down in the middle of the mat, as a grouping again. */
 function placeSaved(entry: SavedCraft) {
@@ -558,6 +687,7 @@ function placeSaved(entry: SavedCraft) {
     x: clampX(GRID_W / 2 + s.x),
     y: clampY(GRID_H / 2 + s.y),
     group: g?.id ?? null,
+    craft: entry.id,
   }));
   stickers.value = [...stickers.value, ...made];
   selected.value = new Set(made.map((s) => s.uid));
@@ -568,30 +698,17 @@ function renameSaved(entry: SavedCraft, name: string) {
   entry.name = name.trim().slice(0, 40);
   persistCraft(entry);
 }
-// Deleting a saved craft, or taking a grouping off the mat, can't be walked
-// back either: the first press arms the button for a few seconds, the second
-// does it. One armed button at a time.
-const armed = ref<string | null>(null);
-let armTimer: ReturnType<typeof setTimeout> | undefined;
-/** True when this press should go ahead; false when it only armed the button. */
-function pressAgain(key: string): boolean {
-  if (armed.value === key) {
-    armed.value = null;
-    clearTimeout(armTimer);
-    return true;
-  }
-  armed.value = key;
-  clearTimeout(armTimer);
-  armTimer = setTimeout(() => (armed.value = null), 3000);
-  return false;
-}
+/** Crafts with a publish request in flight: the switch waits, and a second
+ *  press can't undo the first before it has landed. */
+const publishing = ref<Set<string>>(new Set());
 /**
  * Put a craft in the Craft Store for everyone on the panel, or take it out. The
  * store copies the craft as it is SAVED, so its latest save goes first.
  */
 async function togglePublish(entry: SavedCraft) {
-  if (!loaded.value || home.value !== "server") return;
+  if (!loaded.value || home.value !== "server" || publishing.value.has(entry.id)) return;
   const on = !published.value.has(entry.id);
+  publishing.value = new Set([...publishing.value, entry.id]);
   const write = (async () => {
     if (on) await storeCraft(home.value, entry, library.value);
     await setPublished(entry.id, on);
@@ -600,19 +717,37 @@ async function togglePublish(entry: SavedCraft) {
     else next.delete(entry.id);
     published.value = next;
   })();
-  await track(write);
+  try {
+    await track(write);
+    await write;
+    say(on ? `“${entry.name}” is in the Craft Store — everyone on the panel can use it` : `“${entry.name}” is private again`);
+  } catch {
+    say(on ? `Couldn't publish “${entry.name}” — try again` : `Couldn't take “${entry.name}” out of the store — try again`, true);
+  } finally {
+    publishing.value = new Set([...publishing.value].filter((x) => x !== entry.id));
+  }
 }
+/** Delete a saved craft, behind an Undo: the server delete (which also takes
+ *  it out of the store) waits until the Undo has gone. */
 function deleteSaved(id: string) {
-  if (!pressAgain("lib:" + id)) return;
+  const at = library.value.findIndex((e) => e.id === id);
+  if (at < 0) return;
+  const entry = library.value[at];
+  const wasPublic = published.value.has(id);
   library.value = library.value.filter((e) => e.id !== id);
-  // Deleting takes it out of the store too (the server does both).
-  if (published.value.has(id)) published.value = new Set([...published.value].filter((x) => x !== id));
-  if (loaded.value) void track(deleteCraft(home.value, id, library.value));
-}
-/** The trash button under Selection: a whole grouping in it asks twice. */
-function removeSelectionAsked() {
-  if (sel.value.some((s) => s.group) && !pressAgain("remove")) return;
-  removeSelection();
+  if (wasPublic) published.value = new Set([...published.value].filter((x) => x !== id));
+  offerUndo(
+    wasPublic ? `Deleted “${entry.name}” and took it out of the Craft Store` : `Deleted “${entry.name}”`,
+    () => {
+      const next = library.value.slice();
+      next.splice(Math.min(at, next.length), 0, entry);
+      library.value = next;
+      if (wasPublic) published.value = new Set([...published.value, id]);
+    },
+    () => {
+      if (loaded.value) void track(deleteCraft(home.value, id, library.value));
+    },
+  );
 }
 
 // ---- adding stickers --------------------------------------------------------------
@@ -686,7 +821,7 @@ onMounted(async () => {
     const { mountStickerBoard } = await import("../stickerBoard");
     if (!stageEl.value) return;
     const b = await mountStickerBoard(stageEl.value, {
-      pick,
+      pick: pickFromBoard,
       dragStart(uid) {
         dragLead = uid;
         dragFrom = new Map(sel.value.map((s) => [s.uid, { x: s.x, y: s.y }]));
@@ -789,6 +924,9 @@ function onKey(e: KeyboardEvent) {
     e.preventDefault();
     if (e.shiftKey) ungroupSelection();
     else groupSelection();
+  } else if (mod && k === "z" && !e.shiftKey && undoable.value) {
+    e.preventDefault();
+    runUndo();
   } else if (mod || e.altKey) {
     return;
   } else if (e.key === "Delete" || e.key === "Backspace") {
@@ -817,15 +955,26 @@ onBeforeUnmount(() => {
   window.removeEventListener("pointermove", rowMove);
   window.removeEventListener("pointerup", rowUp);
   window.removeEventListener("pointercancel", rowUp);
-  clearTimeout(clearTimer);
-  clearTimeout(armTimer);
   clearTimeout(justSavedTimer);
+  clearTimeout(noticeTimer);
+  // Leaving settles a delete still on its Undo: it was meant.
+  settleUndo();
   // Send a save that was still waiting on its debounce.
   flushBoard();
   board.value?.dispose();
   board.value = null;
 });
 
+/** A phone's panel under the mat: one part at a time. */
+type PanelTab = "edit" | "layers" | "saved";
+const panelTab = ref<PanelTab>("edit");
+const PANEL_TABS = [
+  { id: "edit", label: "Edit" },
+  { id: "layers", label: "Layers" },
+  { id: "saved", label: "Saved" },
+] as const;
+const PANEL_PILL =
+  "relative z-[1] flex h-9 items-center justify-center rounded-md px-2 text-f10 uppercase tracking-cs1 transition-colors";
 const VIEWS = [
   { id: "angled", label: "Angled", short: "3D", hint: "Three-quarter view of the mat" },
   { id: "top", label: "Top", short: "Top", hint: "Straight down, for measuring (V)" },
@@ -887,13 +1036,13 @@ const FIELD =
       >{{ sync === 'saving' ? tr("inventory.stickerCrafts.saving", "Saving…") : sync === 'error' ? tr("inventory.stickerCrafts.notSaved", "Not saved") : tr("inventory.stickerCrafts.saved", "Saved") }}</span>
       <div class="ml-auto flex items-center gap-2">
         <button
-          :class="[BTN, clearArmed ? 'border-destructive/60 text-destructive' : '']"
+          :class="BTN"
           :disabled="!stickers.length"
-          :title="clearArmed ? 'Press again to remove every sticker from the mat' : 'Remove every sticker from the mat'"
+          title="Remove every sticker from the mat — you can undo it for a few seconds"
           @click="clearBoard"
         >
           <Trash2 class="h-3.5 w-3.5" />
-          <span v-if="!compact">{{ clearArmed ? tr("inventory.stickerCrafts.clearConfirm", "Press again") : tr("inventory.stickerCrafts.clear", "Clear") }}</span>
+          <span v-if="!compact">{{ tr("inventory.stickerCrafts.clear", "Clear") }}</span>
         </button>
         <button
           :class="BTN"
@@ -908,8 +1057,66 @@ const FIELD =
 
     <div class="flex min-h-0 flex-1 overflow-hidden" :class="compact ? 'flex-col' : ''">
       <!-- ============ STAGE ============ -->
-      <div class="relative min-h-[280px] min-w-0 flex-1 overflow-hidden">
+      <div class="relative min-w-0 overflow-hidden" :class="compact ? 'aspect-[3/2] w-full flex-none' : 'min-h-[280px] flex-1'">
         <div ref="stageEl" class="absolute inset-0"></div>
+
+        <!-- A finger has no Shift or Alt: on a phone, choose what is selected
+             from a list — a whole grouping, one sticker of it, a loose one —
+             and Add makes a tap on the mat add to the selection. -->
+        <!-- Bottom right: the top row is the view and Snap's, and a phone's
+             mat is too narrow for both. -->
+        <div v-if="compact && stickers.length" class="absolute bottom-3 right-3 z-[2] flex items-center gap-2">
+          <button
+            class="flex h-9 items-center gap-1.5 rounded-lg border border-border bg-card/80 px-2.5 text-f10 uppercase tracking-cs1 text-muted-foreground backdrop-blur tac-action"
+            :class="tapAdd ? 'tac-on' : ''"
+            :title="tapAdd ? 'Tapping a sticker adds it to the selection — tap to stop' : 'Make a tap on a sticker add it to the selection'"
+            @click="tapAdd = !tapAdd"
+          >
+            <ListPlus class="h-3.5 w-3.5" /> {{ tr("inventory.stickerCrafts.tapAdd", "Multi") }}
+          </button>
+          <button
+            class="flex h-9 items-center gap-1.5 rounded-lg border border-border bg-card/80 px-2.5 text-f10 uppercase tracking-cs1 text-foreground backdrop-blur tac-action"
+            :class="chooser ? 'tac-on' : ''"
+            title="Choose what is selected"
+            @click="chooser = !chooser"
+          >
+            <ListChecks class="h-3.5 w-3.5" />
+            {{ sel.length ? `${sel.length} selected` : tr("inventory.stickerCrafts.choose", "Select") }}
+            <ChevronUp class="h-3 w-3" />
+          </button>
+        </div>
+        <template v-if="compact && chooser">
+          <div class="absolute inset-0 z-[3]" @pointerdown="chooser = false"></div>
+          <div class="absolute bottom-14 right-3 z-[4] flex max-h-[calc(100%-4.5rem)] w-[min(280px,calc(100%-1.5rem))] flex-col overflow-y-auto rounded-lg border border-border bg-card p-1 shadow-2xl">
+            <div class="flex gap-1 border-b border-border p-1 pb-1.5">
+              <button class="h-9 flex-1 rounded-md text-f10 uppercase tracking-cs1 text-muted-foreground tac-action" @click="chooseAll">All</button>
+              <button class="h-9 flex-1 rounded-md text-f10 uppercase tracking-cs1 text-muted-foreground tac-action" @click="chooseNone">None</button>
+            </div>
+            <template v-for="u in layerUnits" :key="u.kind === 'one' ? u.s.uid : u.group.id">
+              <button
+                v-if="u.kind === 'group'"
+                class="flex min-h-[40px] items-center gap-2 rounded-md px-2 text-left text-f11 transition-colors hover:bg-secondary/60"
+                :class="u.members.every((m) => selected.has(m.uid)) ? 'sc-row-on' : 'text-foreground'"
+                @click="chooseGroup(u.group.id)"
+              >
+                <Group class="h-3.5 w-3.5 flex-none text-muted-foreground" />
+                <span class="min-w-0 flex-1 truncate">{{ u.group.name }}</span>
+                <span class="flex-none font-mono text-f9 text-muted-foreground">{{ u.members.length }}</span>
+              </button>
+              <button
+                v-for="m in u.kind === 'group' ? [...u.members].reverse() : [u.s]"
+                :key="m.uid"
+                class="flex min-h-[40px] items-center gap-2 rounded-md px-2 text-left text-f11 transition-colors hover:bg-secondary/60"
+                :class="[u.kind === 'group' ? 'pl-6' : '', selected.has(m.uid) ? 'sc-row-on' : 'text-muted-foreground']"
+                :title="u.kind === 'group' ? 'Just this one of ' + u.group.name : ''"
+                @click="chooseOne(m.uid)"
+              >
+                <img :src="m.image" alt="" class="h-6 w-6 flex-none object-contain" draggable="false" />
+                <span class="min-w-0 truncate">{{ shortName(m.name) }}</span>
+              </button>
+            </template>
+          </div>
+        </template>
 
         <!-- View and snap, top-left over the mat. -->
         <div class="pointer-events-none absolute left-3 top-3 flex items-center gap-2">
@@ -991,11 +1198,27 @@ const FIELD =
 
       <!-- ============ SIDEBAR ============ -->
       <aside
-        class="flex flex-none flex-col gap-3 overflow-y-auto p-3"
-        :class="compact ? 'max-h-[46%] border-t border-border' : 'w-[300px] border-l border-border'"
+        class="flex flex-col gap-3 overflow-y-auto p-3"
+        :class="compact ? 'min-h-0 flex-1 border-t border-border' : 'w-[300px] flex-none border-l border-border'"
       >
+        <!-- On a phone the three parts take turns under the mat. -->
+        <PillTabs
+          v-if="compact"
+          class="sticky top-0 z-[1] -mx-1 rounded-lg border border-border bg-card p-0.5"
+          :items="PANEL_TABS"
+          :item-key="(t) => t.id"
+          :item-title="(t) => t.label"
+          :active="panelTab"
+          list-class="grid grid-cols-3"
+          :button-class="PANEL_PILL"
+          @select="(id) => (panelTab = id as PanelTab)"
+        >
+          <template #default="{ item }">
+            {{ (item as (typeof PANEL_TABS)[number]).label }}<template v-if="(item as (typeof PANEL_TABS)[number]).id === 'saved' && library.length"> ({{ library.length }})</template>
+          </template>
+        </PillTabs>
         <!-- SELECTION -->
-        <section class="sc-block">
+        <section v-show="!compact || panelTab === 'edit'" class="sc-block">
           <header class="mb-2 flex items-baseline gap-2">
             <span class="text-f10 uppercase tracking-cs1 text-muted-foreground">{{ tr("inventory.stickerCrafts.selection", "Selection") }}</span>
             <span class="ml-auto truncate text-f11 text-muted-foreground">
@@ -1054,18 +1277,14 @@ const FIELD =
               <button :class="ACT_BTN" title="Bring to front — drawn over the others" @click="restack('front')"><BringToFront class="h-3.5 w-3.5" /> Front</button>
               <button :class="ACT_BTN" title="Send to back — drawn under the others" @click="restack('back')"><SendToBack class="h-3.5 w-3.5" /> Back</button>
               <button :class="ACT_BTN" title="Duplicate (Ctrl/⌘ + D)" @click="duplicateSelection"><Copy class="h-3.5 w-3.5" /> Copy</button>
-              <button
-                :class="[ACT_BTN, armed === 'remove' ? '!border-destructive/60 !text-destructive' : '']"
-                :title="armed === 'remove' ? 'Press again to take the grouping off the mat' : 'Remove from the mat (Delete)'"
-                @click="removeSelectionAsked"
-              ><Trash2 class="h-3.5 w-3.5" /> {{ armed === 'remove' ? 'Again' : 'Remove' }}</button>
+              <button :class="ACT_BTN" title="Remove from the mat (Delete) — you can undo it for a few seconds" @click="removeSelection"><Trash2 class="h-3.5 w-3.5" /> Remove</button>
             </div>
           </template>
         </section>
 
         <!-- CRAFT: save the selection as a Sticker Craft. Grouping is a mat
              convenience under it, not a step before it. -->
-        <section class="sc-block">
+        <section v-show="!compact || panelTab === 'edit'" class="sc-block">
           <header class="mb-2 flex items-baseline gap-2">
             <span class="text-f10 uppercase tracking-cs1 text-muted-foreground">{{ tr("inventory.stickerCrafts.grouping", "Craft") }}</span>
             <span class="ml-auto truncate text-f11" :class="tooMany ? 'text-destructive' : 'text-muted-foreground'">
@@ -1083,7 +1302,24 @@ const FIELD =
             title="Rename this grouping"
             @change="renameGroup(selGroup.id, ($event.target as HTMLInputElement).value)"
           />
+          <!-- From a saved craft (laid down from it, or saved into it): write
+               the change back to it, or keep it as a new one. -->
+          <template v-if="updateTarget">
+            <button
+              :class="CTA_CLASS"
+              :style="CTA_STYLE"
+              class="mb-1.5 w-full"
+              :title="`Write this layout over “${updateTarget.name}”` + (published.has(updateTarget.id) ? ' — the Craft Store gets it too' : '')"
+              @click="updateCraft"
+            >
+              <RefreshCw class="h-3.5 w-3.5 flex-none" /> <span class="truncate">{{ tr("inventory.stickerCrafts.update", "Update") }} “{{ updateTarget.name }}”</span>
+            </button>
+            <button :class="BTN" class="mb-2 w-full justify-center" title="Keep it as another craft — the old one stays as it was" @click="saveSelection">
+              <BookmarkPlus class="h-3.5 w-3.5" /> {{ tr("inventory.stickerCrafts.saveNew", "Save as new") }}
+            </button>
+          </template>
           <button
+            v-else
             :class="CTA_CLASS"
             :style="CTA_STYLE"
             class="mb-2 w-full"
@@ -1111,7 +1347,7 @@ const FIELD =
         </section>
 
         <!-- ON THE MAT — the layer list, top-most first. Drag to reorder. -->
-        <section class="sc-block">
+        <section v-show="!compact || panelTab === 'layers'" class="sc-block">
           <header class="mb-2 flex items-baseline gap-2">
             <span class="text-f10 uppercase tracking-cs1 text-muted-foreground">{{ tr("inventory.stickerCrafts.onMat", "On the mat") }}</span>
             <span class="ml-auto text-f10 text-muted-foreground/70">{{ stickers.length > 1 ? "Top first · drag to reorder" : "" }}</span>
@@ -1193,7 +1429,7 @@ const FIELD =
         </section>
 
         <!-- LIBRARY — saved crafts, to lay down again or apply to a weapon. -->
-        <section class="sc-block">
+        <section v-show="!compact || panelTab === 'saved'" class="sc-block">
           <header class="mb-2 flex items-baseline gap-2">
             <span class="text-f10 uppercase tracking-cs1 text-muted-foreground">{{ tr("inventory.stickerCrafts.library", "Saved crafts") }}</span>
             <span class="ml-auto font-mono text-f10 text-muted-foreground/70">{{ library.length }}</span>
@@ -1215,44 +1451,89 @@ const FIELD =
                 <img v-if="entry.preview" :src="entry.preview" alt="" class="h-full w-full object-cover" draggable="false" />
                 <Loader2 v-else class="h-4 w-4 animate-spin text-muted-foreground" />
               </div>
-              <div class="flex items-center gap-1.5">
+              <div class="mb-1.5 flex items-center gap-1.5">
                 <input
                   :class="FIELD"
-                  class="h-6 flex-1 font-sans text-f11"
+                  class="flex-1 font-sans text-f11"
                   :value="entry.name"
                   maxlength="40"
                   title="Rename"
                   @change="renameSaved(entry, ($event.target as HTMLInputElement).value)"
                 />
-                <span class="flex-none font-mono text-f9 text-muted-foreground" :title="entry.stickers.length + (entry.stickers.length === 1 ? ' sticker' : ' stickers')">×{{ entry.stickers.length }}</span>
+                <span class="flex-none font-mono text-f9 text-muted-foreground">{{ entry.stickers.length }} {{ entry.stickers.length === 1 ? "sticker" : "stickers" }}</span>
+              </div>
+              <div class="flex items-center gap-1.5">
                 <!-- In the Craft Store or not: everyone on the panel can browse,
-                     rate and use a public craft from their sticker picker. -->
+                     rate and use a public craft from their sticker picker. A
+                     switch with its state in words, busy while it is sent. -->
                 <button
-                  class="grid h-6 w-7 flex-none place-items-center rounded-md border border-border tac-action disabled:opacity-35"
-                  :class="published.has(entry.id) ? 'tac-on' : 'text-muted-foreground'"
-                  :disabled="home !== 'server'"
-                  :title="home !== 'server' ? 'The Craft Store needs the updated backend' : published.has(entry.id) ? 'Public in the Craft Store — click to take it down' : 'Publish to the Craft Store — everyone on the panel can see, rate and use it'"
+                  class="flex flex-none items-center gap-1.5 rounded-md border border-border px-2 text-f9 uppercase tracking-cs1 tac-action disabled:opacity-35"
+                  :class="[published.has(entry.id) ? 'tac-on' : 'text-muted-foreground', compact ? 'h-9' : 'h-7']"
+                  :disabled="home !== 'server' || publishing.has(entry.id)"
+                  :aria-pressed="published.has(entry.id)"
+                  :title="home !== 'server' ? 'The Craft Store needs the updated backend' : published.has(entry.id) ? 'In the Craft Store — click to make it private again' : 'Private — click to publish it to the Craft Store, where everyone on the panel can see, rate and use it'"
                   @click="togglePublish(entry)"
                 >
-                  <Globe class="h-3.5 w-3.5" />
-                </button>
-                <button class="grid h-6 w-7 flex-none place-items-center rounded-md border border-border text-muted-foreground tac-action" title="Place on the mat" @click="placeSaved(entry)">
-                  <Plus class="h-3.5 w-3.5" />
+                  <Loader2 v-if="publishing.has(entry.id)" class="h-3.5 w-3.5 animate-spin" />
+                  <Globe v-else-if="published.has(entry.id)" class="h-3.5 w-3.5" />
+                  <Lock v-else class="h-3.5 w-3.5" />
+                  {{ published.has(entry.id) ? tr("inventory.stickerCrafts.inStore", "In store") : tr("inventory.stickerCrafts.private", "Private") }}
                 </button>
                 <button
-                  class="grid h-6 flex-none place-items-center rounded-md border text-muted-foreground tac-action"
-                  :class="armed === 'lib:' + entry.id ? 'w-auto border-destructive/60 px-1.5 text-f9 uppercase tracking-cs1 !text-destructive' : 'w-7 border-border'"
-                  :title="armed === 'lib:' + entry.id ? 'Press again to delete ' + entry.name : 'Delete from the library'"
+                  class="ml-auto flex flex-none items-center gap-1 rounded-md border border-border px-2 text-f9 uppercase tracking-cs1 text-muted-foreground tac-action"
+                  :class="compact ? 'h-9' : 'h-7'"
+                  title="Place on the mat"
+                  @click="placeSaved(entry)"
+                >
+                  <Plus class="h-3.5 w-3.5" /> {{ tr("inventory.stickerCrafts.toMat", "Mat") }}
+                </button>
+                <button
+                  class="grid flex-none place-items-center rounded-md border border-border text-muted-foreground tac-action"
+                  :class="compact ? 'h-9 w-10' : 'h-7 w-8'"
+                  title="Delete from your crafts — you can undo it for a few seconds"
                   @click="deleteSaved(entry.id)"
                 >
-                  <template v-if="armed === 'lib:' + entry.id">{{ tr("inventory.stickerCrafts.clearConfirm", "Press again") }}</template>
-                  <Trash2 v-else class="h-3.5 w-3.5" />
+                  <Trash2 class="h-3.5 w-3.5" />
                 </button>
               </div>
             </div>
           </div>
         </section>
       </aside>
+    </div>
+
+    <!-- The inventory's toast, bottom centre: Undo for what was just
+         removed, and a word on a publish or an update. -->
+    <div class="pointer-events-none fixed bottom-5 left-1/2 flex w-max max-w-[calc(100vw-2rem)] -translate-x-1/2 flex-col items-center gap-2" :style="{ zIndex: Z.toast }">
+      <Transition
+        enter-active-class="transition duration-200"
+        enter-from-class="opacity-0 translate-y-2"
+        leave-active-class="transition duration-150"
+        leave-to-class="opacity-0 translate-y-2"
+      >
+        <div v-if="notice" class="pointer-events-auto flex items-center gap-2 rounded-md border bg-card px-4 py-2.5 text-f13 shadow-2xl" :class="notice.error ? 'border-destructive/50 text-destructive' : 'border-border'">
+          <span class="truncate">{{ notice.text }}</span>
+        </div>
+      </Transition>
+      <Transition
+        enter-active-class="transition duration-200"
+        enter-from-class="opacity-0 translate-y-2"
+        leave-active-class="transition duration-150"
+        leave-to-class="opacity-0 translate-y-2"
+      >
+        <div v-if="undoable" class="pointer-events-auto flex items-center gap-3 rounded-md border border-border bg-card px-4 py-2.5 text-f13 shadow-2xl">
+          <Trash2 class="h-3.5 w-3.5 flex-none text-muted-foreground" />
+          <span class="max-w-[380px] truncate">{{ undoable.label }}</span>
+          <button
+            class="flex-none rounded-sm px-2 py-1 text-f11 font-bold uppercase tracking-cs1 text-[hsl(var(--tac-amber,33_94%_58%))] transition-colors hover:bg-muted"
+            title="Put it back (Ctrl/⌘ + Z)"
+            @click="runUndo"
+          >
+            Undo
+          </button>
+          <button class="flex-none text-muted-foreground transition-colors hover:text-foreground" title="Dismiss" @click="settleUndo">✕</button>
+        </div>
+      </Transition>
     </div>
 
     <AttachmentPicker
