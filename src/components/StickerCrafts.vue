@@ -355,6 +355,7 @@ function duplicateSelection() {
   }
   stickers.value = [...stickers.value, ...made];
   selected.value = new Set(made.map((s) => s.uid));
+  board.value?.flash(made.map((s) => s.uid));
 }
 /**
  * Front / back. Inside one grouping (some members picked with Alt-click) the
@@ -528,6 +529,7 @@ function placeSaved(entry: SavedCraft) {
   }));
   stickers.value = [...stickers.value, ...made];
   selected.value = new Set(made.map((s) => s.uid));
+  board.value?.flash(made.map((s) => s.uid));
 }
 function renameSaved(entry: SavedCraft, name: string) {
   if (!name.trim()) return;
@@ -623,6 +625,7 @@ function addSticker(row: PickerRow) {
   };
   stickers.value = [...stickers.value, s];
   selected.value = new Set([s.uid]);
+  board.value?.flash([s.uid]);
 }
 /** The picker's Sticker Crafts tab, opened from here: lay the craft on the mat. */
 function addCraft(entry: SavedCraft) {

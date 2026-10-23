@@ -41,6 +41,7 @@ import {
   worldToCharmDir,
 } from "./charmPhysics";
 import { applyStickerMask, applyStickerSfx, type StickerHoloLive, type StickerSfx } from "./stickerShader";
+import { createStickerGlow } from "./stickerGlow";
 import { compositeGlove, gloveLegacySeedMoves, loadGlovePaintDef } from "./gloveComposite";
 import { compositeGloveModern, gloveSeedMoves, loadGloveModernDef } from "./gloveCompositeModern";
 import { isQuadModel } from "./viewerModel";
@@ -6495,8 +6496,7 @@ async function buildViewer(
     }
     // A flash outlives its mesh otherwise, and would then re-target whatever
     // mesh next lands in this slot.
-    flashing.delete(slot);
-    glowLevel.delete(slot);
+    decalGlow.forget(slot);
   }
   function removeDecal(slot: number) {
     disposeSlotMesh(slot);
@@ -7288,29 +7288,13 @@ async function buildViewer(
   }
 
   // ---- Decal glow: "it's over here" flash + grabbable pulse ---------------------
-  // Two effects on one channel (the decal's emissive, tinted by the sticker's own
-  // art via emissiveMap), because they are the same pixel and must never fight
-  // over it: the FLASH announces a newly placed sticker against a loud paint, and
-  // the PULSE breathes under the pointer so you can see what a press would grab
-  // before you press it. Purely visual — neither touches the saved placement, and
-  // the level always returns to 0 so a decal cannot be left glowing.
-  const FLASH_MS = 1100;
-  const flashing = new Map<number, number>(); // slot -> start timestamp
-  // Peak of the hover breath. Reads as a light source on the sticker rather than
-  // a tint on it — a subtler version was there first and got lost against a
-  // bright finish, which is exactly when you most need to know what you're about
-  // to grab. The trough is deliberately well below the peak (see below) so it
-  // pulses instead of just sitting bright.
-  const HOVER_GLOW = 1.15;
-  const HOVER_PERIOD_MS = 900;
-  /** Seconds to close the gap to the target level — a fade, so moving the
-   *  pointer across a row of stickers reads as a sweep rather than a strobe. */
-  const GLOW_FADE = 0.11;
-  const glowLevel = new Map<number, number>(); // slot -> current emissive intensity
-  let glowLast = 0;
+  // The flash on a newly placed sticker and the breath under the pointer, shared
+  // with the Sticker Crafts mat so a sticker you can grab looks the same in both
+  // (stickerGlow.ts).
+  const decalGlow = createStickerGlow<number>();
   function flashSticker(slot: number) {
     if (!liveMesh.has(slot)) return;
-    flashing.set(slot, performance.now());
+    decalGlow.flash(slot);
   }
   /**
    * Holo and lenticular stickers, live: the game's view term, from the camera.
@@ -7369,41 +7353,10 @@ async function buildViewer(
   }
 
   function stepDecalGlow(now: number) {
-    const dt = glowLast ? Math.min((now - glowLast) / 1000, 0.1) : 0;
-    glowLast = now;
     // A held sticker keeps the glow (it reads as "you have this"); everything
     // else is lit only while the pointer is actually over it.
     const litSlot = drag?.type === "sticker" ? drag.slot : hoverSlot;
-    for (const [slot, mesh] of liveMesh) {
-      const mat = mesh.material as import("three").MeshStandardMaterial | undefined;
-      if (!mat?.emissive) continue;
-      let target = 0;
-      const start = flashing.get(slot);
-      if (start != null) {
-        const t = (now - start) / FLASH_MS;
-        if (t >= 1) flashing.delete(slot);
-        // Three quick pulses that fade out over the flash's life.
-        else target = Math.abs(Math.sin(t * Math.PI * 3)) * (1 - t) * 0.9;
-      }
-      if (slot === litSlot) {
-        target = Math.max(target, HOVER_GLOW * (0.45 + 0.55 * (0.5 - 0.5 * Math.cos((now / HOVER_PERIOD_MS) * Math.PI * 2))));
-      }
-      const cur = glowLevel.get(slot) ?? 0;
-      // Exponential approach, frame-rate independent: the same fade at 30fps and
-      // at 144fps.
-      const next = dt > 0 ? cur + (target - cur) * (1 - Math.exp(-dt / GLOW_FADE)) : target;
-      if (next < 0.002 && cur < 0.002) {
-        if (cur !== 0) {
-          glowLevel.set(slot, 0);
-          mat.emissive.setScalar(0);
-          mat.emissiveIntensity = 1;
-        }
-        continue;
-      }
-      glowLevel.set(slot, next);
-      mat.emissive.setScalar(1);
-      mat.emissiveIntensity = next;
-    }
+    decalGlow.step(now, liveMesh, (slot) => slot === litSlot);
   }
 
   /**

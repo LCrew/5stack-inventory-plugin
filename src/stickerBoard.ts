@@ -17,8 +17,13 @@
 // decal fills its slot's square: the art is already letterboxed to a square by
 // loadStickerTexture, so stretching the quad to the ink's proportions (as this
 // first did) squashed every sticker that isn't square.
+//
+// The stickers glow the way the weapon editor's decals do — the same breath on
+// the one under the pointer and on the selection, the same flash on one just
+// added (stickerGlow.ts) — so a sticker you can grab looks the same in both.
 import type * as ThreeNS from "three";
 import { applyStickerSfx } from "./stickerShader";
+import { createStickerGlow } from "./stickerGlow";
 import { paintTextureUrl } from "./paintComposite";
 import { loadStickerTexture, loadThree, stickerArtInfo, type ThreeBundle } from "./viewer3d";
 import { GRID_H, GRID_W, MARGIN, STICKER_CM, type BoardSticker, type CraftSticker } from "./stickerCraftsModel";
@@ -55,10 +60,11 @@ export interface StickerBoard {
    *  card and the weapon picker's tile. Rendered by this board, so it is the
    *  board's own look and not an approximation of it. */
   snapshot(stickers: CraftSticker[]): Promise<string>;
+  /** The "it's over here" flash on stickers just put on the mat — once each is drawn. */
+  flash(uids: string[]): void;
   dispose(): void;
 }
 
-const ACCENT = 0xe0a24a;
 const GROUP_LINE = 0x6fb3ff;
 /** Degrees of turn per pixel of a Shift-drag. */
 const TURN_PER_PX = 0.5;
@@ -241,7 +247,7 @@ function addLights(THREE: typeof ThreeNS, s: ThreeNS.Scene, envTex: ThreeNS.Text
 
 /**
  * A sticker's material: its art and the real sticker shading at this wear.
- * The ink fractions come back with it, for outlines and framing.
+ * The ink fractions come back with it, for the group box and framing.
  */
 async function stickerMaterial(THREE: typeof ThreeNS, image: string, wear: number) {
   const [loaded, info] = await Promise.all([loadStickerTexture(image), stickerArtInfo(image)]);
@@ -258,6 +264,9 @@ async function stickerMaterial(THREE: typeof ThreeNS, image: string, wear: numbe
   let inkH = 1;
   if (loaded) {
     mat.map = loaded.tex;
+    // The glow tints by the sticker's own art. Set now, never later: adding an
+    // emissiveMap to a built material recompiles it mid-drag.
+    mat.emissiveMap = loaded.tex;
     inkW = loaded.aspect >= 1 ? 1 : loaded.aspect;
     inkH = loaded.aspect >= 1 ? 1 / loaded.aspect : 1;
     await applyStickerSfx(THREE, mat, info.sfx, wear, paintTextureUrl, { expandAlpha: loaded.realStickerArt });
@@ -278,13 +287,12 @@ function extent(rot: number, inkW: number, inkH: number) {
   };
 }
 
-/** One sticker's scene node: a flat quad plus its selection outline. */
+/** One sticker's scene node: a flat quad. */
 type Node = {
   root: ThreeNS.Group;
   mesh: ThreeNS.Mesh;
-  outline: ThreeNS.LineLoop;
   /** The INK's share of the footprint, per axis — the art is centred in its
-   *  square, so this is what the outline and the group box hug. */
+   *  square, so this is what the group box hugs. */
   inkW: number;
   inkH: number;
   /** What the material was last built for; a new image or wear rebuilds it. */
@@ -349,6 +357,15 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
   let selectedNow: ReadonlySet<string> = new Set();
   let disposed = false;
   let dirty = true;
+  /** The sticker under the mouse, for the glow. */
+  let hoverUid: string | null = null;
+  const glow = createStickerGlow<string>();
+  /** Added stickers whose flash waits for their material (dress). */
+  const flashWhenDrawn = new Set<string>();
+  const lit = (uid: string) => selectedNow.has(uid) || uid === hoverUid;
+  function* glowing(): Generator<[string, ThreeNS.Mesh]> {
+    for (const [uid, node] of nodes) yield [uid, node.mesh];
+  }
 
   const setNdc = (e: PointerEvent | WheelEvent) => {
     const r = canvas.getBoundingClientRect();
@@ -447,7 +464,11 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
     if (e.pointerType === "mouse" && !gesture) {
       const hit = hitSticker();
       canvas.style.cursor = e.shiftKey && (hit || selectedNow.size) ? "ew-resize" : hit ? "grab" : "";
+      hoverUid = hit;
     }
+  };
+  const onLeave = () => {
+    hoverUid = null;
   };
   const onUp = (e: PointerEvent) => {
     const g = gesture;
@@ -477,6 +498,7 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
   canvas.addEventListener("pointermove", onMove);
   canvas.addEventListener("pointerup", onUp);
   canvas.addEventListener("pointercancel", onUp);
+  canvas.addEventListener("pointerleave", onLeave);
   canvas.addEventListener("wheel", onWheel, { passive: false });
 
   const controls = new OrbitControls(camera, canvas);
@@ -489,21 +511,35 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
   controls.maxPolarAngle = Math.PI * 0.42;
 
   // ---- view changes: eased, not cut ---------------------------------------
-  let fly: { t0: number; fromPos: ThreeNS.Vector3; fromTarget: ThreeNS.Vector3; to: ReturnType<typeof viewPose> } | null = null;
-  const setView = (v: "angled" | "top") => {
-    fly = { t0: performance.now(), fromPos: camera.position.clone(), fromTarget: controls.target.clone(), to: viewPose(v) };
+  /** A camera move in progress: `at` places the camera at eased progress k.
+   *  Eased out unless it says otherwise. */
+  type Flight = { t0: number; ms: number; at: (k: number) => void; ease?: (t: number) => number; done?: () => void };
+  let fly: Flight | null = null;
+  const land = () => {
+    fly?.done?.();
+    fly = null;
   };
+  const setView = (v: "angled" | "top") => {
+    land();
+    const fromPos = camera.position.clone();
+    const fromTarget = controls.target.clone();
+    const to = viewPose(v);
+    fly = {
+      t0: performance.now(),
+      ms: 450,
+      at: (k) => {
+        camera.position.lerpVectors(fromPos, to.pos, k);
+        controls.target.lerpVectors(fromTarget, to.target, k);
+      },
+    };
+  };
+  // Grabbing the camera mid-flight hands it over: the flight stops where it is
+  // rather than dragging the view back out from under the pointer.
+  controls.addEventListener("start", land);
 
   // ---- stickers -------------------------------------------------------------
   const quadGeom = new THREE.PlaneGeometry(1, 1);
   quadGeom.rotateX(-Math.PI / 2);
-  const outlineGeom = new THREE.BufferGeometry().setFromPoints([
-    new THREE.Vector3(-0.5, 0, -0.5),
-    new THREE.Vector3(0.5, 0, -0.5),
-    new THREE.Vector3(0.5, 0, 0.5),
-    new THREE.Vector3(-0.5, 0, 0.5),
-  ]);
-  const outlineMat = new THREE.LineBasicMaterial({ color: ACCENT, depthTest: false, transparent: true });
   const groupMat = new THREE.LineDashedMaterial({ color: GROUP_LINE, dashSize: 0.5, gapSize: 0.35, depthTest: false, transparent: true });
   const groupLines = new THREE.Group();
   scene.add(groupLines);
@@ -517,12 +553,8 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
     mesh.userData.uid = s.uid;
     mesh.scale.set(STICKER_CM, 1, STICKER_CM);
     root.add(mesh);
-    const outline = new THREE.LineLoop(outlineGeom, outlineMat);
-    outline.renderOrder = 10_000;
-    outline.visible = false;
-    root.add(outline);
     scene.add(root);
-    return { root, mesh, outline, inkW: 1, inkH: 1, image: "", wear: -1, token: 0 };
+    return { root, mesh, inkW: 1, inkH: 1, image: "", wear: -1, token: 0 };
   }
 
   /** (Re)build a node's material for its image and wear. */
@@ -542,6 +574,7 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
     node.inkH = built.inkH;
     place(node, current.get(node.mesh.userData.uid) ?? s);
     drawGroups();
+    if (flashWhenDrawn.delete(s.uid)) glow.flash(s.uid);
     dirty = true;
   }
 
@@ -549,7 +582,6 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
   function place(node: Node, s: BoardSticker) {
     node.root.position.set(s.x - GRID_W / 2, 0.05, s.y - GRID_H / 2);
     node.root.rotation.y = (-s.rot * Math.PI) / 180;
-    node.outline.scale.set(STICKER_CM * node.inkW + 0.3, 1, STICKER_CM * node.inkH + 0.3);
   }
 
   /** A dashed box round every group that has a member selected. */
@@ -603,6 +635,9 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
       scene.remove(node.root);
       (node.mesh.material as ThreeNS.Material).dispose();
       nodes.delete(uid);
+      glow.forget(uid);
+      flashWhenDrawn.delete(uid);
+      if (hoverUid === uid) hoverUid = null;
     }
     stickers.forEach((s, i) => {
       let node = nodes.get(s.uid);
@@ -623,7 +658,6 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
       }
       place(node, s);
       node.mesh.renderOrder = i + 1;
-      node.outline.visible = selected.has(s.uid);
     });
     drawGroups();
     dirty = true;
@@ -705,10 +739,47 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
   ro.observe(container);
   resize();
   // The opening pose needs the pane's real shape, which resize has just read.
+  //
+  // THE WAY IN: the first look at the mat comes down onto it — from high above
+  // and further out, turned a little, the camera sinks and swings into the
+  // angled view while the mat fades up. Once, at mount; reduced motion lands
+  // on the angled view at once, and grabbing the camera stops it where it is.
   {
     const pose = viewPose("angled");
-    camera.position.copy(pose.pos);
     controls.target.copy(pose.target);
+    const still = typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (still) camera.position.copy(pose.pos);
+    else {
+      const end = new THREE.Spherical().setFromVector3(pose.pos.clone().sub(pose.target));
+      const from = new THREE.Spherical(end.radius * 1.9, end.phi * 0.2, end.theta - 0.55);
+      const at = new THREE.Spherical();
+      // It starts beyond the zoom limit; the limit comes back when it lands.
+      const maxDistance = controls.maxDistance;
+      controls.maxDistance = Infinity;
+      fly = {
+        t0: performance.now(),
+        ms: 1400,
+        // In AND out: the start is under the fade, and an eased-out start
+        // spent its biggest move where nobody could see it yet.
+        ease: (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2),
+        at: (k) => {
+          at.set(
+            from.radius + (end.radius - from.radius) * k,
+            from.phi + (end.phi - from.phi) * k,
+            from.theta + (end.theta - from.theta) * k,
+          );
+          camera.position.setFromSpherical(at).add(pose.target);
+        },
+        // Grabbed mid-flight it may still be past the limit: keep it reachable
+        // rather than snapping the camera in under the pointer.
+        done: () => (controls.maxDistance = Math.max(maxDistance, camera.position.distanceTo(controls.target))),
+      };
+      fly.at(0);
+      canvas.style.opacity = "0";
+      canvas.style.transition = "opacity 500ms ease-out";
+      // After the first frame is on the canvas, so the fade shows the mat.
+      requestAnimationFrame(() => requestAnimationFrame(() => (canvas.style.opacity = "1")));
+    }
     controls.update();
   }
 
@@ -716,16 +787,16 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
   const ease = (t: number) => 1 - Math.pow(1 - t, 3);
   const frame = () => {
     raf = requestAnimationFrame(frame);
+    const now = performance.now();
     if (fly) {
-      const t = Math.min(1, (performance.now() - fly.t0) / 450);
-      const k = ease(t);
-      camera.position.lerpVectors(fly.fromPos, fly.to.pos, k);
-      controls.target.lerpVectors(fly.fromTarget, fly.to.target, k);
-      if (t >= 1) fly = null;
+      const t = Math.min(1, (now - fly.t0) / fly.ms);
+      fly.at((fly.ease ?? ease)(t));
+      if (t >= 1) land();
       dirty = true;
     }
     // update() reports whether damping is still carrying the camera.
     if (controls.update()) dirty = true;
+    if (glow.step(now, glowing(), lit)) dirty = true;
     if (!dirty) return;
     dirty = false;
     renderer.render(scene, camera);
@@ -737,6 +808,9 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
     sync,
     setView,
     snapshot,
+    flash(uids) {
+      for (const uid of uids) flashWhenDrawn.add(uid);
+    },
     dispose() {
       disposed = true;
       cancelAnimationFrame(raf);
@@ -745,6 +819,7 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
       canvas.removeEventListener("pointermove", onMove);
       canvas.removeEventListener("pointerup", onUp);
       canvas.removeEventListener("pointercancel", onUp);
+      canvas.removeEventListener("pointerleave", onLeave);
       canvas.removeEventListener("wheel", onWheel);
       controls.dispose();
       // Only what this board made. The sticker textures belong to the shared
@@ -755,8 +830,6 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
       }
       for (const l of groupLines.children) (l as ThreeNS.Line).geometry.dispose();
       quadGeom.dispose();
-      outlineGeom.dispose();
-      outlineMat.dispose();
       groupMat.dispose();
       slabGeom.dispose();
       topMat.dispose();
