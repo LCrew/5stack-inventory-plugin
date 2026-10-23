@@ -124,6 +124,7 @@ The 3D model extraction is now at pipeline version 39, the same number as the in
 
 ### Bug Fixes
 
+- On a computer, baking missing inventory cards no longer eats memory. Each card bake kept that skin's paint textures for the rest of the visit (about 80 MB a skin; 570 MB after 7 cards in a test), so a large inventory could slow the whole Mac down. They are now freed after every bake, which keeps it at about 30 MB. Bakes also run in batches of 4 with a short pause between bakes and a 2 second rest after each batch, so the page stays responsive while cards are made. Cards that are already stored add no wait.
 - Scrubbing glove patterns no longer stutters: each repaint went from 60–100 ms to about 1 ms with identical output.
 - Models, EXR maps, HDR lighting and WAV music kits are served with their real file types instead of as unknown binary data.
 - When the web server had to hand a file to the backend, unversioned models and textures were kept by browsers for a year, and a re-check downloaded the whole file. They are now re-checked like everywhere else, with a tiny "not modified" answer, and first-person animations and projected-finish position maps no longer come back missing on that path.

@@ -171,7 +171,7 @@ import { usePersistedBool, usePersistedEnum, usePersistedNumber } from "./compos
 import { accentSoft, ART_FADE_B, attachmentsOf, canInspect, CARD_ART, CARD_CHROME_PX, glowStyle, hasScratch, hasSeed, hasWear, isCustomizable, isReadOnly, itemName, RARITY_META, rarityName, rarityRank, selRing, STEAM_BLUE, stripName, weaponName, wearTier, wearPositionInTier } from "./itemVisuals";
 import { stackByDesign, TINT_SUFFIX } from "./decks";
 import { MAX_STATTRAK } from "./stattrakModule";
-import { loadPaintDef, seedMovesPattern, type PaintDef } from "./paintComposite";
+import { evictPaintTextures, loadPaintDef, seedMovesPattern, type PaintDef } from "./paintComposite";
 import { formatGunTrait, gunPlacement, gunPlacementTable, gunPlacementTraits } from "./gunPattern";
 import { gloveSeedMoves, loadGloveModernDef, type GloveModernDef } from "./gloveCompositeModern";
 import { gloveLegacySeedMoves, loadGlovePaintDef } from "./gloveComposite";
@@ -2991,8 +2991,45 @@ const queuedIds = ref<Set<number>>(new Set());
 let cardsStale = false;
 const TOUCH_BAKE_BACKLOG = 3;
 const TOUCH_BAKE_COOLDOWN_MS = 400;
-const bakeCooldown = () =>
-  isCoarse.value ? new Promise((r) => setTimeout(r, TOUCH_BAKE_COOLDOWN_MS)) : Promise.resolve();
+// ---- desktop pacing ---------------------------------------------------------
+// A computer bakes every card that has none stored, back to back, which on a
+// 400-item inventory is minutes of a second WebGL context compositing 2K paints
+// — the Mac stays busy and the page stutters while it runs. It keeps its whole
+// queue (unlike a phone, nothing is dropped: a card already on screen would not
+// ask again), but bakes in BATCHES: a short gap between bakes and a rest after
+// every few, so the page in front of you gets the machine back in between.
+const DESK_BAKE_BATCH = 4;
+const DESK_BAKE_GAP_MS = 250;
+const DESK_BAKE_REST_MS = 2000;
+let deskBakesInBatch = 0;
+/** The last queued run actually baked (a card already stored is no bake). */
+let bakedSinceCooldown = false;
+const bakeCooldown = () => {
+  // Nothing was drawn — a stored card, a kind that isn't baked — so there is
+  // nothing for the browser to reclaim and no reason to make the next one wait.
+  if (!bakedSinceCooldown) return Promise.resolve();
+  bakedSinceCooldown = false;
+  if (isCoarse.value) return new Promise((r) => setTimeout(r, TOUCH_BAKE_COOLDOWN_MS));
+  deskBakesInBatch = (deskBakesInBatch + 1) % DESK_BAKE_BATCH;
+  return new Promise((r) => setTimeout(r, deskBakesInBatch === 0 ? DESK_BAKE_REST_MS : DESK_BAKE_GAP_MS));
+};
+/**
+ * Free the paint textures a background bake loaded.
+ *
+ * The paint compositor caches its input textures for the session (2K masks
+ * and patterns, a few to tens of MB per finish), which suits a viewer reopening
+ * the same skin but not a backfill walking a whole inventory: every finish it
+ * baked stayed in memory, and on a Mac that memory is the GPU's AND everything
+ * else's. Background bakes only ever run with no 3D viewer on screen (see
+ * viewersIdle), so nothing live needs what this one loaded; the two shared
+ * sheets every finish reads stay. The same trim the admin pre-bake does between
+ * skins (compositePrebake.ts).
+ */
+function trimPaintCache() {
+  const s = viewerStats();
+  if (s.live || s.building) return;
+  void evictPaintTextures((url) => /paint_wear|gun_grunge/.test(url));
+}
 
 /**
  * `force`: bake even though a card may already be stored, and even if a bake
@@ -3095,6 +3132,7 @@ async function generateRenderNow(inst: InventoryItem, force = false): Promise<bo
   // queued, because that is what it is.
   await viewersIdle();
   renderingIds.value = new Set([...renderingIds.value, inst.id]);
+  bakedSinceCooldown = true;
   try {
     // Gated by KIND, not by "did the lookup come back empty" — the same split
     // craftVisualOpts makes. Sticker slots, a hanging charm and a StatTrak
@@ -3144,6 +3182,7 @@ async function generateRenderNow(inst: InventoryItem, force = false): Promise<bo
       // while a 3D viewer is onscreen instead of fighting it for the GPU.
       true,
     );
+    trimPaintCache();
     if (blob === INCOMPLETE) {
       // Paint assets aren't extracted yet — this would bake a white gun, and
       // render keys never change, so it would be served forever. Leave the id
