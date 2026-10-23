@@ -7,6 +7,13 @@
 // slot's anchor was tried first, and a craft wider than the spot ran off the gun
 // before you had any say in where it went.
 //
+// A craft always sits in ONE RUN of slots: picked for a slot, it takes that slot
+// and the ones after it, and the gun's own stickers shift along to make room
+// (planRun). Reordering the slots keeps it that way — a grouped craft moves as
+// one block, and a sticker moved onto it goes before or after the whole block
+// (moveWithGroup). A shifted sticker keeps its place on the gun; only its slot,
+// which is its draw order, changes.
+//
 // Once down, its stickers stay a GROUP. While grouped, dragging any one of them
 // in 3D carries the others, and turning one (Shift-drag, or a two-finger twist)
 // turns the lot about it. Ungroup lets them move one at a time for fine
@@ -53,7 +60,10 @@ type Member = { slot: number; id: number; image: string; wear: number; ou: numbe
 
 export interface PendingCraft {
   entry: SavedCraft;
+  /** The run of slots the craft will take. */
   slots: number[];
+  /** The gun's own stickers that shift to make room: [from, to] slots. */
+  moves: [number, number][];
   members: Member[];
   frame: Frame;
 }
@@ -164,39 +174,94 @@ export function useStickerCraftPlacement(o: {
     });
   }
 
+  /** A form sticker moved to another slot WITHOUT moving on the gun: its
+   *  offsets re-expressed against the new slot's anchor, as moveSticker does. */
+  function reanchor(st: SlotSticker, from: number, to: number, frame: Frame): SlotSticker {
+    const a = frame.anchorOf(from);
+    const b = frame.anchorOf(to);
+    if (!a || !b || a === b) return { ...st };
+    const fit = (v: number, r?: [number, number]) => round4(r ? Math.min(r[1], Math.max(r[0], v)) : v);
+    return {
+      ...st,
+      x: fit(a.offset[0] + (st.x ?? 0) - b.offset[0], frame.bounds?.x),
+      y: fit(a.offset[1] + (st.y ?? 0) - b.offset[1], frame.bounds?.y),
+    };
+  }
+
   /**
-   * The slots a craft of n stickers goes into: FREE ones — the gun's own
-   * stickers are never overwritten — starting with the slot being filled (which
-   * counts as free: picking for a full slot means replacing it), then the free
-   * ones after it, then before it. Returned in slot order, because slot order
-   * is draw order and the craft's bottom sticker must take the lowest. Null when
-   * there aren't enough (the picker only offers crafts that fit).
+   * Where a craft of n stickers goes when picked for `slot`: one run of slots
+   * starting there. The slot itself is taken (picking for a full slot replaces
+   * its sticker), the run is opened up at that point, and empty slots are given
+   * back to keep five — the nearest ones after the run first, then before it —
+   * so the gun's own stickers shift as little as they can and keep their order.
+   * [1,1,_,1,_] with a pair picked for slot 3 is [1,1,G,G,1].
+   * Null when there aren't enough empty slots (the picker only offers crafts
+   * that fit).
    */
-  function freeSlots(c: CraftForm, slot: number, n: number): number[] | null {
-    const free = (s: number) => s === slot || !c.stickers[s];
-    const all = Array.from({ length: o.slotCount }, (_, i) => i);
-    const order = [slot, ...all.filter((s) => s > slot && free(s)), ...all.filter((s) => s < slot && free(s))];
-    return order.length >= n ? order.slice(0, n).sort((a, b) => a - b) : null;
+  function planRun(c: CraftForm, slot: number, n: number): { slots: number[]; moves: [number, number][] } | null {
+    type Cell = { from: number } | "G" | null;
+    const arr: Cell[] = Array.from({ length: o.slotCount }, (_, i) => (c.stickers[i] ? { from: i } : null));
+    arr.splice(slot, 1, ...Array<Cell>(n).fill("G"));
+    let extra = arr.length - o.slotCount;
+    for (let i = slot + n; i < arr.length && extra > 0; ) {
+      if (arr[i] === null) {
+        arr.splice(i, 1);
+        extra--;
+      } else i++;
+    }
+    for (let i = slot - 1; i >= 0 && extra > 0; i--) {
+      if (arr[i] === null) {
+        arr.splice(i, 1);
+        extra--;
+      }
+    }
+    if (extra > 0) return null;
+    const slots: number[] = [];
+    const moves: [number, number][] = [];
+    arr.forEach((cell, i) => {
+      if (cell === "G") slots.push(i);
+      else if (cell && cell.from !== i) moves.push([cell.from, i]);
+    });
+    return { slots, moves };
+  }
+
+  /** The form's stickers as they will stand once the waiting craft is down:
+   *  shifted ones moved (and re-anchored), the craft's run left empty. */
+  function arranged(c: CraftForm, p: PendingCraft): (SlotSticker | null)[] {
+    const out: (SlotSticker | null)[] = Array.from({ length: o.slotCount }, () => null);
+    const moved = new Set(p.moves.map(([from]) => from));
+    for (let i = 0; i < o.slotCount; i++) {
+      const st = c.stickers[i];
+      if (st && !moved.has(i) && !p.slots.includes(i)) out[i] = st;
+    }
+    for (const [from, to] of p.moves) {
+      const st = c.stickers[from];
+      if (st) out[to] = reanchor(st, from, to, p.frame);
+    }
+    return out;
   }
 
   /** The picker's answer: hold the craft over the gun, ready to drag on. */
   async function pickCraft(entry: SavedCraft, slot: number) {
     const c = o.craft.value;
     if (!c || !entry.stickers.length) return;
-    const slots = freeSlots(c, slot, entry.stickers.length);
-    if (!slots) return;
+    const plan = planRun(c, slot, entry.stickers.length);
+    if (!plan) return;
     const frame = await frameFor(c);
     if (o.craft.value !== c) return;
     if (!frame) {
       // No sticker markup for this model: nothing to measure a drop against, so
-      // the stickers go on at their slots' own spots, one by one as ever.
-      slots.forEach((s, i) => {
+      // the stickers go on at their slots' own spots, one by one as ever, and
+      // the shifted ones keep theirs (there are no anchors to re-express in).
+      const before = c.stickers.slice();
+      for (const [from, to] of plan.moves) c.stickers[to] = before[from];
+      plan.slots.forEach((s, i) => {
         const st = entry.stickers[i];
         c.stickers[s] = { id: st.id, name: st.name, image: st.image, inst: null, x: null, y: null, r: wrapDeg(-st.rot), w: st.wear };
       });
       return;
     }
-    pending.value = { entry, slots, members: membersOf(entry, slots, frame), frame };
+    pending.value = { entry, slots: plan.slots, moves: plan.moves, members: membersOf(entry, plan.slots, frame), frame };
     o.show3d();
   }
   const cancel = () => {
@@ -205,10 +270,14 @@ export function useStickerCraftPlacement(o: {
     o.viewer()?.setStickers(o.placements());
   };
 
-  /** The form's placements with these slots swapped for a craft seated at a spot. */
-  function previewAt(p: PendingCraft, spot: { u: number; v: number }) {
+  /** What the gun shows with the craft seated at a spot: the stickers as they
+   *  will stand (arranged), plus the craft in its run. */
+  function previewAt(p: PendingCraft, spot: { u: number; v: number }): StickerPlacement[] {
+    const c = o.craft.value;
     const seated = seat(p.members, p.frame, spot.u, spot.v, 0);
-    const own = o.placements().filter((pl) => !p.slots.includes(pl.slot));
+    const own = (c ? arranged(c, p) : []).flatMap((st, slot) =>
+      st?.image ? [{ slot, image: st.image, x: st.x ?? null, y: st.y ?? null, r: st.r ?? null, w: st.w ?? null }] : [],
+    );
     return [...own, ...seated.map(({ m, x, y, r }) => ({ slot: m.slot, image: m.image, x, y, r, w: m.wear }))];
   }
 
@@ -260,6 +329,9 @@ export function useStickerCraftPlacement(o: {
         o.viewer()?.setStickers(o.placements());
         return;
       }
+      // The gun's own stickers shift first, then the craft takes its run.
+      const next = arranged(c, p);
+      for (let i = 0; i < o.slotCount; i++) c.stickers[i] = next[i];
       for (const { m, x, y, r } of seat(p.members, p.frame, spot.u, spot.v, 0)) {
         const st = p.entry.stickers[p.slots.indexOf(m.slot)];
         c.stickers[m.slot] = { id: m.id, name: st.name, image: m.image, inst: null, x, y, r, w: m.wear };
@@ -271,6 +343,54 @@ export function useStickerCraftPlacement(o: {
     el.addEventListener("pointerup", up);
     el.addEventListener("pointercancel", up);
     move(e);
+  }
+
+  /**
+   * The form's slot reorder (App's moveSticker: a tile dragged onto another, or
+   * the ‹ › buttons), when the group is involved. False leaves an ordinary swap
+   * to App — neither slot is the group's.
+   *
+   * GROUPED, the craft is one block: moving one of its stickers moves the whole
+   * run, and a sticker moved onto the run goes before it (moving back) or after
+   * it (moving forward) — [1,G,G,M,1] with M moved to slot 2 is [1,M,G,G,1].
+   * Two of the group's own stickers trade places as a swap. UNGROUPED, every
+   * move is a swap. Either way the group follows its stickers to their new
+   * slots instead of breaking up, and nothing moves on the gun.
+   */
+  function moveWithGroup(from: number, to: number): boolean {
+    const g = group.value;
+    const c = o.craft.value;
+    if (!g || !c || from === to) return false;
+    const inGroup = (s: number) => g.members.some((m) => m.slot === s);
+    if (!inGroup(from) && !inGroup(to)) return false;
+    const old = c.stickers.slice(0, o.slotCount);
+    // order[newSlot] = the slot whose sticker ends up there.
+    let order: number[];
+    if (!g.linked || (inGroup(from) && inGroup(to))) {
+      order = Array.from({ length: o.slotCount }, (_, i) => (i === from ? to : i === to ? from : i));
+    } else {
+      const run = g.members.map((m) => m.slot).sort((a, b) => a - b);
+      const units: number[][] = [];
+      for (let i = 0; i < o.slotCount; i++) {
+        if (!run.includes(i)) units.push([i]);
+        else if (i === run[0]) units.push(run);
+      }
+      const unitOf = (s: number) => units.findIndex((u) => u.includes(s));
+      const fu = unitOf(from);
+      const tu = unitOf(to);
+      if (fu === tu) return true;
+      // Out, then back in at the target's place: before it when moving back,
+      // after it when moving forward (the removal shifted it one left).
+      const [moving] = units.splice(fu, 1);
+      units.splice(tu, 0, moving);
+      order = units.flat();
+    }
+    order.forEach((was, slot) => {
+      const st = old[was];
+      c.stickers[slot] = st ? reanchor(st, was, slot, g.frame) : null;
+    });
+    for (const m of g.members) m.slot = order.indexOf(m.slot);
+    return true;
   }
 
   /** Re-seat every grouped sticker but one (the one the viewer just moved). */
@@ -398,6 +518,7 @@ export function useStickerCraftPlacement(o: {
     startDrag,
     followMove,
     followTurn,
+    moveWithGroup,
     ungroup,
     regroup,
     persist,

@@ -15,7 +15,7 @@
 //
 // MOCK_INVENTORY is a JSON array of
 //   { item_id, wear?, seed?, stattrak?, stattrak_count?, nametag?, slot?,
-//     stickers?: [{ id, x?, y?, r?, w? }] }
+//     stickers?: [{ id, x?, y?, r?, w? } | null] }   (null: an empty slot)
 // and item ids come from cs2-lib (see backend/src/catalog.ts getItemIdByName).
 // MOCK_LOADOUT is the /api/loadout answer, inline JSON (default []).
 // MOCK_CARDS=stub answers every instance card with a 1x1 PNG, so the card
@@ -70,7 +70,8 @@ const INVENTORY = seed.map((e, n) => ({
   stattrak: !!e.stattrak,
   stattrak_count: e.stattrak_count ?? 0,
   nametag: e.nametag ?? null,
-  stickers: (e.stickers ?? []).map((s) => ({ ...cat.getItem(s.id), x: s.x ?? null, y: s.y ?? null, r: s.r ?? 0, w: s.w ?? 0 })),
+  // null keeps a slot empty, so a gun can have a gap between its stickers.
+  stickers: (e.stickers ?? []).map((s) => (s ? { ...cat.getItem(s.id), x: s.x ?? null, y: s.y ?? null, r: s.r ?? 0, w: s.w ?? 0 } : null)),
   patches: [],
   slot: e.slot ?? cat.slotForItem(e.item_id),
   item: cat.getItem(e.item_id),

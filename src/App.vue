@@ -3695,6 +3695,9 @@ async function moveSticker(from: number, to: number) {
   const c = craft.value;
   const model = craftTarget.value?.model;
   if (!c || from === to || !c.stickers[from]) return;
+  // A placed Sticker Craft moves as one block, and is never broken up by a
+  // reorder — see useStickerCraftPlacement.
+  if (craftDrop.moveWithGroup(from, to)) return;
   const geo = model ? await fetchStickerGeometry(model) : null;
   if (craft.value !== c) return;
   const body = c.skin.legacyPaint && c.skin.paintMaterial ? "body_legacy" : "body_hd";
