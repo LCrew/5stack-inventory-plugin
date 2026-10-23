@@ -987,6 +987,8 @@ async function backfillPreviews() {
 void loadAll();
 
 // ---- keyboard ---------------------------------------------------------------------------
+/** The left hand's arrows. */
+const WASD = { w: "ArrowUp", a: "ArrowLeft", s: "ArrowDown", d: "ArrowRight" } as const;
 function onKey(e: KeyboardEvent) {
   if (picker.value) {
     if (e.key === "Escape") {
@@ -1025,12 +1027,15 @@ function onKey(e: KeyboardEvent) {
     selected.value = new Set();
   } else if (k === "q" || k === "e") {
     rotateSelection((k === "q" ? -1 : 1) * (e.shiftKey ? 15 : 5));
-  } else if (e.key.startsWith("Arrow") && sel.value.length) {
+  } else if ((e.key.startsWith("Arrow") || k in WASD) && sel.value.length) {
+    // WASD as well as the arrows: the left hand already has Q / E for turning.
+    // `k`, lower-cased, so Shift + D (a 1 cm step) is still D.
     e.preventDefault();
     const step = e.shiftKey ? 1 : 0.1;
+    const dir = WASD[k as keyof typeof WASD] ?? e.key;
     nudge(
-      e.key === "ArrowLeft" ? -step : e.key === "ArrowRight" ? step : 0,
-      e.key === "ArrowUp" ? -step : e.key === "ArrowDown" ? step : 0,
+      dir === "ArrowLeft" ? -step : dir === "ArrowRight" ? step : 0,
+      dir === "ArrowUp" ? -step : dir === "ArrowDown" ? step : 0,
     );
   } else if (k === "v") {
     boardView.value = boardView.value === "top" ? "angled" : "top";
@@ -1070,7 +1075,7 @@ const VIEWS = [
 /** The mat's key hint, for what is selected now: [keys, what they do] pairs. */
 const keyHint = computed<[string, string][]>(() => {
   if (!sel.value.length) return [["Click", "select"], ["Shift-click", "select several"], ["Right-drag", "pan"]];
-  const out: [string, string][] = [["Drag", "move"], ["Shift + drag", "turn"], ["Q / E", "turn 5°"], ["Arrows", "nudge"]];
+  const out: [string, string][] = [["Drag", "move"], ["Shift + drag", "turn"], ["Q / E", "turn 5°"], ["Arrows / WASD", "nudge"]];
   if (sel.value.some((s) => s.group)) out.push(["Alt-click", "one of a group"]);
   return out;
 });
@@ -1582,7 +1587,9 @@ const FIELD =
                   />
                   <span class="flex-none font-mono text-f9 text-muted-foreground">{{ entry.stickers.length }} {{ entry.stickers.length === 1 ? "sticker" : "stickers" }}</span>
                 </div>
-                <div class="flex items-center gap-1.5">
+                <!-- flex-wrap: in the panel's own type (Oxanium, wider than the
+                     fallbacks) one row of these ran past the card's edge. -->
+                <div class="flex flex-wrap items-center gap-1.5">
                   <!-- In the Craft Store or not: everyone on the panel can browse,
                        rate and use a public craft from their sticker picker. A
                        switch with its state in words, busy while it is sent. -->
@@ -1610,10 +1617,10 @@ const FIELD =
                   <button
                     class="ml-auto flex flex-none items-center gap-1 rounded-md border border-border px-2 text-f9 uppercase tracking-cs1 text-foreground tac-action"
                     :class="compact ? 'h-9' : 'h-7'"
-                    title="Lay it on the mat, to change it or start from it"
+                    title="Place it on the mat, to change it or start from it"
                     @click="layDown(entry)"
                   >
-                    <Plus class="h-3.5 w-3.5" /> {{ tr("inventory.stickerCrafts.toMat", "Place on mat") }}
+                    <Plus class="h-3.5 w-3.5" /> {{ tr("inventory.stickerCrafts.toMat", "Place") }}
                   </button>
                 </div>
               </div>
@@ -1624,9 +1631,15 @@ const FIELD =
                 class="flex items-center gap-2 rounded-md border bg-background/60 p-1.5 transition-[border-color,box-shadow] duration-500"
                 :class="justSaved === entry.id ? 'animate-cell-in border-[color:var(--acc)] shadow-[0_0_0_1px_var(--acc)]' : 'border-border'"
               >
-                <div class="grid h-12 w-24 flex-none place-items-center overflow-hidden rounded bg-[#183a31]">
+                <!-- The count on the picture: beside the buttons it wrapped to two
+                     lines and pushed them out of the card. -->
+                <div
+                  class="relative grid h-10 w-20 flex-none place-items-center overflow-hidden rounded bg-[#183a31]"
+                  :title="entry.stickers.length + (entry.stickers.length === 1 ? ' sticker' : ' stickers')"
+                >
                   <img v-if="entry.preview" :src="entry.preview" alt="" class="h-full w-full object-cover" draggable="false" />
                   <Loader2 v-else class="h-4 w-4 animate-spin text-muted-foreground" />
+                  <span class="absolute bottom-0.5 right-0.5 rounded bg-background/85 px-1 font-mono text-f9 leading-tight text-foreground">{{ entry.stickers.length }}</span>
                 </div>
                 <div class="flex min-w-0 flex-1 flex-col gap-1">
                   <input
@@ -1637,8 +1650,7 @@ const FIELD =
                     title="Rename"
                     @change="renameSaved(entry, ($event.target as HTMLInputElement).value)"
                   />
-                  <div class="flex items-center gap-1">
-                    <span class="mr-auto font-mono text-f9 text-muted-foreground">{{ entry.stickers.length }} {{ entry.stickers.length === 1 ? "sticker" : "stickers" }}</span>
+                  <div class="flex items-center justify-end gap-1">
                     <button
                       class="grid flex-none place-items-center rounded-md border border-border tac-action disabled:opacity-35"
                       :class="[published.has(entry.id) ? 'tac-on' : 'text-muted-foreground', compact ? 'h-9 w-10' : 'h-6 w-7']"
