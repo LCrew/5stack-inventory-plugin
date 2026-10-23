@@ -4723,17 +4723,26 @@ async function buildViewer(
       const mat = mesh.material as import("three").MeshStandardMaterial;
       mat.map = loaded.tex;
       mat.needsUpdate = true;
-      // The art is square but its INK is not — loadStickerTexture returns the
-      // aspect of the cropped content, and squashing it to the quad is the exact
-      // bug the sticker-art extraction was done to fix. Scale the mesh instead.
-      if (loaded.aspect > 1) mesh.scale.y = 1 / loaded.aspect;
-      else if (loaded.aspect > 0) mesh.scale.x = loaded.aspect;
-      backing.scale.copy(mesh.scale);
+      // The art stays SQUARE. loadStickerTexture centres the ink in a square
+      // image, so the quad shows it in its own proportions as it is; scaling
+      // the quad to the ink's aspect (as when the texture was the bare ink box)
+      // squashed the square and stretched every wide sticker — the Sticker
+      // Crafts mat had the same bug. Only the backing card hugs the ink.
     }
+    const inkX = loaded.aspect >= 1 ? 1 : Math.max(loaded.aspect, 0.01);
+    const inkY = loaded.aspect >= 1 ? 1 / loaded.aspect : 1;
+    backing.scale.set(inkX, inkY, 1);
     if (info.sfx?.backing) {
-      const tex = await loadTexture(paintTextureUrl(info.sfx.backing)).catch(() => null);
-      if (tex) {
+      const cached = await loadTexture(paintTextureUrl(info.sfx.backing)).catch(() => null);
+      if (cached) {
+        // The card is cut from the print, not the print squeezed to the card:
+        // the middle of it at its own proportions. A clone carries the mapping,
+        // as in dressDecalGroup, so the cached texture is left as it was.
+        const tex = cached.clone();
         tex.colorSpace = THREE.SRGBColorSpace;
+        tex.repeat.set(inkX, inkY);
+        tex.offset.set((1 - inkX) / 2, (1 - inkY) / 2);
+        tex.needsUpdate = true;
         const bm = backing.material as import("three").MeshStandardMaterial;
         bm.map = tex;
         bm.needsUpdate = true;
