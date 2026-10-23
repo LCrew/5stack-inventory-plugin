@@ -14487,16 +14487,18 @@ async function buildViewer(
   };
 
   /**
-   * DIRECT, behind the `directgl` switch: while this is the only live viewer,
-   * the shared WebGL canvas sits in this pane itself and the per-frame copy into
-   * the 2D canvas below is skipped.
+   * DIRECT (the `directgl` switch, on by default in Safari): while this is the
+   * only live viewer, the shared WebGL canvas sits in this pane itself and the
+   * per-frame copy into the 2D canvas below is skipped.
    *
    * The copy is what lets one context serve every viewer, and it is free where
    * the browser keeps it on the GPU (Chrome). Safari copies a WebGL canvas into
-   * a 2D one through its GPU process, a full-resolution frame each time — the
-   * suspect for a Mac that draws a frame in under 2ms and shows 12fps. With a
-   * second live viewer, or when a frame has to be READ (snapshot), it falls back
-   * to the copy. Read at mount: switch it, then reopen the item.
+   * a 2D one through its GPU process, a full-resolution frame each time: on an
+   * M3 Pro that drew a frame in under 2ms, the copy held the view to 12-20fps
+   * and stuttering; drawn directly it ran at a steady 60. With a second live
+   * viewer, or when a frame has to be READ (snapshot, the stage's held frame —
+   * see the "cs2-hold-frame" listener), it falls back to the copy. Read at
+   * mount: switch it, then reopen the item.
    */
   const directWanted = !opts?.still && debugFlag("directgl");
   const takeSharedCanvas = () => {
@@ -14521,7 +14523,18 @@ async function buildViewer(
   const dropSharedCanvas = () => {
     if (renderer.domElement.parentElement === container) renderer.domElement.remove();
     if (directOwner?.container === container) directOwner = null;
+    container.removeEventListener("cs2-hold-frame", holdFrame);
   };
+  /**
+   * The stage asks for this frame in the 2D canvas before it copies it out to
+   * hold over a remount (ItemStage). Drawn straight to the screen, the 2D canvas
+   * holds nothing and the shared one reads back blank between frames, so draw
+   * one now and copy it — synchronously, inside the stage's own dispatch.
+   */
+  const holdFrame = () => {
+    if (!disposed && renderer.domElement.parentElement === container) drawFrame(true);
+  };
+  container.addEventListener("cs2-hold-frame", holdFrame);
   const drawFrame = (forceBlit = false) => {
     const direct = directWanted && !released && liveViewers === 1;
     if (direct && renderer.domElement.parentElement !== container) takeSharedCanvas();

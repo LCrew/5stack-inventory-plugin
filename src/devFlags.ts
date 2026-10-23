@@ -132,9 +132,11 @@ export const FLAGS: DevFlag[] = [
   },
   {
     name: "directgl",
-    label: "Draw straight to screen (test)",
-    hint: "Show the 3D view's own canvas instead of copying every frame into the page. A test for a slow 3D view in Safari on a Mac — reopen the item after switching it.",
-    dflt: false,
+    label: "Draw straight to screen",
+    hint: "Show the 3D view's own canvas instead of copying every frame into the page. On by default in Safari, where that copy is slow (12-20fps against a steady 60 on an M3 Pro); off elsewhere, where it costs nothing. Reopen the item after switching it.",
+    // Safari, and every browser on an iPhone (all of them are WebKit, and all
+    // of them say Apple here). Chrome and Firefox keep the copy.
+    dflt: typeof navigator !== "undefined" && navigator.vendor === "Apple Computer, Inc.",
     group: "3D viewer",
     audience: "user",
   },
