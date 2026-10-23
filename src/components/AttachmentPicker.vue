@@ -32,7 +32,11 @@ const props = defineProps<{
   hidePreview?: boolean;
   /** The Back button's tooltip; says what is underneath. */
   backTitle?: string;
+  /** Where a pick goes: a gun's sticker slots (the editor, the default) or the
+   *  Sticker Crafts mat. Only the words change — room, footer, empty shelf. */
+  target?: "gun" | "mat";
 }>();
+const onMat = computed(() => props.target === "mat");
 
 
 
@@ -89,7 +93,7 @@ const {
 const sources = computed(() =>
   picker.value?.kind === "sticker" ? (["all", "owned", "crafts"] as const) : (["all", "owned"] as const),
 );
-const SOURCE_LABEL = { all: "Catalog", owned: "Owned", crafts: "Sticker Crafts" } as const;
+const SOURCE_LABEL = computed(() => ({ all: "Catalog", owned: "Owned", crafts: isCompact.value ? "Crafts" : "Sticker Crafts" }) as const);
 /** Craft tiles are twice as wide (the layout is a strip, not a square) and as
  *  tall as they need: picture, name, author and votes, Use. */
 const craftGridStyle = computed(() => ({
@@ -120,18 +124,21 @@ function useCraft(c: SavedCraft | StoreCraft) {
     <!-- fixed + above the 3D overlay (z-1200): the picker is reachable from
          both the form and the 3D editor, and must cover whichever is up. -->
     <div v-if="picker" class="fixed inset-0 flex flex-col bg-card/[0.985] p-4" :style="{ zIndex: Z.picker }" role="dialog" aria-modal="true" aria-label="Pick an attachment">
-      <div class="mb-3 flex items-center gap-3">
-        <span class="text-f11 font-semibold uppercase tracking-cs1">Pick a {{ picker.kind }}</span>
+      <!-- On a phone: title and Back on the first row, then the shelves, then
+           search, each full width. In one row Back and search ran off the
+           screen, and with no Esc key Back is the only way out. -->
+      <div class="mb-3 flex items-center" :class="isCompact ? 'flex-wrap gap-2' : 'gap-3'">
+        <span class="text-f11 font-semibold uppercase tracking-cs1" :class="isCompact ? 'order-1' : ''">Pick a {{ picker.kind }}</span>
         <!-- Catalog vs your own drawer. Owned counts the SPARES, not the
              total: the question this shelf answers is "have I got one going
              spare", and a badge counting ones already stuck to a gun would
              answer a different one. -->
-        <div class="flex flex-none items-center gap-0.5 rounded-md border border-border p-0.5">
+        <div class="flex flex-none items-center gap-0.5 rounded-md border border-border p-0.5" :class="isCompact ? 'order-3 w-full' : ''">
           <button
             v-for="src in sources"
             :key="src"
-            class="flex items-center gap-1.5 rounded px-2.5 py-1 text-f10 uppercase tracking-cs1 transition-colors"
-            :class="pickerSource === src ? 'bg-secondary text-foreground' : 'text-muted-foreground hover:text-foreground'"
+            class="flex items-center justify-center gap-1.5 rounded px-2.5 text-f10 uppercase tracking-cs1 transition-colors"
+            :class="[pickerSource === src ? 'bg-secondary text-foreground' : 'text-muted-foreground hover:text-foreground', isCompact ? 'h-9 flex-1' : 'py-1']"
             :title="src === 'all' ? 'Browse every ' + picker.kind + ' in the game' : src === 'owned' ? 'Only ' + picker.kind + 's you own' : 'Layouts saved on the Sticker Crafts tab — up to five stickers placed in one pick'"
             @click="pickerSource = src"
           >
@@ -146,11 +153,11 @@ function useCraft(c: SavedCraft | StoreCraft) {
             >{{ pickerCrafts.length }}</span>
           </button>
         </div>
-        <div class="ml-auto flex flex-none items-center gap-2 text-muted-foreground" title="Card size">
+        <div v-if="!isCompact" class="ml-auto flex flex-none items-center gap-2 text-muted-foreground" title="Card size">
           <LayoutGrid class="h-3.5 w-3.5" />
           <input v-model.number="attachCardSize" type="range" min="72" max="200" step="4" class="w-24 accent-[#e0a24a]" />
         </div>
-        <div class="relative w-[240px]">
+        <div class="relative" :class="isCompact ? 'order-4 w-full' : 'w-[240px]'">
           <Search class="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
           <input
             v-model="pickerQuery"
@@ -169,7 +176,8 @@ function useCraft(c: SavedCraft | StoreCraft) {
              modal's own ✕ reads as "close everything", which is the one thing
              it must not do — the edit underneath is unsaved. -->
         <button
-          class="flex flex-none items-center gap-1.5 rounded-md border border-border px-2.5 py-2 text-f10 uppercase tracking-cs1 text-muted-foreground tac-action"
+          class="flex flex-none items-center gap-1.5 rounded-md border border-border px-2.5 text-f10 uppercase tracking-cs1 text-muted-foreground tac-action"
+          :class="isCompact ? 'order-2 ml-auto h-9' : 'py-2'"
           :title="backTitle ?? 'Back to the editor — nothing is applied'"
           @click="picker = null"
         >
@@ -198,11 +206,14 @@ function useCraft(c: SavedCraft | StoreCraft) {
             class="rounded px-2 py-1 font-mono text-f10 uppercase tracking-cs1 transition-colors disabled:opacity-30"
             :class="craftCount === c ? 'bg-secondary text-foreground' : 'text-muted-foreground hover:text-foreground'"
             :disabled="c > craftRoom"
-            :title="c === 0 ? `Every craft that fits: up to ${craftRoom} ${craftRoom === 1 ? 'sticker' : 'stickers'}` : c > craftRoom ? `There ${craftRoom === 1 ? 'is' : 'are'} only ${craftRoom} free sticker ${craftRoom === 1 ? 'slot' : 'slots'}` : `Crafts of exactly ${c} ${c === 1 ? 'sticker' : 'stickers'}`"
+            :title="c === 0 ? `Every craft that fits: up to ${craftRoom} ${craftRoom === 1 ? 'sticker' : 'stickers'}` : c > craftRoom ? (onMat ? `There is room for only ${craftRoom} more on the mat` : `There ${craftRoom === 1 ? 'is' : 'are'} only ${craftRoom} empty sticker ${craftRoom === 1 ? 'slot' : 'slots'}`) : `Crafts of exactly ${c} ${c === 1 ? 'sticker' : 'stickers'}`"
             @click="craftCount = c"
           >{{ c === 0 ? 'Fits' : c }}</button>
         </div>
-        <span class="text-f10 text-muted-foreground">Room for {{ craftRoom }} {{ craftRoom === 1 ? "sticker" : "stickers" }}</span>
+        <span class="text-f10 text-muted-foreground">
+          <template v-if="onMat">Room for {{ craftRoom }} on the mat</template>
+          <template v-else>{{ craftRoom }} empty {{ craftRoom === 1 ? "slot" : "slots" }}</template>
+        </span>
         <div v-if="craftsScope === 'store'" class="ml-auto flex flex-none items-center gap-0.5 rounded-md border border-border p-0.5">
           <button
             v-for="so in (['top', 'new'] as const)"
@@ -344,14 +355,14 @@ function useCraft(c: SavedCraft | StoreCraft) {
               No published crafts {{ craftCount ? `of ${craftCount} ${craftCount === 1 ? 'sticker' : 'stickers'}` : 'that fit here' }} yet.
             </template>
             <template v-else-if="pickerCrafts.length">
-              None of your crafts {{ craftCount ? `has ${craftCount} ${craftCount === 1 ? 'sticker' : 'stickers'}` : 'fits here' }} — there {{ craftRoom === 1 ? 'is' : 'are' }} {{ craftRoom }} free sticker {{ craftRoom === 1 ? 'slot' : 'slots' }}.
+              None of your crafts {{ craftCount ? `has ${craftCount} ${craftCount === 1 ? 'sticker' : 'stickers'}` : 'fits here' }} — {{ onMat ? `there is room for ${craftRoom} more on the mat` : `there ${craftRoom === 1 ? 'is' : 'are'} ${craftRoom} empty sticker ${craftRoom === 1 ? 'slot' : 'slots'}` }}.
             </template>
             <template v-else>
-              No Sticker Crafts saved yet. Lay up to five stickers out on the Sticker Crafts tab, select them and press Save.
+              No Sticker Crafts saved yet. {{ onMat ? "Select up to five stickers on the mat and press Save as craft." : "Lay up to five stickers out on the Sticker Crafts tab, select them and press Save as craft." }}
               <!-- Or use someone else's: the way into the store from an empty shelf. -->
               <div class="mt-4 flex justify-center">
                 <button
-                  class="tac-action tac-on flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-f10 uppercase tracking-cs1"
+                  class="tac-action flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-f10 uppercase tracking-cs1 text-muted-foreground"
                   title="See the crafts other players published"
                   @click="craftsScope = 'store'"
                 >
@@ -401,7 +412,7 @@ function useCraft(c: SavedCraft | StoreCraft) {
              regardless, so the grid above never resizes either way. -->
         <template v-else-if="pickerSource === 'crafts'">
           <template v-if="craftRows.length">
-            {{ craftRows.length }} {{ craftsScope === 'store' ? 'in the store' : craftRows.length === 1 ? 'craft' : 'crafts' }} · a craft goes into the free slots, starting with this one
+            {{ craftRows.length }} {{ craftsScope === 'store' ? 'in the store' : craftRows.length === 1 ? 'craft' : 'crafts' }} · {{ onMat ? "Use lays it on the mat" : "Use fills empty slots from this one; stickers already on the gun move along" }}
           </template>
         </template>
         <template v-else-if="!pickerRows.length"></template>

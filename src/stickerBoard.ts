@@ -65,7 +65,9 @@ export interface StickerBoard {
   dispose(): void;
 }
 
-const GROUP_LINE = 0x6fb3ff;
+/** The dashed box round a group: neutral, so it reads apart from the glow and
+ *  the team accent, as the layer list draws a group. */
+const GROUP_LINE = 0xd9e4de;
 /** Degrees of turn per pixel of a Shift-drag. */
 const TURN_PER_PX = 0.5;
 /** Snapshot size. 2:1, the shape of the library card and the picker tile. */

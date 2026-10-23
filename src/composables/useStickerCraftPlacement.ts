@@ -190,18 +190,20 @@ export function useStickerCraftPlacement(o: {
 
   /**
    * Where a craft of n stickers goes when picked for `slot`: one run of slots
-   * starting there. The slot itself is taken (picking for a full slot replaces
-   * its sticker), the run is opened up at that point, and empty slots are given
-   * back to keep five — the nearest ones after the run first, then before it —
-   * so the gun's own stickers shift as little as they can and keep their order.
-   * [1,1,_,1,_] with a pair picked for slot 3 is [1,1,G,G,1].
+   * starting there. An empty slot is taken; a full one keeps its sticker, which
+   * moves along behind the run — a craft never goes over a sticker already on
+   * the gun. The run is opened up at that point, and empty slots are given back
+   * to keep five — the nearest ones after the run first, then before it — so
+   * the gun's own stickers shift as little as they can and keep their order.
+   * [1,1,_,1,_] with a pair picked for slot 3 is [1,1,G,G,1]; picked for slot
+   * 2 (full) it is [1,G,G,1,1].
    * Null when there aren't enough empty slots (the picker only offers crafts
    * that fit).
    */
   function planRun(c: CraftForm, slot: number, n: number): { slots: number[]; moves: [number, number][] } | null {
     type Cell = { from: number } | "G" | null;
     const arr: Cell[] = Array.from({ length: o.slotCount }, (_, i) => (c.stickers[i] ? { from: i } : null));
-    arr.splice(slot, 1, ...Array<Cell>(n).fill("G"));
+    arr.splice(slot, arr[slot] ? 0 : 1, ...Array<Cell>(n).fill("G"));
     let extra = arr.length - o.slotCount;
     for (let i = slot + n; i < arr.length && extra > 0; ) {
       if (arr[i] === null) {
@@ -281,15 +283,50 @@ export function useStickerCraftPlacement(o: {
     return [...own, ...seated.map(({ m, x, y, r }) => ({ slot: m.slot, image: m.image, x, y, r, w: m.wear }))];
   }
 
+  /** Put the waiting craft down, centred on `spot` (unwrap units). */
+  function land(p: PendingCraft, spot: { u: number; v: number }) {
+    const c = o.craft.value;
+    if (!c || pending.value !== p) return;
+    // The gun's own stickers shift first, then the craft takes its run.
+    const next = arranged(c, p);
+    for (let i = 0; i < o.slotCount; i++) c.stickers[i] = next[i];
+    for (const { m, x, y, r } of seat(p.members, p.frame, spot.u, spot.v, 0)) {
+      const st = p.entry.stickers[p.slots.indexOf(m.slot)];
+      c.stickers[m.slot] = { id: m.id, name: st.name, image: m.image, inst: null, x, y, r, w: m.wear };
+    }
+    group.value = { name: p.entry.name, members: p.members, frame: p.frame, cu: spot.u, cv: spot.v, turn: 0, linked: true };
+    pending.value = null;
+  }
+
+  /**
+   * Place the waiting craft without a drag — the Place button, or a tap on its
+   * card (a finger has no hover, and covers the spot it would drop on). It goes
+   * where its run's own slots put a sticker, centred on them; drag it from
+   * there like any placed craft.
+   */
+  function placeHere() {
+    const p = pending.value;
+    if (!p) return;
+    const at = p.slots.map((s) => p.frame.anchorOf(s)).filter((a): a is NonNullable<typeof a> => !!a);
+    if (!at.length) return;
+    const u = at.reduce((sum, a) => sum + a.offset[0], 0) / at.length;
+    const v = at.reduce((sum, a) => sum + a.offset[1], 0) / at.length;
+    ghost.value = null;
+    land(p, { u, v });
+  }
+
   /**
    * Drag the waiting craft onto the gun, from its floating card or its panel
    * card. Over the sticker surface the stickers themselves are the preview; off
    * it, the card follows the pointer. Letting go on the gun puts the craft down
-   * there; anywhere else it waits again.
+   * there; anywhere else it waits again. A press that never moves is a tap:
+   * placeHere.
    */
   function startDrag(e: PointerEvent) {
     const p = pending.value;
     if (!p || e.button !== 0) return;
+    const x0 = e.clientX;
+    const y0 = e.clientY;
     // The element stays in the page for the whole drag (the floating card only
     // turns transparent), so its pointer capture holds.
     const el = e.currentTarget as HTMLElement;
@@ -320,24 +357,20 @@ export function useStickerCraftPlacement(o: {
       el.removeEventListener("pointercancel", up);
       cancelAnimationFrame(frame);
       frame = 0;
-      // Where it was let go, not where the last frame happened to look.
-      spot = o.viewer()?.stickerSpotAt(ev.clientX, ev.clientY) ?? null;
       dragging.value = false;
       ghost.value = null;
-      const c = o.craft.value;
-      if (ev.type !== "pointerup" || !spot || !c || pending.value !== p) {
+      if (ev.type === "pointerup" && Math.hypot(ev.clientX - x0, ev.clientY - y0) < 5) {
+        o.viewer()?.setStickers(o.placements());
+        placeHere();
+        return;
+      }
+      // Where it was let go, not where the last frame happened to look.
+      spot = o.viewer()?.stickerSpotAt(ev.clientX, ev.clientY) ?? null;
+      if (ev.type !== "pointerup" || !spot || !o.craft.value || pending.value !== p) {
         o.viewer()?.setStickers(o.placements());
         return;
       }
-      // The gun's own stickers shift first, then the craft takes its run.
-      const next = arranged(c, p);
-      for (let i = 0; i < o.slotCount; i++) c.stickers[i] = next[i];
-      for (const { m, x, y, r } of seat(p.members, p.frame, spot.u, spot.v, 0)) {
-        const st = p.entry.stickers[p.slots.indexOf(m.slot)];
-        c.stickers[m.slot] = { id: m.id, name: st.name, image: m.image, inst: null, x, y, r, w: m.wear };
-      }
-      group.value = { name: p.entry.name, members: p.members, frame: p.frame, cu: spot.u, cv: spot.v, turn: 0, linked: true };
-      pending.value = null;
+      land(p, spot);
     };
     el.addEventListener("pointermove", move);
     el.addEventListener("pointerup", up);
@@ -516,6 +549,7 @@ export function useStickerCraftPlacement(o: {
     pickCraft,
     cancel,
     startDrag,
+    placeHere,
     followMove,
     followTurn,
     moveWithGroup,

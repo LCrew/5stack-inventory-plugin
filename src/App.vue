@@ -4550,11 +4550,13 @@ const pickerView = useAttachmentPicker({
   inventory,
   attachedName,
   fail,
-  // A Sticker Craft goes into the gun's free slots (counting the one being
-  // filled), so that is how many stickers one may bring.
-  craftRoom: (slot) => {
+  // How many stickers a Sticker Craft may bring: the gun's EMPTY slots. A craft
+  // never goes over a sticker already on the gun: picked from a full slot it
+  // goes in front of that sticker and moves it along (planRun in
+  // useStickerCraftPlacement).
+  craftRoom: () => {
     const st = (craft.value?.stickers ?? []).slice(0, stickerSlotCount);
-    return stickerSlotCount - st.filter(Boolean).length + (st[slot] ? 1 : 0);
+    return stickerSlotCount - st.filter(Boolean).length;
   },
 });
 const { picker, openPicker } = pickerView;
@@ -7977,8 +7979,14 @@ function onGlobalKey(e: KeyboardEvent) {
       dismissLoadout3d();
       e.stopPropagation();
     } else if (picker.value) {
-      // Nested inside the craft sheet — closes back to it, not out of it.
-      picker.value = null;
+      // Nested inside the craft sheet — closes back to it, not out of it. A
+      // Sticker Craft's 3D look, over the picker, goes first.
+      if (pickerView.previewCraft.value) pickerView.previewCraft.value = null;
+      else picker.value = null;
+      e.stopPropagation();
+    } else if (craftPending.value) {
+      // A Sticker Craft waiting over the gun: put it back, keep the edit.
+      craftDrop.cancel();
       e.stopPropagation();
     } else if (craft.value) {
       closeCraft();
@@ -10438,22 +10446,28 @@ if (MDEBUG) {
                      gun is not, so the first thing it says is "drag me". Made
                      transparent rather than removed while dragging: the drag
                      holds its pointer capture on this element. -->
-                <div v-if="modal3d && craftPending" class="pointer-events-none absolute inset-x-0 top-[13%] z-[6] flex justify-center">
+                <!-- On a phone it is small and up out of the way: a big card over
+                     the stage covered the gun it is meant to be dropped on. -->
+                <div
+                  v-if="modal3d && craftPending"
+                  class="pointer-events-none absolute inset-x-0 z-[6] flex justify-center"
+                  :class="isCompact ? 'top-2' : 'top-[13%]'"
+                >
                   <div
-                    class="animate-craft-float pointer-events-auto flex cursor-grab flex-col items-center gap-1.5 rounded-lg border border-dashed border-[color:var(--acc)] bg-card/75 p-2 shadow-lg backdrop-blur transition-opacity"
-                    :class="craftDragging ? 'opacity-0' : ''"
+                    class="animate-craft-float pointer-events-auto flex cursor-grab flex-col items-center gap-1.5 rounded-lg border border-dashed border-[color:var(--acc)] bg-card/75 shadow-lg backdrop-blur transition-opacity"
+                    :class="[craftDragging ? 'opacity-0' : '', isCompact ? 'p-1.5' : 'p-2']"
                     style="touch-action: none"
-                    :title="'Drag onto the gun to place ' + craftPending.entry.name"
+                    :title="'Drag onto the gun to place ' + craftPending.entry.name + ', or tap to put it on its slots'"
                     @pointerdown="craftDrop.startDrag"
                   >
-                    <div class="grid h-20 w-40 place-items-center overflow-hidden rounded bg-[#183a31]/70">
+                    <div class="grid place-items-center overflow-hidden rounded bg-[#183a31]/70" :class="isCompact ? 'h-12 w-24' : 'h-20 w-40'">
                       <img v-if="craftPending.entry.preview" :src="craftPending.entry.preview" alt="" class="h-full w-full object-cover" draggable="false" />
                       <div v-else class="flex flex-wrap items-center justify-center gap-1 p-1">
-                        <img v-for="(cs, ci) in craftPending.entry.stickers" :key="ci" :src="cs.image" alt="" class="h-8 w-8 object-contain" draggable="false" />
+                        <img v-for="(cs, ci) in craftPending.entry.stickers" :key="ci" :src="cs.image" alt="" class="object-contain" :class="isCompact ? 'h-5 w-5' : 'h-8 w-8'" draggable="false" />
                       </div>
                     </div>
                     <span class="flex items-center gap-1.5 text-f10 uppercase tracking-cs1 text-foreground">
-                      <MoveIcon class="h-3.5 w-3.5 text-[color:var(--acc)]" /> Drag onto the gun
+                      <MoveIcon class="h-3.5 w-3.5 text-[color:var(--acc)]" /> {{ isCompact ? 'Drag or tap' : 'Drag onto the gun · or click' }}
                     </span>
                   </div>
                 </div>
@@ -10610,7 +10624,9 @@ if (MDEBUG) {
               >
                 <div class="grid h-10 w-20 flex-none place-items-center overflow-hidden rounded bg-[#183a31]">
                   <img v-if="craftPending.entry.preview" :src="craftPending.entry.preview" alt="" class="h-full w-full object-cover" draggable="false" />
-                  <Layers v-else class="h-4 w-4 text-muted-foreground" />
+                  <div v-else class="flex items-center justify-center gap-0.5 p-0.5">
+                    <img v-for="(cs, ci) in craftPending.entry.stickers" :key="ci" :src="cs.image" alt="" class="h-5 w-5 object-contain" draggable="false" />
+                  </div>
                 </div>
                 <div class="min-w-0 flex-1">
                   <div class="truncate text-f11 text-foreground">{{ craftPending.entry.name }}</div>
@@ -10618,9 +10634,17 @@ if (MDEBUG) {
                     Drag onto the gun · slot{{ craftPending.slots.length > 1 ? 's' : '' }} {{ craftPending.slots[0] + 1 }}<template v-if="craftPending.slots.length > 1">–{{ craftPending.slots[craftPending.slots.length - 1] + 1 }}</template>
                   </div>
                 </div>
+                <!-- No drag needed: it goes where its slots put a sticker, and
+                     can be dragged on from there. -->
                 <button
-                  class="grid h-6 w-6 flex-none place-items-center rounded text-muted-foreground transition-colors hover:text-foreground"
-                  title="Put it back — nothing is placed"
+                  class="flex h-7 flex-none items-center gap-1 rounded-md border border-border px-2 text-f9 uppercase tracking-cs1 text-muted-foreground tac-action"
+                  title="Put it on its slots without dragging — move it on the gun afterwards"
+                  @pointerdown.stop
+                  @click="craftDrop.placeHere()"
+                >{{ tr("inventory.stickerCrafts.place", "Place") }}</button>
+                <button
+                  class="grid h-7 w-7 flex-none place-items-center rounded text-muted-foreground transition-colors hover:text-foreground"
+                  title="Put it back — nothing is placed (Esc)"
                   @pointerdown.stop
                   @click="craftDrop.cancel()"
                 ><X class="h-3.5 w-3.5" /></button>
@@ -10631,7 +10655,7 @@ if (MDEBUG) {
               <div
                 v-else-if="craftGroup"
                 class="mb-1.5 flex items-center gap-1.5 text-f9 uppercase tracking-cs1"
-                :class="craftGroup.linked ? 'text-[#9fcbff]' : 'text-muted-foreground'"
+                :class="craftGroup.linked ? 'text-[color:var(--acc)]' : 'text-muted-foreground'"
               >
                 <Link2 v-if="craftGroup.linked" class="h-3 w-3 flex-none" />
                 <UngroupIcon v-else class="h-3 w-3 flex-none" />
@@ -10659,15 +10683,15 @@ if (MDEBUG) {
                     stickerDropOn === idx && stickerDragFrom !== idx && '!border-solid !border-[color:var(--acc)]',
                     stickerDragFrom === idx && 'opacity-40',
                     craftPendingSlots.has(idx) && '!border-dashed !border-[color:var(--acc)]',
-                    craftGroupSlots.has(idx) && (craftGroup?.linked ? 'shadow-[inset_0_-2px_0_#6fb3ff]' : 'shadow-[inset_0_-2px_0_#6fb3ff59]'),
+                    craftGroupSlots.has(idx) && (craftGroup?.linked ? 'shadow-[inset_0_-2px_0_var(--acc)]' : 'shadow-[inset_0_-2px_0_color-mix(in_srgb,var(--acc)_35%,transparent)]'),
                   ]"
-                  :title="st ? st.name + ' (slot ' + (idx + 1) + ') — drag onto another slot to reorder; later slots draw on top' : 'Add a sticker in slot ' + (idx + 1)"
-                  :draggable="!!st"
-                  @click="openPicker('sticker', idx)"
+                  :title="craftPendingSlots.has(idx) ? 'Kept for ' + craftPending!.entry.name + ' — place it or put it back first' : st ? st.name + ' (slot ' + (idx + 1) + ') — drag onto another slot to reorder; later slots draw on top' : 'Add a sticker in slot ' + (idx + 1)"
+                  :draggable="!!st && !craftPending"
+                  @click="!craftPendingSlots.has(idx) && openPicker('sticker', idx)"
                   @dragstart="stickerDragFrom = idx; $event.dataTransfer?.setData('text/plain', String(idx))"
-                  @dragover.prevent="stickerDragFrom != null && (stickerDropOn = idx)"
+                  @dragover.prevent="!craftPending && stickerDragFrom != null && (stickerDropOn = idx)"
                   @dragleave="stickerDropOn === idx && (stickerDropOn = null)"
-                  @drop.prevent="onStickerTileDrop(idx)"
+                  @drop.prevent="!craftPending && onStickerTileDrop(idx)"
                   @dragend="stickerDragFrom = null; stickerDropOn = null"
                 >
                   <span class="absolute bottom-0 right-0.5 z-[1] font-mono text-f8 text-muted-foreground/40">{{ idx + 1 }}</span>

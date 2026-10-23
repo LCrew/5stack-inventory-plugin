@@ -10,6 +10,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import { ArrowBigDown, ArrowBigUp, Loader2, X } from "lucide-vue-next";
 import { Z } from "../zLayers";
+import { CTA_CLASS, CTA_STYLE } from "../ctaButton";
 import { useViewerMount } from "../composables/useViewerMount";
 import { QUAD_MODELS } from "../viewerModel";
 import type { SavedCraft, StoreCraft } from "../stickerCraftsModel";
@@ -38,6 +39,9 @@ const viewer = useViewerMount({
 const busy = viewer.busy;
 // The single-sticker preview's own options (openPreview3d in App.vue), with
 // the craft in place of one decal.
+// A dialog takes the keyboard: Close first, so Esc and Tab start inside it.
+const closeEl = ref<HTMLButtonElement | null>(null);
+onMounted(() => closeEl.value?.focus());
 onMounted(() =>
   viewer.mount(QUAD_MODELS.sticker, () => ({
     kind: "sticker",
@@ -71,8 +75,9 @@ const n = computed(() => props.craft.stickers.length);
           </div>
         </div>
         <button
+          ref="closeEl"
           class="flex h-7 w-7 flex-none items-center justify-center rounded text-muted-foreground transition-colors hover:text-foreground"
-          title="Close"
+          title="Close (Esc)"
           @click="emit('close')"
         >
           <X class="h-4 w-4" />
@@ -97,7 +102,7 @@ const n = computed(() => props.craft.stickers.length);
         <div v-if="store" class="flex items-center gap-0.5">
           <button
             class="grid h-7 w-7 place-items-center rounded transition-colors disabled:opacity-35"
-            :class="store.myVote === 1 ? 'text-[#7ee08a]' : 'text-muted-foreground hover:text-foreground'"
+            :class="store.myVote === 1 ? 'text-success' : 'text-muted-foreground hover:text-foreground'"
             :disabled="store.mine"
             :title="store.mine ? 'Your craft' : store.myVote === 1 ? 'Take your upvote back' : 'Upvote'"
             @click="emit('vote', 1)"
@@ -112,7 +117,9 @@ const n = computed(() => props.craft.stickers.length);
           ><ArrowBigDown class="h-4 w-4" /></button>
         </div>
         <button
-          class="tac-action tac-on ml-auto flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-f10 uppercase tracking-cs1 disabled:opacity-35"
+          :class="CTA_CLASS"
+          :style="CTA_STYLE"
+          class="ml-auto"
           :disabled="!fits"
           :title="fits ? 'Use this craft' : `Needs ${n} free sticker slots — there ${room === 1 ? 'is' : 'are'} ${room}`"
           @click="emit('use')"

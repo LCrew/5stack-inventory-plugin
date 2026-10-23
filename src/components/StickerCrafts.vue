@@ -21,6 +21,7 @@ import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, shallowRef
 import {
   BookmarkPlus,
   BringToFront,
+  Check,
   Copy,
   Globe,
   GripVertical,
@@ -32,6 +33,7 @@ import {
   RotateCw,
   ScanEye,
   SendToBack,
+  Square,
   Sticker,
   Trash2,
   Ungroup,
@@ -61,6 +63,7 @@ import {
 import type { StickerBoard } from "../stickerBoard";
 import AttachmentPicker from "./AttachmentPicker.vue";
 import PillTabs from "./PillTabs.vue";
+import { CTA_CLASS, CTA_STYLE } from "../ctaButton";
 
 const props = defineProps<{
   /** Every owned row — the picker's Owned shelf reads it. */
@@ -257,6 +260,18 @@ const selectGroup = (id: string, shift: boolean) => {
   selected.value = shift ? new Set([...selected.value, ...ids]) : new Set(ids);
 };
 const selectLayer = (uid: string, shift: boolean) => pick(uid, { shift, alt: true });
+/** A finger has no Shift: the layer list's tick boxes add and take away. */
+const tickLayer = (uid: string) => selectLayer(uid, true);
+const tickGroup = (id: string) => {
+  const ids = members(id).map((m) => m.uid);
+  const next = new Set(selected.value);
+  const all = ids.every((u) => next.has(u));
+  for (const u of ids) {
+    if (all) next.delete(u);
+    else next.add(u);
+  }
+  selected.value = next;
+};
 
 // ---- editing --------------------------------------------------------------------
 function patchSelected(fn: (s: BoardSticker) => void) {
@@ -493,12 +508,23 @@ async function renderPreview(id: string) {
     /* no preview is a plainer card, not an error */
   }
 }
+/** `base`, or "base (2)", "base (3)"… — the first no saved craft is called. */
+function uniqueName(base: string) {
+  const taken = new Set(library.value.map((c) => c.name));
+  if (!taken.has(base)) return base;
+  let n = 2;
+  while (taken.has(`${base} (${n})`)) n++;
+  return `${base} (${n})`;
+}
+/** The card just saved: scrolled to and lit, so Save visibly did something. */
+const justSaved = ref<string | null>(null);
+let justSavedTimer: ReturnType<typeof setTimeout> | undefined;
 function saveSelection() {
   if (!canSave.value) return;
   const c = centroid(sel.value);
   const entry: SavedCraft = {
     id: newId(),
-    name: selGroup.value?.name ?? `Grouping ${library.value.length + 1}`,
+    name: uniqueName(selGroup.value?.name ?? `Craft ${library.value.length + 1}`),
     savedAt: Date.now(),
     // Draw order, bottom first: on a gun that becomes slot order.
     stickers: sel.value.map((s): CraftSticker => ({
@@ -514,6 +540,12 @@ function saveSelection() {
   library.value = [entry, ...library.value];
   persistCraft(entry);
   void renderPreview(entry.id);
+  justSaved.value = entry.id;
+  clearTimeout(justSavedTimer);
+  justSavedTimer = setTimeout(() => (justSaved.value = null), 1600);
+  void nextTick(() =>
+    rootEl.value?.querySelector(`[data-craft="${entry.id}"]`)?.scrollIntoView({ block: "nearest", behavior: "smooth" }),
+  );
 }
 /** Lay a saved craft down in the middle of the mat, as a grouping again. */
 function placeSaved(entry: SavedCraft) {
@@ -736,7 +768,9 @@ void loadAll();
 function onKey(e: KeyboardEvent) {
   if (picker.value) {
     if (e.key === "Escape") {
-      picker.value = null;
+      // A craft's 3D look sits over the picker: it goes first.
+      if (pickerView.previewCraft.value) pickerView.previewCraft.value = null;
+      else picker.value = null;
       e.stopPropagation();
     }
     return;
@@ -785,6 +819,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("pointercancel", rowUp);
   clearTimeout(clearTimer);
   clearTimeout(armTimer);
+  clearTimeout(justSavedTimer);
   // Send a save that was still waiting on its debounce.
   flushBoard();
   board.value?.dispose();
@@ -792,15 +827,32 @@ onBeforeUnmount(() => {
 });
 
 const VIEWS = [
-  { id: "angled", label: "Angled", hint: "Three-quarter view of the mat" },
-  { id: "top", label: "Top", hint: "Straight down, for measuring (V)" },
+  { id: "angled", label: "Angled", short: "3D", hint: "Three-quarter view of the mat" },
+  { id: "top", label: "Top", short: "Top", hint: "Straight down, for measuring (V)" },
 ] as const;
+/** The mat's key hint, for what is selected now: [keys, what they do] pairs. */
+const keyHint = computed<[string, string][]>(() => {
+  if (!sel.value.length) return [["Click", "select"], ["Shift-click", "select several"], ["Right-drag", "pan"]];
+  const out: [string, string][] = [["Drag", "move"], ["Shift + drag", "turn"], ["Q / E", "turn 5°"], ["Arrows", "nudge"]];
+  if (sel.value.some((s) => s.group)) out.push(["Alt-click", "one of a group"]);
+  return out;
+});
 const PILL =
   "relative z-[1] flex h-6 items-center justify-center gap-1.5 rounded-md px-2.5 text-f10 uppercase tracking-wider transition-colors";
-const BTN =
-  "flex flex-none items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-f10 uppercase tracking-cs1 text-muted-foreground tac-action disabled:opacity-35";
-const ICON_BTN =
-  "grid h-7 flex-1 place-items-center rounded-md border border-border text-muted-foreground tac-action disabled:opacity-35";
+// A finger needs about 40px: the same buttons, taller, on a phone.
+const BTN = computed(
+  () =>
+    `flex flex-none items-center gap-1.5 rounded-md border border-border px-2.5 text-f10 uppercase tracking-cs1 text-muted-foreground tac-action disabled:opacity-35 ${props.compact ? "h-10" : "py-1.5"}`,
+);
+const ICON_BTN = computed(
+  () =>
+    `grid flex-1 place-items-center rounded-md border border-border text-muted-foreground tac-action disabled:opacity-35 ${props.compact ? "h-10" : "h-7"}`,
+);
+/** The Selection block's actions: icon and a word, two by two. */
+const ACT_BTN = computed(
+  () =>
+    `flex items-center justify-center gap-1.5 rounded-md border border-border text-f10 uppercase tracking-cs1 text-muted-foreground tac-action disabled:opacity-35 ${props.compact ? "h-10" : "h-7"}`,
+);
 const FIELD =
   "h-7 w-full min-w-0 rounded-md border border-border bg-background px-2 font-mono text-f11 outline-none transition-colors focus:border-[color:var(--acc)]";
 </script>
@@ -817,7 +869,7 @@ const FIELD =
         title="Nothing here is saved to your inventory or sent to the game until you apply a craft to a weapon and save it there"
       >{{ tr("inventory.stickerCrafts.experimental", "Experimental") }}</span>
       <span v-if="!compact" class="flex-none font-mono text-f10 text-muted-foreground/70">
-        {{ stickers.length }} {{ stickers.length === 1 ? "sticker" : "stickers" }}<template v-if="groups.length"> · {{ groups.length }} {{ groups.length === 1 ? "group" : "groups" }}</template>
+        {{ stickers.length }} / {{ MAX_ON_BOARD }} stickers<template v-if="groups.length"> · {{ groups.length }} {{ groups.length === 1 ? "group" : "groups" }}</template>
       </span>
       <!-- Where it is kept, and whether the last change got there. The account
            is the normal case and only speaks up while saving or on a failure;
@@ -844,7 +896,7 @@ const FIELD =
           <span v-if="!compact">{{ clearArmed ? tr("inventory.stickerCrafts.clearConfirm", "Press again") : tr("inventory.stickerCrafts.clear", "Clear") }}</span>
         </button>
         <button
-          :class="[BTN, 'tac-on']"
+          :class="BTN"
           :disabled="boardFull || !loaded"
           :title="boardFull ? `The mat holds ${MAX_ON_BOARD} stickers` : 'Pick a sticker, or a saved craft, to lay on the mat'"
           @click="openPicker('sticker')"
@@ -873,7 +925,7 @@ const FIELD =
           >
             <template #default="{ item }">
               <component :is="(item as (typeof VIEWS)[number]).id === 'top' ? ScanEye : View" class="h-3.5 w-3.5" />
-              <span v-if="!compact">{{ (item as (typeof VIEWS)[number]).label }}</span>
+              <span>{{ compact ? (item as (typeof VIEWS)[number]).short : (item as (typeof VIEWS)[number]).label }}</span>
             </template>
           </PillTabs>
           <button
@@ -883,17 +935,19 @@ const FIELD =
             @click="snap = !snap"
           >
             <Magnet class="h-3.5 w-3.5" />
-            <span v-if="!compact">{{ tr("inventory.stickerCrafts.snap", "Snap") }}</span>
+            <span>{{ tr("inventory.stickerCrafts.snap", "Snap") }}</span>
           </button>
         </div>
 
-        <!-- How to drive it. Desktop only: on touch it is drag to move, and the
-             two-finger gestures are the camera's. -->
+        <!-- How to drive it, for what is selected now. Desktop only: on touch
+             it is drag to move, and the two-finger gestures are the camera's. -->
         <div
           v-if="!compact && stickers.length"
-          class="pointer-events-none absolute bottom-3 left-3 rounded-md bg-card/70 px-2.5 py-1.5 text-f10 text-muted-foreground backdrop-blur"
+          class="pointer-events-none absolute bottom-3 left-3 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md bg-card/70 px-2.5 py-1.5 text-f10 text-muted-foreground backdrop-blur"
         >
-          Drag to move · Shift + drag to turn · Shift-click to add · Alt-click one of a group · Q / E turn · Arrows nudge · Right-drag pans
+          <span v-for="[keys, what] in keyHint" :key="keys" class="flex items-center gap-1.5">
+            <kbd class="rounded border border-border px-1 font-mono text-f9 text-foreground/80">{{ keys }}</kbd>{{ what }}
+          </span>
         </div>
 
         <div v-if="boardLoading || (!loaded && !loadError)" class="absolute inset-0 grid place-items-center">
@@ -910,14 +964,24 @@ const FIELD =
         </div>
         <div
           v-else-if="!stickers.length"
-          class="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-3"
+          class="pointer-events-none absolute inset-0 flex items-center justify-center p-4"
         >
-          <span class="rounded-md bg-card/75 px-3 py-1.5 text-f11 uppercase tracking-cs1 text-muted-foreground backdrop-blur">
-            {{ tr("inventory.stickerCrafts.empty", "The mat is empty") }}
-          </span>
-          <button :class="[BTN, 'tac-on pointer-events-auto bg-card/80 backdrop-blur']" @click="openPicker('sticker')">
-            <Sticker class="h-3.5 w-3.5" /> {{ tr("inventory.stickerCrafts.addFirst", "Add your first sticker") }}
-          </button>
+          <div class="flex max-w-[360px] flex-col items-center gap-3 rounded-lg bg-card/80 px-5 py-4 text-center backdrop-blur">
+            <Sticker class="h-8 w-8 text-muted-foreground opacity-40" />
+            <span class="text-f13 text-foreground">{{ tr("inventory.stickerCrafts.emptyTitle", "Build a sticker combo") }}</span>
+            <div class="flex flex-col gap-1 text-left text-f11 text-muted-foreground">
+              <div v-for="(step, si) in [
+                tr('inventory.stickerCrafts.step1', 'Add up to five stickers and arrange them on the mat.'),
+                tr('inventory.stickerCrafts.step2', 'Select them and press Save as craft.'),
+                tr('inventory.stickerCrafts.step3', 'In the weapon editor, open a sticker slot and choose Sticker Crafts to put the whole combo on a gun.'),
+              ]" :key="si" class="flex gap-2">
+                <span class="flex-none font-mono text-[color:var(--acc)]">{{ si + 1 }}</span><span>{{ step }}</span>
+              </div>
+            </div>
+            <button :class="[BTN, 'pointer-events-auto bg-card/80']" @click="openPicker('sticker')">
+              <Plus class="h-3.5 w-3.5" /> {{ tr("inventory.stickerCrafts.addFirst", "Add a sticker") }}
+            </button>
+          </div>
         </div>
         <div v-if="pickerError" class="absolute right-3 top-3 flex items-center gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-1.5 text-f11 text-destructive">
           {{ pickerError }}
@@ -942,7 +1006,7 @@ const FIELD =
           </header>
 
           <div v-if="!sel.length" class="text-f11 text-muted-foreground/70">
-            Click a sticker on the mat, or one in the list below.
+            {{ compact ? "Tap a sticker on the mat, or tick one in the list below." : "Click a sticker on the mat, or one in the list below. Shift-click adds more." }}
           </div>
 
           <template v-else>
@@ -986,25 +1050,26 @@ const FIELD =
               />
               <span class="w-11 flex-none text-right font-mono text-f9 text-muted-foreground">{{ fmt(sel[0].wear, 2) }}</span>
             </div>
-            <div class="flex items-center gap-1.5">
-              <button :class="ICON_BTN" title="Bring to front" @click="restack('front')"><BringToFront class="h-3.5 w-3.5" /></button>
-              <button :class="ICON_BTN" title="Send to back" @click="restack('back')"><SendToBack class="h-3.5 w-3.5" /></button>
-              <button :class="ICON_BTN" title="Duplicate (Ctrl/⌘ + D)" @click="duplicateSelection"><Copy class="h-3.5 w-3.5" /></button>
+            <div class="grid grid-cols-2 gap-1.5">
+              <button :class="ACT_BTN" title="Bring to front — drawn over the others" @click="restack('front')"><BringToFront class="h-3.5 w-3.5" /> Front</button>
+              <button :class="ACT_BTN" title="Send to back — drawn under the others" @click="restack('back')"><SendToBack class="h-3.5 w-3.5" /> Back</button>
+              <button :class="ACT_BTN" title="Duplicate (Ctrl/⌘ + D)" @click="duplicateSelection"><Copy class="h-3.5 w-3.5" /> Copy</button>
               <button
-                :class="[ICON_BTN, armed === 'remove' ? '!border-destructive/60 !text-destructive' : '']"
+                :class="[ACT_BTN, armed === 'remove' ? '!border-destructive/60 !text-destructive' : '']"
                 :title="armed === 'remove' ? 'Press again to take the grouping off the mat' : 'Remove from the mat (Delete)'"
                 @click="removeSelectionAsked"
-              ><Trash2 class="h-3.5 w-3.5" /></button>
+              ><Trash2 class="h-3.5 w-3.5" /> {{ armed === 'remove' ? 'Again' : 'Remove' }}</button>
             </div>
           </template>
         </section>
 
-        <!-- GROUPING -->
+        <!-- CRAFT: save the selection as a Sticker Craft. Grouping is a mat
+             convenience under it, not a step before it. -->
         <section class="sc-block">
           <header class="mb-2 flex items-baseline gap-2">
-            <span class="text-f10 uppercase tracking-cs1 text-muted-foreground">{{ tr("inventory.stickerCrafts.grouping", "Grouping") }}</span>
+            <span class="text-f10 uppercase tracking-cs1 text-muted-foreground">{{ tr("inventory.stickerCrafts.grouping", "Craft") }}</span>
             <span class="ml-auto truncate text-f11" :class="tooMany ? 'text-destructive' : 'text-muted-foreground'">
-              <template v-if="tooMany">{{ MAX_PER_GROUPING }} stickers at most</template>
+              <template v-if="tooMany">Select {{ MAX_PER_GROUPING }} or fewer</template>
               <template v-else-if="selGroup">{{ selGroup.name }}</template>
               <template v-else-if="canGroup">{{ sel.length }} / {{ MAX_PER_GROUPING }}</template>
             </span>
@@ -1018,29 +1083,31 @@ const FIELD =
             title="Rename this grouping"
             @change="renameGroup(selGroup.id, ($event.target as HTMLInputElement).value)"
           />
-          <div class="grid grid-cols-3 gap-1.5">
+          <button
+            :class="CTA_CLASS"
+            :style="CTA_STYLE"
+            class="mb-2 w-full"
+            :disabled="!canSave"
+            :title="tooMany ? `A craft holds at most ${MAX_PER_GROUPING} stickers — one weapon's worth` : 'Keep the selection as a Sticker Craft — any gun\'s sticker slot offers it under Sticker Crafts'"
+            @click="saveSelection"
+          >
+            <BookmarkPlus class="h-3.5 w-3.5" /> {{ tr("inventory.stickerCrafts.saveCraft", "Save as craft") }}
+          </button>
+          <div class="grid grid-cols-2 gap-1.5">
             <button
               :class="BTN"
               class="justify-center"
               :disabled="!canGroup"
-              :title="tooMany ? `A grouping holds at most ${MAX_PER_GROUPING} stickers — one weapon's worth` : 'Bind the selection into one grouping (Ctrl/⌘ + G)'"
+              :title="tooMany ? `A group holds at most ${MAX_PER_GROUPING} stickers — one weapon's worth` : 'Keep the selection together on the mat: it moves and turns as one (Ctrl/⌘ + G)'"
               @click="groupSelection"
             >
               <Group class="h-3.5 w-3.5" /> Group
             </button>
-            <button :class="BTN" class="justify-center" :disabled="!canUngroup" title="Break the selected groupings up (Ctrl/⌘ + Shift + G)" @click="ungroupSelection">
-              <Ungroup class="h-3.5 w-3.5" /> Split
-            </button>
-            <button
-              :class="BTN"
-              class="justify-center"
-              :disabled="!canSave"
-              :title="tooMany ? `A craft holds at most ${MAX_PER_GROUPING} stickers — one weapon's worth` : 'Keep the selection as a Sticker Craft — the weapon editor\'s sticker picker offers it'"
-              @click="saveSelection"
-            >
-              <BookmarkPlus class="h-3.5 w-3.5" /> Save
+            <button :class="BTN" class="justify-center" :disabled="!canUngroup" title="Let the selected groups' stickers move on their own (Ctrl/⌘ + Shift + G)" @click="ungroupSelection">
+              <Ungroup class="h-3.5 w-3.5" /> Ungroup
             </button>
           </div>
+          <div class="mt-1.5 text-f10 text-muted-foreground/70">Group keeps stickers together on the mat. A saved craft remembers the layout either way.</div>
         </section>
 
         <!-- ON THE MAT — the layer list, top-most first. Drag to reorder. -->
@@ -1048,6 +1115,13 @@ const FIELD =
           <header class="mb-2 flex items-baseline gap-2">
             <span class="text-f10 uppercase tracking-cs1 text-muted-foreground">{{ tr("inventory.stickerCrafts.onMat", "On the mat") }}</span>
             <span class="ml-auto text-f10 text-muted-foreground/70">{{ stickers.length > 1 ? "Top first · drag to reorder" : "" }}</span>
+            <button
+              v-if="stickers.length > 1"
+              class="flex-none text-f9 uppercase tracking-cs1 text-muted-foreground transition-colors hover:text-foreground"
+              :class="compact ? 'h-8 px-1' : ''"
+              title="Select every sticker on the mat (Ctrl/⌘ + A)"
+              @click="selectAll"
+            >All</button>
           </header>
           <div v-if="!stickers.length" class="text-f11 text-muted-foreground/70">No stickers yet.</div>
           <div class="flex select-none flex-col gap-1">
@@ -1055,14 +1129,22 @@ const FIELD =
               <div
                 v-if="u.kind === 'group'"
                 data-list="top"
-                class="rounded-md border border-[#6fb3ff]/25"
+                class="rounded-md border border-dashed border-foreground/25"
                 :class="dropClass('top', ui, layerUnits.length)"
               >
                 <div
-                  class="flex w-full cursor-grab items-center gap-1.5 px-1.5 py-1 text-f10 uppercase tracking-cs1 text-[#9fcbff] transition-colors hover:text-foreground"
+                  class="flex w-full cursor-grab items-center gap-1.5 px-1.5 py-1 text-f10 uppercase tracking-cs1 text-foreground/80 transition-colors hover:text-foreground"
+                  :class="compact ? 'min-h-[40px]' : ''"
                   :title="'Select ' + u.group.name + ' — drag to move it up or down'"
                   @pointerdown="rowDown($event, 'top', ui, (shift) => selectGroup(u.group.id, shift))"
                 >
+                  <button
+                    v-if="compact"
+                    class="grid h-9 w-9 flex-none place-items-center"
+                    :title="'Add or take away ' + u.group.name"
+                    @pointerdown.stop
+                    @click.stop="tickGroup(u.group.id)"
+                  ><component :is="u.members.every((m) => selected.has(m.uid)) ? Check : Square" class="h-4 w-4" /></button>
                   <span class="sc-grip flex flex-none items-center self-stretch text-muted-foreground/60"><GripVertical class="h-3 w-3" /></span>
                   <Group class="h-3 w-3 flex-none" />
                   <span class="truncate">{{ u.group.name }}</span>
@@ -1076,6 +1158,13 @@ const FIELD =
                   :class="[selected.has(s.uid) ? 'sc-row-on' : '', dropClass('g:' + u.group.id, mi, u.members.length)]"
                   @pointerdown="rowDown($event, 'g:' + u.group.id, mi, (shift) => selectLayer(s.uid, shift))"
                 >
+                  <button
+                    v-if="compact"
+                    class="grid h-9 w-9 flex-none place-items-center"
+                    title="Add or take away"
+                    @pointerdown.stop
+                    @click.stop="tickLayer(s.uid)"
+                  ><component :is="selected.has(s.uid) ? Check : Square" class="h-4 w-4" /></button>
                   <span class="sc-grip flex flex-none items-center self-stretch text-muted-foreground/60"><GripVertical class="h-3 w-3" /></span>
                   <img :src="s.image" alt="" class="h-6 w-6 flex-none object-contain" draggable="false" />
                   <span class="truncate">{{ shortName(s.name) }}</span>
@@ -1088,6 +1177,13 @@ const FIELD =
                 :class="[selected.has(u.s.uid) ? 'sc-row-on' : '', dropClass('top', ui, layerUnits.length)]"
                 @pointerdown="rowDown($event, 'top', ui, (shift) => selectLayer(u.s.uid, shift))"
               >
+                <button
+                  v-if="compact"
+                  class="grid h-9 w-9 flex-none place-items-center"
+                  title="Add or take away"
+                  @pointerdown.stop
+                  @click.stop="tickLayer(u.s.uid)"
+                ><component :is="selected.has(u.s.uid) ? Check : Square" class="h-4 w-4" /></button>
                 <span class="sc-grip flex flex-none items-center self-stretch text-muted-foreground/60"><GripVertical class="h-3 w-3" /></span>
                 <img :src="u.s.image" alt="" class="h-6 w-6 flex-none object-contain" draggable="false" />
                 <span class="truncate">{{ shortName(u.s.name) }}</span>
@@ -1103,10 +1199,17 @@ const FIELD =
             <span class="ml-auto font-mono text-f10 text-muted-foreground/70">{{ library.length }}</span>
           </header>
           <div v-if="!library.length" class="text-f11 text-muted-foreground/70">
-            Select up to {{ MAX_PER_GROUPING }} stickers and press Save. The weapon editor's sticker picker offers saved crafts under Sticker Crafts.
+            {{ compact ? `Tick up to ${MAX_PER_GROUPING} stickers in the list and tap Save as craft.` : `Shift-click up to ${MAX_PER_GROUPING} stickers and press Save as craft.` }}
+            Then open any gun's sticker slot and choose Sticker Crafts.
           </div>
           <div class="flex flex-col gap-2">
-            <div v-for="entry in library" :key="entry.id" class="rounded-md border border-border bg-background/60 p-2">
+            <div
+              v-for="entry in library"
+              :key="entry.id"
+              :data-craft="entry.id"
+              class="rounded-md border bg-background/60 p-2 transition-[border-color,box-shadow] duration-500"
+              :class="justSaved === entry.id ? 'animate-cell-in border-[color:var(--acc)] shadow-[0_0_0_1px_var(--acc)]' : 'border-border'"
+            >
               <!-- The board's own top-down render of the craft. -->
               <div class="relative mb-2 grid aspect-[2/1] w-full place-items-center overflow-hidden rounded bg-[#183a31]">
                 <img v-if="entry.preview" :src="entry.preview" alt="" class="h-full w-full object-cover" draggable="false" />
@@ -1121,19 +1224,19 @@ const FIELD =
                   title="Rename"
                   @change="renameSaved(entry, ($event.target as HTMLInputElement).value)"
                 />
-                <span class="flex-none font-mono text-f9 text-muted-foreground">{{ entry.stickers.length }}</span>
+                <span class="flex-none font-mono text-f9 text-muted-foreground" :title="entry.stickers.length + (entry.stickers.length === 1 ? ' sticker' : ' stickers')">×{{ entry.stickers.length }}</span>
                 <!-- In the Craft Store or not: everyone on the panel can browse,
                      rate and use a public craft from their sticker picker. -->
                 <button
                   class="grid h-6 w-7 flex-none place-items-center rounded-md border border-border tac-action disabled:opacity-35"
-                  :class="published.has(entry.id) ? 'tac-on text-[#9fcbff]' : 'text-muted-foreground'"
+                  :class="published.has(entry.id) ? 'tac-on' : 'text-muted-foreground'"
                   :disabled="home !== 'server'"
                   :title="home !== 'server' ? 'The Craft Store needs the updated backend' : published.has(entry.id) ? 'Public in the Craft Store — click to take it down' : 'Publish to the Craft Store — everyone on the panel can see, rate and use it'"
                   @click="togglePublish(entry)"
                 >
                   <Globe class="h-3.5 w-3.5" />
                 </button>
-                <button class="grid h-6 w-7 flex-none place-items-center rounded-md border border-border text-muted-foreground tac-action" title="Lay it on the mat" @click="placeSaved(entry)">
+                <button class="grid h-6 w-7 flex-none place-items-center rounded-md border border-border text-muted-foreground tac-action" title="Place on the mat" @click="placeSaved(entry)">
                   <Plus class="h-3.5 w-3.5" />
                 </button>
                 <button
@@ -1156,6 +1259,7 @@ const FIELD =
       v-if="picker"
       :view="pickerView"
       hide-preview
+      target="mat"
       back-title="Back to the mat — nothing is added"
       @pick="addSticker"
       @pick-craft="addCraft"
@@ -1189,8 +1293,8 @@ const FIELD =
 }
 .sc-row-on {
   color: hsl(var(--foreground));
-  background: hsl(var(--tac-amber, 33 94% 58%) / 0.12);
-  box-shadow: inset 2px 0 0 hsl(var(--tac-amber, 33 94% 58%));
+  background: color-mix(in srgb, var(--acc) 12%, transparent);
+  box-shadow: inset 2px 0 0 var(--acc);
 }
 /* The handle a finger can drag by; the rest of a row scrolls the list. */
 .sc-grip {

@@ -10,6 +10,7 @@
 import { computed } from "vue";
 import { ArrowBigDown, ArrowBigUp, Box } from "lucide-vue-next";
 import type { SavedCraft, StoreCraft } from "../stickerCraftsModel";
+import { isCompact } from "../responsive";
 
 const props = defineProps<{
   craft: SavedCraft | StoreCraft;
@@ -36,9 +37,9 @@ const shortName = (name: string) => name.replace(/^Sticker \| /, "");
     :class="fits ? 'hover:border-[color:var(--acc)]' : 'opacity-45'"
   >
     <div class="flex items-center gap-1.5 text-f8 uppercase tracking-cs1 text-muted-foreground/70">
-      <span class="truncate">Sticker craft · {{ n }} {{ n === 1 ? "sticker" : "stickers" }}</span>
+      <span class="truncate">{{ n }} {{ n === 1 ? "sticker" : "stickers" }}</span>
       <span v-if="!fits" class="ml-auto flex-none text-destructive/80">Needs {{ n }} free slots</span>
-      <span v-else-if="published" class="ml-auto flex-none text-[#9fcbff]">Public</span>
+      <span v-else-if="published" class="ml-auto flex-none text-foreground">In the store</span>
     </div>
     <!-- The picture is the way into 3D. -->
     <button
@@ -57,9 +58,13 @@ const shortName = (name: string) => name.replace(/^Sticker \| /, "");
       <!-- No picture yet (saved before pictures, and the board not opened
            since): the stickers themselves, in slot order. -->
       <div v-else class="flex h-full flex-wrap items-center justify-center gap-1 p-1">
-        <img v-for="(s, si) in craft.stickers" :key="si" :src="s.image" alt="" class="h-8 w-8 object-contain" />
+        <img v-for="(s, si) in craft.stickers" :key="si" :src="s.image" alt="" class="object-contain" :style="{ height: size * 0.55 + 'px', width: size * 0.55 + 'px' }" />
       </div>
-      <span class="absolute right-1 top-1 hidden items-center justify-center rounded border border-border bg-background/90 p-1 text-muted-foreground group-hover:flex">
+      <!-- Always there on a phone: no hover says the picture opens in 3D. -->
+      <span
+        class="absolute right-1 top-1 items-center justify-center rounded border border-border bg-background/90 p-1 text-muted-foreground"
+        :class="isCompact ? 'flex' : 'hidden group-hover:flex'"
+      >
         <Box class="h-3.5 w-3.5" />
       </span>
     </button>
@@ -70,16 +75,16 @@ const shortName = (name: string) => name.replace(/^Sticker \| /, "");
       <span class="min-w-0 truncate">{{ store.author.name }}</span>
       <span class="ml-auto flex flex-none items-center">
         <button
-          class="grid h-5 w-5 place-items-center rounded transition-colors disabled:opacity-35"
-          :class="store.myVote === 1 ? 'text-[#7ee08a]' : 'hover:text-foreground'"
+          class="grid place-items-center rounded transition-colors disabled:opacity-35"
+          :class="[store.myVote === 1 ? 'text-success' : 'hover:text-foreground', isCompact ? 'h-9 w-9' : 'h-5 w-5']"
           :disabled="store.mine"
           :title="store.mine ? 'Your craft' : store.myVote === 1 ? 'Take your upvote back' : 'Upvote'"
           @click="emit('vote', 1)"
         ><ArrowBigUp class="h-3.5 w-3.5" /></button>
         <span class="min-w-[2ch] text-center font-mono text-f10" :title="`${store.ups} up · ${store.downs} down`">{{ store.score }}</span>
         <button
-          class="grid h-5 w-5 place-items-center rounded transition-colors disabled:opacity-35"
-          :class="store.myVote === -1 ? 'text-destructive' : 'hover:text-foreground'"
+          class="grid place-items-center rounded transition-colors disabled:opacity-35"
+          :class="[store.myVote === -1 ? 'text-destructive' : 'hover:text-foreground', isCompact ? 'h-9 w-9' : 'h-5 w-5']"
           :disabled="store.mine"
           :title="store.mine ? 'Your craft' : store.myVote === -1 ? 'Take your downvote back' : 'Downvote'"
           @click="emit('vote', -1)"
@@ -87,7 +92,8 @@ const shortName = (name: string) => name.replace(/^Sticker \| /, "");
       </span>
     </div>
     <button
-      class="tac-action rounded border border-border py-1 text-f9 uppercase tracking-cs1 text-muted-foreground disabled:pointer-events-none"
+      class="tac-action rounded border border-border uppercase tracking-cs1 text-muted-foreground disabled:pointer-events-none"
+      :class="isCompact ? 'py-2.5 text-f10' : 'py-1 text-f9'"
       :disabled="!fits"
       :title="fits ? 'Use this craft' : `Needs ${n} free sticker slots`"
       @click="emit('use')"
