@@ -12,7 +12,7 @@
 // The two emits are the two things a pick DOES, and both belong to App: writing
 // the choice into the craft draft, and opening the preview stage over the top.
 import { computed } from "vue";
-import { Box, LayoutGrid, Link2, Loader2, Search, X } from "lucide-vue-next";
+import { Box, LayoutGrid, Link2, Loader2, Search, Store, X } from "lucide-vue-next";
 import { CARD_ART, glowStyle } from "../itemVisuals";
 import { isCompact } from "../responsive";
 import { ATTACH_SORTS } from "../sortModes";
@@ -348,6 +348,16 @@ function useCraft(c: SavedCraft | StoreCraft) {
             </template>
             <template v-else>
               No Sticker Crafts saved yet. Lay up to five stickers out on the Sticker Crafts tab, select them and press Save.
+              <!-- Or use someone else's: the way into the store from an empty shelf. -->
+              <div class="mt-4 flex justify-center">
+                <button
+                  class="tac-action tac-on flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-f10 uppercase tracking-cs1"
+                  title="See the crafts other players published"
+                  @click="craftsScope = 'store'"
+                >
+                  <Store class="h-3.5 w-3.5" /> Browse
+                </button>
+              </div>
             </template>
           </div>
         </template>
