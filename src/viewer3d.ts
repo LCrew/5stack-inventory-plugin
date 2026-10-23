@@ -2284,12 +2284,27 @@ let snapshotLane: Promise<unknown> = Promise.resolve();
 // its own modal is open.
 let liveViewers = 0;
 let idleWaiters: (() => void)[] = [];
+/** A live viewer's handle on the screen, for the `directgl` path — see drawFrame. */
+type ScreenSlot = {
+  container: HTMLElement;
+  /** Mounted with `directgl` on. */
+  direct: boolean;
+  /** Draw a fresh frame into its own 2D canvas, so a viewer that loses the
+   *  shared canvas to another keeps a still picture, not a hole. */
+  keep: () => void;
+  /** Draw its frame again — after another viewer drew through the canvas it shows. */
+  redraw: () => void;
+};
 /**
- * The live viewer showing the shared canvas ITSELF, when `directgl` is on —
- * see drawFrame. `keep` paints its last frame into its own 2D canvas, so a
- * viewer that loses the canvas to another keeps a still picture, not a hole.
+ * The live viewers that are drawing — mounted and not suspended — oldest first.
+ * Every viewer that opens while another is up opens over it (the item editor
+ * over the focus view, a sticker's or a craft's preview over the editor), so
+ * the last one is the one on top. With `directgl` that one shows the shared
+ * canvas itself, and the ones under it hold a still frame instead of drawing.
  */
-let directOwner: { container: HTMLElement; keep: () => void } | null = null;
+const drawingViewers: ScreenSlot[] = [];
+/** The viewer showing the shared canvas ITSELF, when `directgl` is on. */
+let directOwner: ScreenSlot | null = null;
 /** Resolves once no 3D viewer is onscreen. Lets a queue park work that would
  *  otherwise compete with a viewer for the GPU, and show it as queued rather
  *  than pretending it is already underway. */
@@ -14488,41 +14503,51 @@ async function buildViewer(
 
   /**
    * DIRECT (the `directgl` switch, on by default in Safari): while this is the
-   * only live viewer, the shared WebGL canvas sits in this pane itself and the
-   * per-frame copy into the 2D canvas below is skipped.
+   * viewer on top (drawingViewers), the shared WebGL canvas sits in this pane
+   * itself and the per-frame copy into the 2D canvas below is skipped.
    *
    * The copy is what lets one context serve every viewer, and it is free where
    * the browser keeps it on the GPU (Chrome). Safari copies a WebGL canvas into
    * a 2D one through its GPU process, a full-resolution frame each time: on an
    * M3 Pro that drew a frame in under 2ms, the copy held the view to 12-20fps
-   * and stuttering; drawn directly it ran at a steady 60. With a second live
-   * viewer, or when a frame has to be READ (snapshot, the stage's held frame —
-   * see the "cs2-hold-frame" listener), it falls back to the copy. Read at
-   * mount: switch it, then reopen the item.
+   * and stuttering; drawn directly it ran at a steady 60. When a frame has to be
+   * READ (snapshot, the stage's held frame — see the "cs2-hold-frame"
+   * listener), it is copied as well. Read at mount: switch it, then reopen the
+   * item.
+   *
+   * ON TOP, not ALONE. It used to need this to be the only live viewer, and the
+   * item editor never is: the focus view stays mounted (suspended) under it, so
+   * the editor, and a sticker's preview over the editor, always took the copy.
+   * The viewers under the top one stop drawing instead — they are behind a
+   * modal — and show the frame `keep` left in their own 2D canvas.
    */
   const directWanted = !opts?.still && debugFlag("directgl");
+  const screen: ScreenSlot = {
+    container,
+    direct: directWanted,
+    keep: () => {
+      // The frame as the loop draws it: the inspect turn is only applied
+      // between applyInspect and clearInspect (see snapshot).
+      applyInspect();
+      drawFrame(true);
+      clearInspect();
+    },
+    redraw: () => drawFrame(),
+  };
   const takeSharedCanvas = () => {
     const c = renderer.domElement;
-    if (directOwner && directOwner.container !== container) directOwner.keep();
+    if (directOwner && directOwner !== screen) directOwner.keep();
     c.remove();
     // Over the 2D canvas (which keeps the pointer handlers) and under the
     // overlays appended after it; pointer-events off so input still lands there.
     c.style.cssText = "position:absolute;inset:0;width:100%;height:100%;display:block;pointer-events:none";
     container.insertBefore(c, view);
-    directOwner = {
-      container,
-      keep: () => {
-        try {
-          viewCtx?.drawImage(c, 0, 0, view.width, view.height);
-        } catch {
-          /* best effort: a hole is what this used to leave anyway */
-        }
-      },
-    };
+    container.addEventListener("cs2-hold-frame", holdFrame);
+    directOwner = screen;
   };
   const dropSharedCanvas = () => {
     if (renderer.domElement.parentElement === container) renderer.domElement.remove();
-    if (directOwner?.container === container) directOwner = null;
+    if (directOwner === screen) directOwner = null;
     container.removeEventListener("cs2-hold-frame", holdFrame);
   };
   /**
@@ -14534,9 +14559,13 @@ async function buildViewer(
   const holdFrame = () => {
     if (!disposed && renderer.domElement.parentElement === container) drawFrame(true);
   };
-  container.addEventListener("cs2-hold-frame", holdFrame);
   const drawFrame = (forceBlit = false) => {
-    const direct = directWanted && !released && liveViewers === 1;
+    const top = drawingViewers[drawingViewers.length - 1];
+    const direct = directWanted && !released && top === screen;
+    // Under a viewer that is on the screen itself: hold the frame `keep` left
+    // and leave the GPU to the one on top. A frame someone asked for (snapshot,
+    // held frame) is still drawn.
+    if (!direct && !forceBlit && top?.direct && top !== screen) return;
     if (direct && renderer.domElement.parentElement !== container) takeSharedCanvas();
     else if (!direct) dropSharedCanvas();
     renderer.setSize(cssW, cssH, false);
@@ -14581,6 +14610,11 @@ async function buildViewer(
     if (!viewCtx || (direct && !forceBlit)) return;
     viewCtx.clearRect(0, 0, view.width, view.height);
     viewCtx.drawImage(renderer.domElement, 0, 0, view.width, view.height);
+    // Drawn through the canvas the viewer on top is showing (a snapshot from
+    // under it): put that one's frame back before the browser paints this one.
+    if (!direct && directOwner && directOwner !== screen && directOwner === drawingViewers[drawingViewers.length - 1]) {
+      directOwner.redraw();
+    }
   };
   /**
    * Pick up settings changed while this viewer is on screen.
@@ -14810,15 +14844,21 @@ async function buildViewer(
   let released = !!opts?.still;
   if (!released) {
     liveViewers++;
+    drawingViewers.push(screen);
     // Cancel any in-flight settle: the user came back inside the window, so the
     // wait restarts rather than expiring under a viewer that is now onscreen.
     clearTimeout(idleTimer);
     idleTimer = undefined;
   }
+  const leaveScreen = () => {
+    const i = drawingViewers.indexOf(screen);
+    if (i >= 0) drawingViewers.splice(i, 1);
+  };
   // dispose() can follow a context-loss teardown, so the release must latch.
   const release = () => {
     if (released) return;
     released = true;
+    leaveScreen();
     releaseViewer();
   };
 
@@ -14857,8 +14897,11 @@ async function buildViewer(
       suspended = on;
       if (on) {
         cancelAnimationFrame(raf);
+        leaveScreen();
         return;
       }
+      // Back on top: whatever opened over it has gone.
+      if (!released && !drawingViewers.includes(screen)) drawingViewers.push(screen);
       // Drop the gap rather than banking it: the clocks report time since they
       // were last READ, so a resume would otherwise advance every animation by
       // the length of the pause in a single frame.
