@@ -27,6 +27,7 @@ import {
   Globe,
   GripVertical,
   Group,
+  LayoutGrid,
   ListChecks,
   ListPlus,
   Loader2,
@@ -40,6 +41,7 @@ import {
   SendToBack,
   Square,
   Sticker,
+  Store,
   Trash2,
   Ungroup,
   View,
@@ -133,7 +135,8 @@ async function loadAll() {
     home.value = got.home;
     groups.value = got.board.groups;
     stickers.value = got.board.stickers;
-    library.value = got.library;
+    // Newest first, as a save puts them: the panel shows the first few.
+    library.value = [...got.library].sort((a, b) => b.savedAt - a.savedAt);
     published.value = got.published;
     normalize();
   } catch (e) {
@@ -669,7 +672,8 @@ function updateCraft() {
   // The old picture is the old layout: draw it again.
   delete entry.preview;
   delete entry.previewV;
-  library.value = [...library.value];
+  // Saved just now, so first — the panel shows the newest few.
+  library.value = [entry, ...library.value.filter((e) => e !== entry)];
   patchSelected((s) => (s.craft = entry.id));
   persistCraft(entry);
   void renderPreview(entry.id);
@@ -758,8 +762,20 @@ const pickerView = useAttachmentPicker({
   fail: (e) => (pickerError.value = e instanceof Error ? e.message : String(e)),
   // A craft laid on the mat needs room on it, and is a grouping of five at most.
   craftRoom: () => Math.min(MAX_PER_GROUPING, MAX_ON_BOARD - stickers.value.length),
+  // This tab's own crafts, live: one published or deleted from the picker's
+  // tiles shows at once, and nothing is fetched twice.
+  library,
+  published,
 });
 const { picker, openPicker } = pickerView;
+/** The picker straight on a Sticker Crafts shelf: the Craft Store, or all of yours. */
+function openCrafts(scope: "mine" | "store") {
+  openPicker("sticker");
+  pickerView.pickerSource.value = "crafts";
+  pickerView.craftsScope.value = scope;
+}
+/** The panel lists the newest few; Browse opens them all. */
+const LIBRARY_SHOWN = 5;
 /**
  * Where a new sticker lands: the first free cell of a 6.5 cm lattice across the
  * mat, so a few picked in a row lie side by side instead of on top of each
@@ -1051,6 +1067,16 @@ const FIELD =
           @click="openPicker('sticker')"
         >
           <Plus class="h-3.5 w-3.5" /> {{ compact ? tr("inventory.stickerCrafts.addShort", "Add") : tr("inventory.stickerCrafts.add", "Add sticker") }}
+        </button>
+        <!-- Everyone's published crafts: lay one on the mat to change it and
+             save your own. -->
+        <button
+          :class="BTN"
+          :disabled="!loaded"
+          title="Crafts other players published — lay one on the mat to use it or make it your own"
+          @click="openCrafts('store')"
+        >
+          <Store class="h-3.5 w-3.5" /> {{ compact ? tr("inventory.stickerCrafts.storeShort", "Store") : tr("inventory.stickerCrafts.store", "Craft Store") }}
         </button>
       </div>
     </div>
@@ -1440,7 +1466,7 @@ const FIELD =
           </div>
           <div class="flex flex-col gap-2">
             <div
-              v-for="entry in library"
+              v-for="entry in library.slice(0, LIBRARY_SHOWN)"
               :key="entry.id"
               :data-craft="entry.id"
               class="rounded-md border bg-background/60 p-2 transition-[border-color,box-shadow] duration-500"
@@ -1498,13 +1524,23 @@ const FIELD =
               </div>
             </div>
           </div>
+          <!-- The newest five here; all of them a press away, full-screen. -->
+          <button
+            v-if="library.length > LIBRARY_SHOWN"
+            :class="BTN"
+            class="mt-2 w-full justify-center"
+            :title="`See all ${library.length} of your crafts — place, publish or delete any of them`"
+            @click="openCrafts('mine')"
+          >
+            <LayoutGrid class="h-3.5 w-3.5" /> {{ tr("inventory.stickerCrafts.browseAll", "Browse all") }} {{ library.length }}
+          </button>
         </section>
       </aside>
     </div>
 
     <!-- The inventory's toast, bottom centre: Undo for what was just
          removed, and a word on a publish or an update. -->
-    <div class="pointer-events-none fixed bottom-5 left-1/2 flex w-max max-w-[calc(100vw-2rem)] -translate-x-1/2 flex-col items-center gap-2" :style="{ zIndex: Z.toast }">
+    <div class="pointer-events-none fixed bottom-5 left-1/2 flex w-max max-w-[calc(100vw-2rem)] -translate-x-1/2 flex-col items-center gap-2" :style="{ zIndex: picker ? Z.pickerToast : Z.toast }">
       <Transition
         enter-active-class="transition duration-200"
         enter-from-class="opacity-0 translate-y-2"
@@ -1544,7 +1580,33 @@ const FIELD =
       back-title="Back to the mat — nothing is added"
       @pick="addSticker"
       @pick-craft="addCraft"
-    />
+    >
+      <!-- Opened from here, your crafts are managed from their tiles too: the
+           panel lists only the newest five. -->
+      <template #craftActions="{ craft }">
+        <button
+          class="flex flex-none items-center gap-1.5 rounded-md border border-border px-2 text-f10 uppercase tracking-cs1 tac-action disabled:opacity-35"
+          :class="[published.has(craft.id) ? 'tac-on' : 'text-muted-foreground', compact ? 'h-9' : 'h-7']"
+          :disabled="home !== 'server' || publishing.has(craft.id)"
+          :aria-pressed="published.has(craft.id)"
+          :title="home !== 'server' ? 'The Craft Store needs the updated backend' : published.has(craft.id) ? 'In the Craft Store — click to make it private again' : 'Private — click to publish it to the Craft Store'"
+          @click="togglePublish(craft)"
+        >
+          <Loader2 v-if="publishing.has(craft.id)" class="h-3.5 w-3.5 animate-spin" />
+          <Globe v-else-if="published.has(craft.id)" class="h-3.5 w-3.5" />
+          <Lock v-else class="h-3.5 w-3.5" />
+          {{ published.has(craft.id) ? tr("inventory.stickerCrafts.inStore", "In store") : tr("inventory.stickerCrafts.private", "Private") }}
+        </button>
+        <button
+          class="ml-auto flex flex-none items-center gap-1.5 rounded-md border border-border px-2 text-f10 uppercase tracking-cs1 text-muted-foreground tac-action"
+          :class="compact ? 'h-9' : 'h-7'"
+          title="Delete from your crafts — you can undo it for a few seconds"
+          @click="deleteSaved(craft.id)"
+        >
+          <Trash2 class="h-3.5 w-3.5" /> {{ tr("inventory.stickerCrafts.delete", "Delete") }}
+        </button>
+      </template>
+    </AttachmentPicker>
   </div>
 </template>
 

@@ -29,6 +29,9 @@ export const Z = {
   popover: 1001,
   /** The attachment picker — reachable from both the craft form and its 3D stage. */
   picker: 1300,
+  /** A toast raised from inside the picker — the Sticker Crafts tab's Undo for a
+   *  craft deleted from its tiles — over it, under its 3D preview. */
+  pickerToast: 1350,
   /** The picker's own 3D preview, which must cover the picker. */
   previewStage: 1400,
   /**

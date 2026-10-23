@@ -124,6 +124,11 @@ const where = computed(() => {
           ><ArrowBigDown class="h-4 w-4" />{{ store.downs }}</button>
         </span>
       </div>
+      <!-- The caller's own actions for this craft (the Sticker Crafts tab: in
+           the store or not, delete). -->
+      <div v-if="$slots.actions" class="flex items-center gap-1.5">
+        <slot name="actions" />
+      </div>
       <!-- Where Use puts it, said before Use; and Use. -->
       <div class="flex items-center gap-2">
         <span class="min-w-0 flex-1 text-f11 leading-snug" :class="fits ? 'text-muted-foreground' : 'text-destructive'">{{ where }}</span>

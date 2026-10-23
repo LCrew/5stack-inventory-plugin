@@ -361,7 +361,11 @@ function useCraft(c: SavedCraft | StoreCraft) {
             @preview="previewCraft = c"
             @use="useCraft(c)"
             @vote="(v) => voteOn(c as StoreCraft, v)"
-          />
+          >
+            <template v-if="$slots.craftActions && craftsScope === 'mine'" #actions>
+              <slot name="craftActions" :craft="c as SavedCraft" />
+            </template>
+          </CraftTile>
           <div v-if="craftBigRows.length" class="col-span-full mt-2 flex items-center gap-2 text-f11 text-muted-foreground">
             {{ onMat ? "Need more room on the mat" : "Need more empty slots" }} ({{ craftBigRows.length }})
             <span class="h-px flex-1 bg-border"></span>
@@ -379,7 +383,11 @@ function useCraft(c: SavedCraft | StoreCraft) {
             @preview="previewCraft = c"
             @use="useCraft(c)"
             @vote="(v) => voteOn(c as StoreCraft, v)"
-          />
+          >
+            <template v-if="$slots.craftActions && craftsScope === 'mine'" #actions>
+              <slot name="craftActions" :craft="c as SavedCraft" />
+            </template>
+          </CraftTile>
           <div v-if="!craftRows.length" class="col-span-full animate-fade-in py-8 text-center text-f13 text-muted-foreground">
             <Loader2 v-if="craftsBusy" class="mx-auto h-4 w-4 animate-spin" />
             <template v-else-if="craftsScope === 'store' && storeMissing">

@@ -115,6 +115,13 @@ export interface AttachmentPickerOptions {
    * slots).
    */
   craftPlan?: (slot: number, n: number) => CraftPlan | null;
+  /**
+   * The crafts and which of them are published, LIVE — for a caller that owns
+   * them (the Sticker Crafts tab), so a craft published or deleted from the
+   * picker's own tiles shows at once. Without them the picker loads its own copy.
+   */
+  library?: Ref<SavedCraft[]>;
+  published?: Ref<Set<string>>;
 }
 
 /** A craft's run on the gun: its slots (0-based) and the stickers it moves. */
@@ -187,9 +194,11 @@ export function useAttachmentPicker(opts: AttachmentPickerOptions) {
    * after the picker opens.
    */
   const craftsScope = ref<"mine" | "store">("mine");
-  const pickerCrafts = ref<SavedCraft[]>([]);
+  const loadedCrafts = ref<SavedCraft[]>([]);
+  const pickerCrafts = computed(() => opts.library?.value ?? loadedCrafts.value);
   /** Which of yours are in the store, for their "Public" mark. */
-  const craftsPublished = ref<Set<string>>(new Set());
+  const loadedPublished = ref<Set<string>>(new Set());
+  const craftsPublished = computed(() => opts.published?.value ?? loadedPublished.value);
   const pickerCraftsLoading = ref(false);
   /** How many stickers a craft may bring here — see AttachmentPickerOptions.craftRoom. */
   const craftRoom = computed(() =>
@@ -544,8 +553,8 @@ export function useAttachmentPicker(opts: AttachmentPickerOptions) {
 
   function openPicker(kind: "sticker" | "charm" | "patch", slot = 0) {
     picker.value = { kind, slot };
-    pickerCrafts.value = [];
-    pickerCraftsLoading.value = kind === "sticker";
+    loadedCrafts.value = [];
+    pickerCraftsLoading.value = kind === "sticker" && !opts.library;
     craftsScope.value = "mine";
     craftCount.value = 0;
     myScores.value = new Map();
@@ -553,13 +562,13 @@ export function useAttachmentPicker(opts: AttachmentPickerOptions) {
     storeRows.value = [];
     storeMissing.value = false;
     previewCraft.value = null;
-    if (kind === "sticker") {
+    if (kind === "sticker" && !opts.library) {
       const opened = picker.value;
       loadStickerCrafts()
         .then(({ library, published }) => {
           if (picker.value !== opened) return;
-          pickerCrafts.value = library.filter((c) => c.stickers.length <= MAX_PER_GROUPING);
-          craftsPublished.value = published;
+          loadedCrafts.value = library.filter((c) => c.stickers.length <= MAX_PER_GROUPING);
+          loadedPublished.value = published;
           if (pickerSource.value === "crafts") void loadMyScores();
         })
         .catch(() => {})
