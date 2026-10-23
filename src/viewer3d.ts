@@ -2284,6 +2284,12 @@ let snapshotLane: Promise<unknown> = Promise.resolve();
 // its own modal is open.
 let liveViewers = 0;
 let idleWaiters: (() => void)[] = [];
+/**
+ * The live viewer showing the shared canvas ITSELF, when `directgl` is on —
+ * see drawFrame. `keep` paints its last frame into its own 2D canvas, so a
+ * viewer that loses the canvas to another keeps a still picture, not a hole.
+ */
+let directOwner: { container: HTMLElement; keep: () => void } | null = null;
 /** Resolves once no 3D viewer is onscreen. Lets a queue park work that would
  *  otherwise compete with a viewer for the GPU, and show it as queued rather
  *  than pretending it is already underway. */
@@ -14480,7 +14486,46 @@ async function buildViewer(
     else fpvCamera.setViewOffset(w, h, -w * fx, -h * fy, w, h);
   };
 
-  const drawFrame = () => {
+  /**
+   * DIRECT, behind the `directgl` switch: while this is the only live viewer,
+   * the shared WebGL canvas sits in this pane itself and the per-frame copy into
+   * the 2D canvas below is skipped.
+   *
+   * The copy is what lets one context serve every viewer, and it is free where
+   * the browser keeps it on the GPU (Chrome). Safari copies a WebGL canvas into
+   * a 2D one through its GPU process, a full-resolution frame each time — the
+   * suspect for a Mac that draws a frame in under 2ms and shows 12fps. With a
+   * second live viewer, or when a frame has to be READ (snapshot), it falls back
+   * to the copy. Read at mount: switch it, then reopen the item.
+   */
+  const directWanted = !opts?.still && debugFlag("directgl");
+  const takeSharedCanvas = () => {
+    const c = renderer.domElement;
+    if (directOwner && directOwner.container !== container) directOwner.keep();
+    c.remove();
+    // Over the 2D canvas (which keeps the pointer handlers) and under the
+    // overlays appended after it; pointer-events off so input still lands there.
+    c.style.cssText = "position:absolute;inset:0;width:100%;height:100%;display:block;pointer-events:none";
+    container.insertBefore(c, view);
+    directOwner = {
+      container,
+      keep: () => {
+        try {
+          viewCtx?.drawImage(c, 0, 0, view.width, view.height);
+        } catch {
+          /* best effort: a hole is what this used to leave anyway */
+        }
+      },
+    };
+  };
+  const dropSharedCanvas = () => {
+    if (renderer.domElement.parentElement === container) renderer.domElement.remove();
+    if (directOwner?.container === container) directOwner = null;
+  };
+  const drawFrame = (forceBlit = false) => {
+    const direct = directWanted && !released && liveViewers === 1;
+    if (direct && renderer.domElement.parentElement !== container) takeSharedCanvas();
+    else if (!direct) dropSharedCanvas();
     renderer.setSize(cssW, cssH, false);
     // Per frame, because the renderer is shared: the last viewer to draw would
     // otherwise decide every other viewer's exposure.
@@ -14520,7 +14565,7 @@ async function buildViewer(
     } else {
       renderer.render(scene, activeCamera());
     }
-    if (!viewCtx) return;
+    if (!viewCtx || (direct && !forceBlit)) return;
     viewCtx.clearRect(0, 0, view.width, view.height);
     viewCtx.drawImage(renderer.domElement, 0, 0, view.width, view.height);
   };
@@ -14734,6 +14779,7 @@ async function buildViewer(
   // consequence of sharing: they were all drawing through the same context.
   const onContextLost = () => {
     disposed = true;
+    dropSharedCanvas();
     // This viewer is dead whether or not the caller ever disposes it — stop
     // holding the bake queue hostage on a context that will never draw again.
     release();
@@ -15496,8 +15542,9 @@ async function buildViewer(
       stepCharm();
       // Through the same blit the screen sees, so a snapshot is exactly the
       // frame a user would get — and reading from the 2D canvas sidesteps the
-      // shared drawing buffer being cleared before toBlob can run.
-      drawFrame();
+      // shared drawing buffer being cleared before toBlob can run. Copied even
+      // when the pane shows the shared canvas directly (`directgl`).
+      drawFrame(true);
       // Before the await, never after: OrbitControls re-derives its orbit from
       // camera.position at the top of every update(), so a camera left rotated
       // across a frame boundary is one whose next update treats the clip's turn
@@ -15509,6 +15556,7 @@ async function buildViewer(
       disposed = true;
       release();
       cancelAnimationFrame(raf);
+      dropSharedCanvas();
       freeLookOff?.();
       freeLookOff = null;
       flash?.dispose();

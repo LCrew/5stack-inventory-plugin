@@ -131,6 +131,14 @@ export const FLAGS: DevFlag[] = [
     audience: "user",
   },
   {
+    name: "directgl",
+    label: "Draw straight to screen (test)",
+    hint: "Show the 3D view's own canvas instead of copying every frame into the page. A test for a slow 3D view in Safari on a Mac — reopen the item after switching it.",
+    dflt: false,
+    group: "3D viewer",
+    audience: "user",
+  },
+  {
     name: "inspectanim",
     label: "Motion",
     hint: "Play a model's own inspect animation in the 3D viewer instead of turning it on a turntable — where it has one, which measurement says is nowhere in the weapon tree: every weapon's inspect clip is a single static keyframe. Item cards are always rendered from the still pose.",

@@ -45,6 +45,7 @@ The 3D model extraction is now at pipeline version 39, the same number as the in
 
 ### Features
 
+- **"Draw straight to screen (test)" setting**: in ⚙ under 3D viewer, off by default. While only one 3D view is open, its canvas is shown directly instead of copying every frame into the page. This tests whether that copy is what makes the 3D view slow in Safari on a Mac. Reopen the item after switching it. Saving an image still works as before.
 - **Loading in the scene**: while a 3D model loads, the pane already shows the chosen lighting preset's backdrop, the CS2 haze or the map photograph, so the item appears in place instead of the whole scene popping in with it. The studio presets, which have no backdrop, keep the card behind.
 - **Rare inspects**: in first person, pressing Inspect again while a weapon is being inspected plays its rarer inspect, the one the game rolls now and then: the Deagle's spin, the AK-47's, a second trick on most knives, and the C4's and the Butterfly Knife's third. Weapons with only one inspect behave as before. Needs the next run of the first-person animation step.
 - **CS2 lighting preset (new default)**: neutral daylight and the main menu's blue-grey haze, measured against in-game inspect screenshots. Items no longer come out pink-tinted and dull.
