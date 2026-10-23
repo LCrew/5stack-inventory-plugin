@@ -61,6 +61,7 @@ The 3D model extraction is now at pipeline version 39, the same number as the in
 
 ### Bug Fixes
 
+- **Sticker art in Safari cut from the wrong rows**: Safari flips an image before it crops it, the other way round from Chrome, so every sticker's art was cut from a window shifted by the difference between its top and bottom margins. Its effect masks no longer lined up: Econometer's lenticular light sat 35px above its letters and gauge. About one sticker in five, whose square runs past the edge of its texture, came out squashed instead of padded. The art is now cropped and flipped in two steps, and the padded ones are laid out from their exact pixels, so Safari and Chrome draw the same sticker.
 - In first person the agent's sleeve wore the equipped glove's finish up to the elbow. Only the gloves take the finish now, and the sleeve keeps the agent's own look.
 - Stickers and charms disappeared in first person. They stay on the gun now, hidden only where the hand covers them, and a charm swings as the gun moves through reloads and shots.
 - A placed charm hung about a centimetre from where the game draws it. On the AK-47 a charm the game hangs in the hole under the receiver hung from the receiver's edge. Charm offsets are now mapped exactly like the game's own charm surfaces, so the 3D view shows the charm where the game will.

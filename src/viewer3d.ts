@@ -1400,6 +1400,60 @@ function loadPlainTexture(url: string): Promise<import("three").Texture | null> 
   return hit;
 }
 
+/** A throwaway WebGL context for reading a bitmap's bytes back exactly. Its own,
+ *  never three's: binding anything on three's context desyncs its state cache
+ *  (see rawPng). Made once, on first use; null when the browser will not. */
+let readbackGl: WebGLRenderingContext | null | undefined;
+
+/**
+ * `crop` laid into a transparent `side`-square at (dx, dy), as RGBA bytes in
+ * upload order — bottom row first, which is the flip the ImageBitmap path bakes
+ * with imageOrientation. The bytes are the crop's own, read back through WebGL
+ * exactly as the texture upload would see them; null if there is no context.
+ */
+function paddedSquare(crop: ImageBitmap, side: number, dx: number, dy: number): Uint8Array | null {
+  if (readbackGl === undefined) {
+    try {
+      const c = typeof OffscreenCanvas !== "undefined" ? new OffscreenCanvas(1, 1) : document.createElement("canvas");
+      readbackGl = (c.getContext("webgl") as WebGLRenderingContext | null) ?? null;
+    } catch {
+      readbackGl = null;
+    }
+  }
+  const gl = readbackGl;
+  if (!gl || gl.isContextLost()) return null;
+  const t = gl.createTexture();
+  const fb = gl.createFramebuffer();
+  try {
+    gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    gl.pixelStorei(gl.UNPACK_COLORSPACE_CONVERSION_WEBGL, gl.NONE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, crop);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+    if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE) return null;
+    const w = crop.width;
+    const h = crop.height;
+    const px = new Uint8Array(w * h * 4);
+    // Row 0 here is the crop's TOP row: uploaded unflipped, read from texel row 0.
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    const out = new Uint8Array(side * side * 4);
+    for (let r = 0; r < h; r++) {
+      out.set(px.subarray(r * w * 4, (r + 1) * w * 4), ((side - 1 - (dy + r)) * side + dx) * 4);
+    }
+    return out;
+  } catch {
+    return null;
+  } finally {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.deleteFramebuffer(fb);
+    gl.deleteTexture(t);
+  }
+}
+
 const stickerTexCache = new Map<
   string,
   Promise<{ tex: import("three").Texture; aspect: number; realStickerArt: boolean } | null>
@@ -1470,27 +1524,48 @@ function loadStickerTexture(url: string) {
         const h = maxY - minY + 1;
         // Re-centre the ink in a SQUARE image, letterboxed with real
         // transparency. Doing it in the image rather than in the uv mapping
-        // keeps every caller on a plain [0,1] square. The crop rect may hang
-        // past the source; createImageBitmap pads those pixels transparent
-        // black, which IS the letterbox.
+        // keeps every caller on a plain [0,1] square. The square may hang past
+        // the source (about one sticker in five): those pixels are the
+        // letterbox.
         const side = Math.max(w, h);
         const sx = minX - (((side - w) / 2) | 0);
         const sy = minY - (((side - h) / 2) | 0);
+        // The part of the square the source has pixels for.
+        const cx0 = Math.max(0, sx);
+        const cy0 = Math.max(0, sy);
+        const cw = Math.min(img.width, sx + side) - cx0;
+        const ch = Math.min(img.height, sy + side) - cy0;
         let tex: import("three").Texture;
         try {
-          // imageOrientation "flipY" bakes the flip the old CanvasTexture got
-          // from its default flipY=true — three IGNORES texture.flipY for
-          // ImageBitmap uploads, so omitting this renders every sticker
-          // upside down.
-          const square = await createImageBitmap(img, sx, sy, side, side, {
-            ...bmpOpts,
-            imageOrientation: "flipY",
-          });
-          tex = new THREE.Texture(square);
+          // CROP, THEN FLIP, in two calls. The flip (imageOrientation "flipY")
+          // bakes what the old CanvasTexture got from its default flipY=true —
+          // three IGNORES texture.flipY for ImageBitmap uploads. In ONE call
+          // WebKit flips the whole source before it crops, so the crop rect
+          // was read from the bottom: Safari cut every sticker's art from the
+          // wrong rows (Econometer's 35px off its own lenticular mask), and a
+          // square hanging past the source came back clipped, not padded, and
+          // was stretched. Measured against Chromium, which crops first; two
+          // calls give the same bytes in both.
+          const crop = await createImageBitmap(img, cx0, cy0, cw, ch, bmpOpts);
+          if (cw === side && ch === side) {
+            tex = new THREE.Texture(await createImageBitmap(crop, { ...bmpOpts, imageOrientation: "flipY" }));
+          } else {
+            // The letterbox has to be made, and every way through the browser
+            // (a canvas, ImageData to ImageBitmap) premultiplies in WebKit and
+            // grinds the low-alpha art: the exact bytes, laid out by hand.
+            const square = paddedSquare(crop, side, cx0 - sx, cy0 - sy);
+            if (!square) throw new Error("no readback");
+            tex = new THREE.DataTexture(square, side, side, THREE.RGBAFormat, THREE.UnsignedByteType);
+            // A DataTexture's defaults are a lookup table's; this is an image.
+            tex.magFilter = THREE.LinearFilter;
+            tex.minFilter = THREE.LinearMipmapLinearFilter;
+            tex.generateMipmaps = true;
+          }
           tex.needsUpdate = true;
         } catch {
-          // Browsers without cropping ImageBitmapOptions: the old canvas path,
-          // premultiply loss and all.
+          // Browsers without cropping ImageBitmapOptions, or no readback
+          // context for a letterbox: the old canvas path, premultiply loss and
+          // all.
           const square = document.createElement("canvas");
           square.width = side;
           square.height = side;
