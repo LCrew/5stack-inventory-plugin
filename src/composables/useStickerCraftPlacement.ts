@@ -247,6 +247,13 @@ export function useStickerCraftPlacement(o: {
     return out;
   }
 
+  /** Where a craft of n stickers picked for `slot` would go, for the picker to
+   *  say before Use: the run's slots and the moves that open it up. */
+  function planFor(slot: number, n: number) {
+    const c = o.craft.value;
+    return c ? planRun(c, slot, n) : null;
+  }
+
   /** The picker's answer: hold the craft over the gun, ready to drag on. */
   async function pickCraft(entry: SavedCraft, slot: number) {
     const c = o.craft.value;
@@ -558,6 +565,7 @@ export function useStickerCraftPlacement(o: {
     cancel,
     startDrag,
     placeHere,
+    planFor,
     followMove,
     followTurn,
     moveWithGroup,

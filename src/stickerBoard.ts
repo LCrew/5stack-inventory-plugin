@@ -73,6 +73,10 @@ const TURN_PER_PX = 0.5;
 /** Snapshot size. 2:1, the shape of the library card and the picker tile. */
 const SNAP_W = 360;
 const SNAP_H = 180;
+/** Every snapshot's width on the mat, in cm: one scale for every craft — five
+ *  stickers in a row — so a picture says how big a craft is next to another.
+ *  Only a craft wider than this is framed to fit. */
+const SNAP_SPAN_CM = 26;
 
 /**
  * The reflections the stickers see.
@@ -841,7 +845,7 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
     if (!Number.isFinite(minX)) [minX, maxX, minY, maxY] = [-2.5, 2.5, -2.5, 2.5];
     const aspect = SNAP_W / SNAP_H;
     const pad = 1;
-    const halfW = Math.max((maxX - minX) / 2 + pad, ((maxY - minY) / 2 + pad) * aspect);
+    const halfW = Math.max(SNAP_SPAN_CM / 2, (maxX - minX) / 2 + pad, ((maxY - minY) / 2 + pad) * aspect);
     const halfH = halfW / aspect;
     const cx = (minX + maxX) / 2;
     const cy = (minY + maxY) / 2;

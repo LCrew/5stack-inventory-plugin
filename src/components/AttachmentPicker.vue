@@ -77,7 +77,9 @@ const {
   craftsScope,
   craftRoom,
   craftCount,
-  fitsCount,
+  craftFits,
+  craftPlanFor,
+  myScores,
   storeSort,
   storeRows,
   storeLoading,
@@ -94,18 +96,27 @@ const sources = computed(() =>
   picker.value?.kind === "sticker" ? (["all", "owned", "crafts"] as const) : (["all", "owned"] as const),
 );
 const SOURCE_LABEL = computed(() => ({ all: "Catalog", owned: "Owned", crafts: isCompact.value ? "Crafts" : "Sticker Crafts" }) as const);
-/** Craft tiles are twice as wide (the layout is a strip, not a square) and as
- *  tall as they need: picture, name, author and votes, Use. */
+/**
+ * Craft tiles: a reading width rather than the sticker slider's scale — at a
+ * large card size they became posters with 8px captions — and rows as tall as
+ * their content. `max-content`, not `auto`: in a full shelf `auto` rows gave
+ * way to the scroller's height and squashed every picture to a strip, where
+ * they must stay whole and the shelf scroll.
+ */
 const craftGridStyle = computed(() => ({
   display: "grid",
-  gridTemplateColumns: `repeat(auto-fill, minmax(${Math.round(attachCardSize.value * 2.2)}px, 1fr))`,
-  gridAutoRows: "auto",
+  gridTemplateColumns: isCompact.value ? "minmax(0, 1fr)" : "repeat(auto-fill, minmax(260px, 340px))",
+  gridAutoRows: "max-content",
+  justifyContent: "start",
 }));
 /** The crafts on show: yours, or the store's. */
 const craftRows = computed<(SavedCraft | StoreCraft)[]>(() =>
   craftsScope.value === "store" ? storeRows.value : pickerCraftRows.value,
 );
 const craftsBusy = computed(() => (craftsScope.value === "store" ? storeLoading.value : pickerCraftsLoading.value));
+/** The ones there is room for first; the rest after, under a line saying why. */
+const craftFitRows = computed(() => craftRows.value.filter((c) => craftFits(c.stickers.length)));
+const craftBigRows = computed(() => craftRows.value.filter((c) => !craftFits(c.stickers.length)));
 const emit = defineEmits<{
   /** Apply this row to the waiting slot — App writes it into the craft draft. */
   (e: "pick", row: PickerRow): void;
@@ -153,11 +164,11 @@ function useCraft(c: SavedCraft | StoreCraft) {
             >{{ pickerCrafts.length }}</span>
           </button>
         </div>
-        <div v-if="!isCompact" class="ml-auto flex flex-none items-center gap-2 text-muted-foreground" title="Card size">
+        <div v-if="!isCompact && pickerSource !== 'crafts'" class="ml-auto flex flex-none items-center gap-2 text-muted-foreground" title="Card size">
           <LayoutGrid class="h-3.5 w-3.5" />
           <input v-model.number="attachCardSize" type="range" min="72" max="200" step="4" class="w-24 accent-[#e0a24a]" />
         </div>
-        <div class="relative" :class="isCompact ? 'order-4 w-full' : 'w-[240px]'">
+        <div class="relative" :class="isCompact ? 'order-4 w-full' : pickerSource === 'crafts' ? 'ml-auto w-[240px]' : 'w-[240px]'">
           <Search class="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
           <input
             v-model="pickerQuery"
@@ -188,38 +199,41 @@ function useCraft(c: SavedCraft | StoreCraft) {
       <!-- STICKER CRAFTS: yours or the store's, and how many stickers. The
            count chips past the room this gun has are off — a craft has to fit
            the free slots it lands in (useStickerCraftPlacement). -->
+      <!-- What there is room for first, then whose crafts, then the size filter
+           — labelled, so its 1–5 don't read as the gun's slot numbers. -->
       <div v-if="pickerSource === 'crafts'" class="mb-3 flex flex-wrap items-center gap-2">
-        <div class="flex flex-none items-center gap-0.5 rounded-md border border-border p-0.5">
+        <span class="text-f11 text-foreground" :class="isCompact ? 'w-full' : ''">
+          <template v-if="onMat">Room on the mat: {{ craftRoom }} {{ craftRoom === 1 ? "sticker" : "stickers" }}</template>
+          <template v-else>This gun: {{ craftRoom }} empty {{ craftRoom === 1 ? "slot" : "slots" }}</template>
+        </span>
+        <div class="flex flex-none items-center gap-0.5 rounded-md border border-border p-0.5" :class="isCompact ? 'w-full' : ''">
           <button
             v-for="sc in (['mine', 'store'] as const)"
             :key="sc"
-            class="rounded px-2.5 py-1 text-f10 uppercase tracking-cs1 transition-colors"
-            :class="craftsScope === sc ? 'bg-secondary text-foreground' : 'text-muted-foreground hover:text-foreground'"
+            class="rounded px-2.5 text-f10 uppercase tracking-cs1 transition-colors"
+            :class="[craftsScope === sc ? 'bg-secondary text-foreground' : 'text-muted-foreground hover:text-foreground', isCompact ? 'h-9 flex-1' : 'py-1']"
             :title="sc === 'mine' ? 'Crafts you saved on the Sticker Crafts tab' : 'Crafts other players published'"
             @click="craftsScope = sc"
           >{{ sc === 'mine' ? 'Mine' : 'Craft Store' }}</button>
         </div>
         <div class="flex flex-none items-center gap-0.5 rounded-md border border-border p-0.5">
+          <span class="px-1.5 text-f10 uppercase tracking-cs1 text-muted-foreground">Stickers</span>
           <button
             v-for="c in [0, 1, 2, 3, 4, 5]"
             :key="c"
-            class="rounded px-2 py-1 font-mono text-f10 uppercase tracking-cs1 transition-colors disabled:opacity-30"
-            :class="craftCount === c ? 'bg-secondary text-foreground' : 'text-muted-foreground hover:text-foreground'"
-            :disabled="c > craftRoom"
-            :title="c === 0 ? `Every craft that fits: up to ${craftRoom} ${craftRoom === 1 ? 'sticker' : 'stickers'}` : c > craftRoom ? (onMat ? `There is room for only ${craftRoom} more on the mat` : `There ${craftRoom === 1 ? 'is' : 'are'} only ${craftRoom} empty sticker ${craftRoom === 1 ? 'slot' : 'slots'}`) : `Crafts of exactly ${c} ${c === 1 ? 'sticker' : 'stickers'}`"
+            class="rounded px-2 font-mono text-f10 uppercase tracking-cs1 transition-colors"
+            :class="[craftCount === c ? 'bg-secondary text-foreground' : 'text-muted-foreground hover:text-foreground', isCompact ? 'h-9 min-w-9' : 'py-1']"
+            :title="c === 0 ? 'Crafts of any size' : `Crafts of exactly ${c} ${c === 1 ? 'sticker' : 'stickers'}`"
             @click="craftCount = c"
-          >{{ c === 0 ? 'Fits' : c }}</button>
+          >{{ c === 0 ? 'All' : c }}</button>
         </div>
-        <span class="text-f10 text-muted-foreground">
-          <template v-if="onMat">Room for {{ craftRoom }} on the mat</template>
-          <template v-else>{{ craftRoom }} empty {{ craftRoom === 1 ? "slot" : "slots" }}</template>
-        </span>
-        <div v-if="craftsScope === 'store'" class="ml-auto flex flex-none items-center gap-0.5 rounded-md border border-border p-0.5">
+        <div v-if="craftsScope === 'store'" class="flex flex-none items-center gap-0.5 rounded-md border border-border p-0.5" :class="isCompact ? '' : 'ml-auto'">
           <button
             v-for="so in (['top', 'new'] as const)"
             :key="so"
-            class="rounded px-2.5 py-1 text-f10 uppercase tracking-cs1 transition-colors"
-            :class="storeSort === so ? 'bg-secondary text-foreground' : 'text-muted-foreground hover:text-foreground'"
+            class="rounded px-2.5 text-f10 uppercase tracking-cs1 transition-colors"
+            :class="[storeSort === so ? 'bg-secondary text-foreground' : 'text-muted-foreground hover:text-foreground', isCompact ? 'h-9' : 'py-1']"
+            :title="so === 'top' ? 'Best rated first' : 'Newest first'"
             @click="storeSort = so"
           >{{ so === 'top' ? 'Top' : 'New' }}</button>
         </div>
@@ -333,14 +347,35 @@ function useCraft(c: SavedCraft | StoreCraft) {
              many free slots. -->
         <template v-if="pickerSource === 'crafts'">
           <CraftTile
-            v-for="(c, i) in craftRows"
+            v-for="(c, i) in craftFitRows"
             :key="'craft-' + craftsScope + c.id"
             class="animate-cell-in"
             :style="{ '--i': i }"
             :craft="c"
-            :fits="fitsCount(c.stickers.length)"
-            :size="attachCardSize"
+            fits
+            :room="craftRoom"
+            :plan="craftPlanFor(c.stickers.length)"
+            :target="onMat ? 'mat' : 'gun'"
             :published="craftsScope === 'mine' && craftsPublished.has(c.id)"
+            :score="craftsScope === 'mine' ? (myScores.get(c.id) ?? null) : null"
+            @preview="previewCraft = c"
+            @use="useCraft(c)"
+            @vote="(v) => voteOn(c as StoreCraft, v)"
+          />
+          <div v-if="craftBigRows.length" class="col-span-full mt-2 flex items-center gap-2 text-f11 text-muted-foreground">
+            {{ onMat ? "Need more room on the mat" : "Need more empty slots" }} ({{ craftBigRows.length }})
+            <span class="h-px flex-1 bg-border"></span>
+          </div>
+          <CraftTile
+            v-for="c in craftBigRows"
+            :key="'craft-big-' + craftsScope + c.id"
+            :craft="c"
+            :fits="false"
+            :room="craftRoom"
+            :plan="null"
+            :target="onMat ? 'mat' : 'gun'"
+            :published="craftsScope === 'mine' && craftsPublished.has(c.id)"
+            :score="craftsScope === 'mine' ? (myScores.get(c.id) ?? null) : null"
             @preview="previewCraft = c"
             @use="useCraft(c)"
             @vote="(v) => voteOn(c as StoreCraft, v)"
@@ -351,14 +386,19 @@ function useCraft(c: SavedCraft | StoreCraft) {
               The Craft Store needs the updated backend.
             </template>
             <template v-else-if="pickerQuery">No crafts match that search.</template>
-            <template v-else-if="craftsScope === 'store'">
-              No published crafts {{ craftCount ? `of ${craftCount} ${craftCount === 1 ? 'sticker' : 'stickers'}` : 'that fit here' }} yet.
+            <template v-else-if="craftCount">
+              {{ craftsScope === 'store' ? 'No published crafts' : 'None of your crafts' }} {{ craftsScope === 'store' ? 'of' : 'has' }} {{ craftCount }} {{ craftCount === 1 ? 'sticker' : 'stickers' }}.
+              <div class="mt-4 flex justify-center">
+                <button
+                  class="tac-action flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-f10 uppercase tracking-cs1 text-muted-foreground"
+                  @click="craftCount = 0"
+                >Show crafts of any size</button>
+              </div>
             </template>
-            <template v-else-if="pickerCrafts.length">
-              None of your crafts {{ craftCount ? `has ${craftCount} ${craftCount === 1 ? 'sticker' : 'stickers'}` : 'fits here' }} — {{ onMat ? `there is room for ${craftRoom} more on the mat` : `there ${craftRoom === 1 ? 'is' : 'are'} ${craftRoom} empty sticker ${craftRoom === 1 ? 'slot' : 'slots'}` }}.
-            </template>
+            <template v-else-if="craftsScope === 'store'">No one has published a craft yet.</template>
             <template v-else>
-              No Sticker Crafts saved yet. {{ onMat ? "Select up to five stickers on the mat and press Save as craft." : "Lay up to five stickers out on the Sticker Crafts tab, select them and press Save as craft." }}
+              You haven't saved any crafts yet.
+              {{ onMat ? "Select up to five stickers on the mat and press Save as craft" : "Make one on the Sticker Crafts tab in the top menu" }}, or use one from the Craft Store.
               <!-- Or use someone else's: the way into the store from an empty shelf. -->
               <div class="mt-4 flex justify-center">
                 <button
@@ -366,7 +406,7 @@ function useCraft(c: SavedCraft | StoreCraft) {
                   title="See the crafts other players published"
                   @click="craftsScope = 'store'"
                 >
-                  <Store class="h-3.5 w-3.5" /> Browse
+                  <Store class="h-3.5 w-3.5" /> Browse the Craft Store
                 </button>
               </div>
             </template>
@@ -411,9 +451,9 @@ function useCraft(c: SavedCraft | StoreCraft) {
         <!-- Nothing to say on an empty result set; `h-11` holds the space
              regardless, so the grid above never resizes either way. -->
         <template v-else-if="pickerSource === 'crafts'">
-          <template v-if="craftRows.length">
-            {{ craftRows.length }} {{ craftsScope === 'store' ? 'in the store' : craftRows.length === 1 ? 'craft' : 'crafts' }} · {{ onMat ? "Use lays it on the mat" : "Use fills empty slots from this one; stickers already on the gun move along" }}
-          </template>
+          <span v-if="craftRows.length && !isCompact" class="text-f11 normal-case tracking-normal">
+            {{ onMat ? "Use lays the craft on the mat as a group." : "Use holds the craft over the gun — drag it into place, or press Place to put it on its slots." }}
+          </span>
         </template>
         <template v-else-if="!pickerRows.length"></template>
         <!-- Owned counts spares against the total, because "3 of 11 spare"
@@ -428,8 +468,10 @@ function useCraft(c: SavedCraft | StoreCraft) {
       <CraftPreview
         v-if="previewCraft"
         :craft="previewCraft"
-        :fits="fitsCount(previewCraft.stickers.length)"
+        :fits="craftFits(previewCraft.stickers.length)"
         :room="craftRoom"
+        :plan="craftPlanFor(previewCraft.stickers.length)"
+        :target="onMat ? 'mat' : 'gun'"
         @close="previewCraft = null"
         @use="useCraft(previewCraft)"
         @vote="(v) => voteOn(previewCraft as StoreCraft, v)"

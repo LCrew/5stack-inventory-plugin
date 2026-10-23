@@ -177,6 +177,8 @@ import { gloveSeedMoves, loadGloveModernDef, type GloveModernDef } from "./glove
 import { gloveLegacySeedMoves, loadGlovePaintDef } from "./gloveComposite";
 import { glovePlacementAt, glovePlacementTable, glovePlacementTraits } from "./glovePattern";
 import { isCompact, isCoarse, reducedMotion } from "./responsive";
+import { CTA_CLASS, CTA_STYLE } from "./ctaButton";
+import { slotsText } from "./craftPlanText";
 import { revealInScroller, scrollFade, scrollPanelToTop } from "./dom";
 import { hasModel, hasModelSync } from "./modelAvailability";
 import { INCOMPLETE } from "./viewerSentinel";
@@ -3778,8 +3780,20 @@ const craftDrop = useStickerCraftPlacement({
   // Close in on the sticker surface while it waits; back out if it is put
   // back. A viewer still mounting picks it up in its ready callback below.
   onWait: () => modalViewer.current()?.frameStickers("in"),
-  onSettle: (placed) => modalViewer.current()?.frameStickers(placed ? "stay" : "back"),
+  onSettle: (placed) => {
+    modalViewer.current()?.frameStickers(placed ? "stay" : "back");
+    if (placed) showCraftPlacedTip();
+  },
 });
+/** "Placed — drag any of its stickers…": after a craft lands, until the first
+ *  drag or a few seconds. */
+const craftPlacedTip = ref(false);
+let craftPlacedTipTimer: ReturnType<typeof setTimeout> | undefined;
+function showCraftPlacedTip() {
+  craftPlacedTip.value = true;
+  clearTimeout(craftPlacedTipTimer);
+  craftPlacedTipTimer = setTimeout(() => (craftPlacedTip.value = false), 6000);
+}
 // Top-level for the template, which only unwraps refs it can see directly.
 const {
   pending: craftPending,
@@ -3949,6 +3963,7 @@ async function mountModalViewer() {
       // Drags write straight into the craft form — the numeric inputs follow
       // live, and confirm sends the same offsets to the game server.
       onStickerPlaced(slot: number, x: number, y: number) {
+        craftPlacedTip.value = false;
         const st = craft.value?.stickers[slot];
         // A craft's stickers move together; the rest follow this one.
         if (st) craftDrop.followMove(slot, x, y);
@@ -4564,6 +4579,16 @@ const pickerView = useAttachmentPicker({
   craftRoom: () => {
     const st = (craft.value?.stickers ?? []).slice(0, stickerSlotCount);
     return stickerSlotCount - st.filter(Boolean).length;
+  },
+  // Said on each craft tile before Use: its run and who moves along for it.
+  craftPlan: (slot, n) => {
+    const c = craft.value;
+    const plan = c ? craftDrop.planFor(slot, n) : null;
+    if (!c || !plan) return null;
+    return {
+      slots: plan.slots,
+      moved: plan.moves.map(([from, to]) => ({ name: (c.stickers[from]?.name ?? "Sticker").replace(/^Sticker \| /, ""), to })),
+    };
   },
 });
 const { picker, openPicker } = pickerView;
@@ -10458,7 +10483,7 @@ if (MDEBUG) {
                 <div
                   v-if="modal3d && craftPending"
                   class="pointer-events-none absolute inset-x-0 z-[6] flex justify-center"
-                  :class="isCompact ? 'top-2' : 'top-[13%]'"
+                  :class="isCompact ? 'top-12' : 'top-[13%]'"
                 >
                   <div
                     class="animate-craft-float pointer-events-auto flex cursor-grab flex-col items-center gap-1.5 rounded-lg border border-dashed border-[color:var(--acc)] bg-card/75 shadow-lg backdrop-blur transition-opacity"
@@ -10474,9 +10499,22 @@ if (MDEBUG) {
                       </div>
                     </div>
                     <span class="flex items-center gap-1.5 text-f10 uppercase tracking-cs1 text-foreground">
-                      <MoveIcon class="h-3.5 w-3.5 text-[color:var(--acc)]" /> {{ isCompact ? 'Drag or tap' : 'Drag onto the gun · or click' }}
+                      <MoveIcon class="h-3.5 w-3.5 text-[color:var(--acc)]" /> Drag onto the gun
                     </span>
+                    <button
+                      :class="CTA_CLASS"
+                      :style="CTA_STYLE"
+                      class="!h-8 !px-3 !text-f10"
+                      @pointerdown.stop
+                      @click="craftDrop.placeHere()"
+                    >{{ tr("inventory.stickerCrafts.placeOn", "Place on") }} {{ slotsText(craftPending.slots) }}</button>
                   </div>
+                </div>
+                <!-- Placed: how to move it from here, until the first drag. -->
+                <div v-if="modal3d && craftPlacedTip" class="pointer-events-none absolute inset-x-0 bottom-20 z-[6] flex justify-center px-4">
+                  <span class="rounded-md border border-border bg-card/85 px-3 py-1.5 text-center text-f11 text-foreground shadow-lg backdrop-blur">
+                    {{ isCompact ? "Placed — drag a sticker to move the whole craft · twist with two fingers to turn" : "Placed — drag any of its stickers to move the whole craft · Shift + drag to turn" }}
+                  </span>
                 </div>
                 <!-- Live cost, stacked under the 2D/3D + cog row so it reads as part
                      of the same top-left column of chrome — the same corner the
@@ -10624,37 +10662,37 @@ if (MDEBUG) {
                    see useStickerCraftPlacement. The whole card is the handle. -->
               <div
                 v-if="craftPending"
-                class="mb-2 flex cursor-grab items-center gap-2 rounded-md border border-dashed border-[color:var(--acc)] bg-background/70 p-1.5"
+                class="mb-2 flex cursor-grab flex-col gap-1.5 rounded-md border border-dashed border-[color:var(--acc)] bg-background/70 p-1.5"
                 style="touch-action: none"
                 :title="'Drag onto the gun to place ' + craftPending.entry.name"
                 @pointerdown="craftDrop.startDrag"
               >
-                <div class="grid h-10 w-20 flex-none place-items-center overflow-hidden rounded bg-[#183a31]">
-                  <img v-if="craftPending.entry.preview" :src="craftPending.entry.preview" alt="" class="h-full w-full object-cover" draggable="false" />
-                  <div v-else class="flex items-center justify-center gap-0.5 p-0.5">
-                    <img v-for="(cs, ci) in craftPending.entry.stickers" :key="ci" :src="cs.image" alt="" class="h-5 w-5 object-contain" draggable="false" />
+                <div class="flex items-center gap-2">
+                  <div class="grid h-10 w-20 flex-none place-items-center overflow-hidden rounded bg-[#183a31]">
+                    <img v-if="craftPending.entry.preview" :src="craftPending.entry.preview" alt="" class="h-full w-full object-cover" draggable="false" />
+                    <div v-else class="flex items-center justify-center gap-0.5 p-0.5">
+                      <img v-for="(cs, ci) in craftPending.entry.stickers" :key="ci" :src="cs.image" alt="" class="h-5 w-5 object-contain" draggable="false" />
+                    </div>
                   </div>
+                  <div class="min-w-0 flex-1 truncate text-f11 text-foreground">{{ craftPending.entry.name }}</div>
+                  <button
+                    class="grid h-7 w-7 flex-none place-items-center rounded text-muted-foreground transition-colors hover:text-foreground"
+                    title="Put it back — nothing is placed (Esc)"
+                    @pointerdown.stop
+                    @click="craftDrop.cancel()"
+                  ><X class="h-3.5 w-3.5" /></button>
                 </div>
-                <div class="min-w-0 flex-1">
-                  <div class="truncate text-f11 text-foreground">{{ craftPending.entry.name }}</div>
-                  <div class="text-f9 uppercase tracking-cs1 text-[color:var(--acc)]">
-                    Drag onto the gun · slot{{ craftPending.slots.length > 1 ? 's' : '' }} {{ craftPending.slots[0] + 1 }}<template v-if="craftPending.slots.length > 1">–{{ craftPending.slots[craftPending.slots.length - 1] + 1 }}</template>
-                  </div>
+                <div class="flex items-center gap-2">
+                  <span class="min-w-0 flex-1 text-f10 uppercase tracking-cs1 text-[color:var(--acc)]">Drag onto the gun</span>
+                  <!-- No drag needed: it goes where its slots put a sticker, and
+                       can be dragged on from there. -->
+                  <button
+                    class="flex h-7 flex-none items-center gap-1 rounded-md border border-border px-2 text-f10 uppercase tracking-cs1 text-foreground tac-action"
+                    title="Put it on its slots without dragging — move it on the gun afterwards"
+                    @pointerdown.stop
+                    @click="craftDrop.placeHere()"
+                  >{{ tr("inventory.stickerCrafts.placeOn", "Place on") }} {{ slotsText(craftPending.slots) }}</button>
                 </div>
-                <!-- No drag needed: it goes where its slots put a sticker, and
-                     can be dragged on from there. -->
-                <button
-                  class="flex h-7 flex-none items-center gap-1 rounded-md border border-border px-2 text-f9 uppercase tracking-cs1 text-muted-foreground tac-action"
-                  title="Put it on its slots without dragging — move it on the gun afterwards"
-                  @pointerdown.stop
-                  @click="craftDrop.placeHere()"
-                >{{ tr("inventory.stickerCrafts.place", "Place") }}</button>
-                <button
-                  class="grid h-7 w-7 flex-none place-items-center rounded text-muted-foreground transition-colors hover:text-foreground"
-                  title="Put it back — nothing is placed (Esc)"
-                  @pointerdown.stop
-                  @click="craftDrop.cancel()"
-                ><X class="h-3.5 w-3.5" /></button>
               </div>
               <!-- A placed craft. Grouped, its stickers move and turn as one in
                    3D; Ungroup lets each move on its own for fine adjustments,
@@ -10666,7 +10704,8 @@ if (MDEBUG) {
               >
                 <Link2 v-if="craftGroup.linked" class="h-3 w-3 flex-none" />
                 <UngroupIcon v-else class="h-3 w-3 flex-none" />
-                <span class="min-w-0 truncate">{{ craftGroup.name }} · {{ craftGroup.linked ? 'moves as one' : 'moving singly' }}</span>
+                <span class="min-w-0 truncate text-f11 normal-case tracking-normal text-foreground">{{ craftGroup.name }}</span>
+                <span class="flex-none">{{ craftGroup.linked ? 'moves as one' : 'moving singly' }}</span>
                 <button
                   class="ml-auto flex flex-none items-center gap-1 rounded border border-border px-1.5 py-0.5 uppercase tracking-cs1 text-muted-foreground tac-action"
                   :title="craftGroup.linked ? 'Ungroup — move the stickers one at a time for fine adjustments' : 'Group again — the stickers move and turn as one from where they are now'"

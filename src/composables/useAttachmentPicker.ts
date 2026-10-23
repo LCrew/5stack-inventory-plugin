@@ -104,11 +104,21 @@ export interface AttachmentPickerOptions {
   fail: (e: unknown) => void;
   /**
    * How many stickers a Sticker Craft may bring, picked for this slot: the gun's
-   * free slots, counting the one being filled. A gun with three stickers already
-   * on takes a craft of two at most. Five when not given.
+   * empty slots. A gun with three stickers already on takes a craft of two at
+   * most. Five when not given.
    */
   craftRoom?: (slot: number) => number;
+  /**
+   * Where a craft of n stickers would go, picked for this slot, and which of the
+   * gun's stickers move along to make room for it — said on the tile BEFORE Use
+   * rather than found out after. Null when nothing can say (the mat has no
+   * slots).
+   */
+  craftPlan?: (slot: number, n: number) => CraftPlan | null;
 }
+
+/** A craft's run on the gun: its slots (0-based) and the stickers it moves. */
+export type CraftPlan = { slots: number[]; moved: { name: string; to: number }[] };
 
 export function useAttachmentPicker(opts: AttachmentPickerOptions) {
   const { inventory, attachedName } = opts;
@@ -185,17 +195,43 @@ export function useAttachmentPicker(opts: AttachmentPickerOptions) {
   const craftRoom = computed(() =>
     Math.max(0, Math.min(MAX_PER_GROUPING, picker.value ? (opts.craftRoom?.(picker.value.slot) ?? MAX_PER_GROUPING) : MAX_PER_GROUPING)),
   );
-  /** The sticker-count filter: 0 is "everything that fits", 1..5 exactly that many. */
+  /** The sticker-count filter: 0 is all of them, 1..5 exactly that many. */
   const craftCount = ref(0);
-  const fitsCount = (n: number) => n <= craftRoom.value && (!craftCount.value || n === craftCount.value);
+  /** A craft of n stickers fits the room here. Crafts that don't are still
+   *  SHOWN, after the ones that do and saying why — a shelf that silently
+   *  hid them read as crafts gone missing. */
+  const craftFits = (n: number) => n <= craftRoom.value;
+  const countMatches = (n: number) => !craftCount.value || n === craftCount.value;
+  /** Where a craft of n stickers would go — see AttachmentPickerOptions.craftPlan. */
+  const craftPlanFor = (n: number): CraftPlan | null =>
+    picker.value && craftFits(n) ? (opts.craftPlan?.(picker.value.slot, n) ?? null) : null;
   const pickerCraftRows = computed(() => {
     const q = pickerQuery.value.trim().toLowerCase();
     return pickerCrafts.value.filter(
       (c) =>
-        fitsCount(c.stickers.length) &&
+        countMatches(c.stickers.length) &&
         (!q || c.name.toLowerCase().includes(q) || c.stickers.some((s) => s.name.toLowerCase().includes(q))),
     );
   });
+  /**
+   * The store's numbers for your own published crafts, so Mine can show how
+   * they are rated. From one store page (100, best first) — enough for a
+   * panel's worth; a craft past it simply shows no score.
+   */
+  const myScores = ref<Map<string, { ups: number; downs: number; score: number }>>(new Map());
+  let myScoresFor: object | null = null;
+  async function loadMyScores() {
+    const opened = picker.value;
+    if (!opened || myScoresFor === opened || !craftsPublished.value.size) return;
+    myScoresFor = opened;
+    try {
+      const rows = await loadCraftStore({ sort: "top" });
+      if (picker.value !== opened || !rows) return;
+      myScores.value = new Map(rows.filter((r) => r.mine).map((r) => [r.id, { ups: r.ups, downs: r.downs, score: r.score }]));
+    } catch {
+      /* no scores is a plainer tile, not an error */
+    }
+  }
   const storeSort = ref<"top" | "new">("top");
   const storeRows = ref<StoreCraft[]>([]);
   const storeLoading = ref(false);
@@ -209,9 +245,9 @@ export function useAttachmentPicker(opts: AttachmentPickerOptions) {
     const token = ++storeToken;
     storeLoading.value = true;
     try {
+      // Every size: the ones that don't fit here are shown too, marked.
       const rows = await loadCraftStore({
         sort: storeSort.value,
-        max: craftRoom.value,
         count: craftCount.value || undefined,
         q: pickerQuery.value.trim() || undefined,
       });
@@ -231,6 +267,7 @@ export function useAttachmentPicker(opts: AttachmentPickerOptions) {
   });
   watch(pickerSource, (src) => {
     if (src === "crafts" && craftsScope.value === "store") void storeFetch();
+    if (src === "crafts") void loadMyScores();
   });
   watch(pickerQuery, () => {
     if (pickerSource.value !== "crafts" || craftsScope.value !== "store") return;
@@ -511,6 +548,8 @@ export function useAttachmentPicker(opts: AttachmentPickerOptions) {
     pickerCraftsLoading.value = kind === "sticker";
     craftsScope.value = "mine";
     craftCount.value = 0;
+    myScores.value = new Map();
+    myScoresFor = null;
     storeRows.value = [];
     storeMissing.value = false;
     previewCraft.value = null;
@@ -521,6 +560,7 @@ export function useAttachmentPicker(opts: AttachmentPickerOptions) {
           if (picker.value !== opened) return;
           pickerCrafts.value = library.filter((c) => c.stickers.length <= MAX_PER_GROUPING);
           craftsPublished.value = published;
+          if (pickerSource.value === "crafts") void loadMyScores();
         })
         .catch(() => {})
         .finally(() => {
@@ -584,7 +624,9 @@ export function useAttachmentPicker(opts: AttachmentPickerOptions) {
     craftsScope,
     craftRoom,
     craftCount,
-    fitsCount,
+    craftFits,
+    craftPlanFor,
+    myScores,
     storeSort,
     storeRows,
     storeLoading,

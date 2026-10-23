@@ -1198,7 +1198,7 @@ const FIELD =
 
       <!-- ============ SIDEBAR ============ -->
       <aside
-        class="flex flex-col gap-3 overflow-y-auto p-3"
+        class="sc-panel flex min-w-0 flex-col gap-3 overflow-y-auto overflow-x-hidden p-3"
         :class="compact ? 'min-h-0 flex-1 border-t border-border' : 'w-[300px] flex-none border-l border-border'"
       >
         <!-- On a phone the three parts take turns under the mat. -->
@@ -1576,6 +1576,14 @@ const FIELD =
   color: hsl(var(--foreground));
   background: color-mix(in srgb, var(--acc) 12%, transparent);
   box-shadow: inset 2px 0 0 var(--acc);
+}
+/* The panel scrolls up and down only. An overflow-y scroller is a scroller in
+   both directions to iOS, which let a sideways swipe drag the whole panel off
+   to one side and bounce it back; pan-y keeps a finger's gesture vertical
+   (sliders and the row grips handle their own drags). */
+.sc-panel {
+  overscroll-behavior-x: none;
+  touch-action: pan-y;
 }
 /* The handle a finger can drag by; the rest of a row scrolls the list. */
 .sc-grip {

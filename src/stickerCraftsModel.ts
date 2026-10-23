@@ -83,10 +83,11 @@ export interface SavedCraft {
 }
 
 /**
- * Bump when the board's look changes (light, materials), so stored previews are
- * redrawn the next time the board is open instead of showing the old look.
+ * Bump when the board's look or framing changes (light, materials, the fixed
+ * scale), so stored previews are redrawn the next time the board is open
+ * instead of showing the old look.
  */
-export const PREVIEW_VERSION = 3;
+export const PREVIEW_VERSION = 4;
 
 /** A named set of stickers on the mat that move and turn as one. */
 export type Grouping = { id: string; name: string };

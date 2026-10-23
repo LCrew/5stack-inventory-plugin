@@ -14,6 +14,8 @@ import { CTA_CLASS, CTA_STYLE } from "../ctaButton";
 import { useViewerMount } from "../composables/useViewerMount";
 import { QUAD_MODELS } from "../viewerModel";
 import type { SavedCraft, StoreCraft } from "../stickerCraftsModel";
+import type { CraftPlan } from "../composables/useAttachmentPicker";
+import { planSentence } from "../craftPlanText";
 
 const props = defineProps<{
   craft: SavedCraft | StoreCraft;
@@ -21,6 +23,10 @@ const props = defineProps<{
   fits: boolean;
   /** How many stickers fit, for the reason Use is off. */
   room: number;
+  /** Where it would go on the gun — null on the mat, or when it doesn't fit. */
+  plan: CraftPlan | null;
+  /** Where a pick goes: a gun's slots or the Sticker Crafts mat. */
+  target: "gun" | "mat";
 }>();
 const emit = defineEmits<{
   (e: "close"): void;
@@ -53,6 +59,17 @@ onMounted(() =>
 onBeforeUnmount(() => viewer.teardown());
 
 const n = computed(() => props.craft.stickers.length);
+const shortName = (name: string) => name.replace(/^Sticker \| /, "");
+/** Where Use puts it, or why it can't — the whole sentence, names and all. */
+const where = computed(() => {
+  if (!props.fits) {
+    return props.target === "mat"
+      ? `Needs room for ${n.value} on the mat — there is room for ${props.room}.`
+      : `Needs ${n.value} empty slots — this gun has ${props.room}.`;
+  }
+  if (props.plan) return planSentence(props.plan);
+  return props.target === "mat" ? "Lays on the mat as a group." : "";
+});
 </script>
 
 <template>
@@ -94,8 +111,19 @@ const n = computed(() => props.craft.stickers.length);
           The 3D view could not start. {{ failed }}
         </div>
       </div>
+      <!-- What is in it, in slot order, and where it would go. -->
+      <div class="flex flex-col gap-2 border-t border-border px-3 py-2">
+        <div v-if="where" class="text-f11" :class="fits ? 'text-muted-foreground' : 'text-destructive'">{{ where }}</div>
+        <div class="flex flex-wrap gap-x-3 gap-y-1.5">
+          <div v-for="(s, i) in craft.stickers" :key="i" class="flex min-w-0 items-center gap-1.5 text-f11 text-foreground">
+            <img :src="s.image" alt="" class="h-8 w-8 flex-none object-contain" draggable="false" />
+            <span class="truncate">{{ shortName(s.name) }}</span>
+            <span v-if="plan" class="flex-none font-mono text-f10 text-muted-foreground">slot {{ plan.slots[i] + 1 }}</span>
+          </div>
+        </div>
+      </div>
       <div class="flex items-center gap-3 border-t border-border px-3 py-2">
-        <span class="font-mono text-f9 uppercase tracking-cs1 text-muted-foreground">
+        <span class="text-f11 text-muted-foreground">
           {{ n }} {{ n === 1 ? "sticker" : "stickers" }}
         </span>
         <!-- Votes: a store craft only, and never your own. -->
@@ -107,7 +135,7 @@ const n = computed(() => props.craft.stickers.length);
             :title="store.mine ? 'Your craft' : store.myVote === 1 ? 'Take your upvote back' : 'Upvote'"
             @click="emit('vote', 1)"
           ><ArrowBigUp class="h-4 w-4" /></button>
-          <span class="min-w-[2ch] text-center font-mono text-f11" :title="`${store.ups} up · ${store.downs} down`">{{ store.score }}</span>
+          <span class="font-mono text-f11" :title="`Score ${store.score}`">{{ store.ups }} · {{ store.downs }}</span>
           <button
             class="grid h-7 w-7 place-items-center rounded transition-colors disabled:opacity-35"
             :class="store.myVote === -1 ? 'text-destructive' : 'text-muted-foreground hover:text-foreground'"
@@ -121,7 +149,7 @@ const n = computed(() => props.craft.stickers.length);
           :style="CTA_STYLE"
           class="ml-auto"
           :disabled="!fits"
-          :title="fits ? 'Use this craft' : `Needs ${n} free sticker slots — there ${room === 1 ? 'is' : 'are'} ${room}`"
+          :title="fits ? 'Use this craft' : where"
           @click="emit('use')"
         >
           Use this craft
