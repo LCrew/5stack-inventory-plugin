@@ -972,14 +972,19 @@ watch(
 );
 /** The weapons that take stickers, by kind: the outline cards, in this order. */
 const OUTLINE_KINDS = ["rifle", "smg", "heavy", "secondary"] as const;
+/** The guns most crafts are for come first (AK-47, M4A4, M4A1-S, AWP, Desert
+ *  Eagle, Glock-18, USP-S); the rest follow by kind, then by name. */
+const OUTLINE_FIRST = ["ak47", "m4a1", "m4a1_silencer", "awp", "deagle", "glock", "usp_silencer"];
+const outlineRank = (model: string) => {
+  const i = OUTLINE_FIRST.indexOf(model);
+  return i < 0 ? OUTLINE_FIRST.length : i;
+};
 const outlineItems = computed<RailItem[]>(() => [
   { key: "none", name: tr("inventory.stickerCrafts.noOutline", "No outline"), short: tr("inventory.stickerCrafts.outlineNone", "None") },
-  ...OUTLINE_KINDS.flatMap((kind) =>
-    props.weapons
-      .filter((w) => w.category === kind)
-      .sort((a, b) => a.name.localeCompare(b.name))
-      .map((w) => ({ key: w.model, name: w.name, short: w.name })),
-  ),
+  ...OUTLINE_KINDS.flatMap((kind) => props.weapons.filter((w) => w.category === kind).sort((a, b) => a.name.localeCompare(b.name)))
+    // A stable sort: the first seven move to the front, the rest keep their order.
+    .sort((a, b) => outlineRank(a.model) - outlineRank(b.model))
+    .map((w) => ({ key: w.model, name: w.name, short: w.name })),
 ]);
 /** A card's drawing: the outline's loops as one SVG path, and its box. */
 const outlineArt = computed(() => {
