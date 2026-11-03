@@ -284,6 +284,8 @@
       "seeAllN": "See all",
       "localShort": "Local",
       "noOutline": "No outline",
+      "outline": "Outline",
+      "outlineNone": "None",
       "delete": "Delete",
       "onMat": "On the mat",
       "library": "Saved crafts",

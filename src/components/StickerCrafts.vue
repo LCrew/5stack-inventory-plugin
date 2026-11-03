@@ -57,9 +57,11 @@ import { usePersistedBool, usePersistedString } from "../composables/usePersiste
 import {
   GRID_H,
   GRID_W,
+  HOME_LAYOUT,
   MAX_ON_BOARD,
   MAX_PER_GROUPING,
   PREVIEW_VERSION,
+  OUTLINE_ROOM,
   STICKER_CM,
   deleteCraft,
   loadStickerCrafts,
@@ -70,11 +72,14 @@ import {
   type CraftsHome,
   type CraftSticker,
   type Grouping,
+  type MatLayout,
   type SavedCraft,
   type StoreCraft,
 } from "../stickerCraftsModel";
 import type { StickerBoard } from "../stickerBoard";
+import type { WeaponOutline } from "../outlineTrace";
 import AttachmentPicker from "./AttachmentPicker.vue";
+import ModelRail, { type RailItem } from "./ModelRail.vue";
 import PillTabs from "./PillTabs.vue";
 import { CTA_CLASS, CTA_STYLE } from "../ctaButton";
 import { Z } from "../zLayers";
@@ -233,8 +238,9 @@ const centroid = (list: { x: number; y: number }[]) => ({
 });
 const shortName = (name: string) => name.replace(/^Sticker \| /, "");
 const fmt = (v: number, d = 1) => v.toFixed(d);
-const clampX = (x: number) => Math.min(GRID_W, Math.max(0, x));
-const clampY = (y: number) => Math.min(GRID_H, Math.max(0, y));
+/** Onto the area stickers may go (workArea): the home grid, or the chalked weapon and room round it. */
+const clampX = (x: number) => Math.min(workArea.value.x1, Math.max(workArea.value.x0, x));
+const clampY = (y: number) => Math.min(workArea.value.y1, Math.max(workArea.value.y0, y));
 /** -180..180 in the game's half-degree steps (CS2_STICKER_ROTATION_STEP). */
 const normDeg = (d: number) => {
   const r = ((((d + 180) % 360) + 360) % 360) - 180;
@@ -333,10 +339,12 @@ const tickGroup = (id: string) => {
 function patchSelected(fn: (s: BoardSticker) => void) {
   for (const s of stickers.value) if (selected.value.has(s.uid)) fn(s);
 }
+/** Move the selection by this much, in the RULERS' centimetres (cmPerUnit). */
 function nudge(dx: number, dy: number) {
+  const f = matLayout.value.cmPerUnit;
   patchSelected((s) => {
-    s.x = clampX(Math.round((s.x + dx) * 10) / 10);
-    s.y = clampY(Math.round((s.y + dy) * 10) / 10);
+    s.x = clampX(Math.round((s.x + dx / f) * 100) / 100);
+    s.y = clampY(Math.round((s.y + dy / f) * 100) / 100);
   });
 }
 type Pose = { x: number; y: number; rot: number };
@@ -363,11 +371,16 @@ function rotateSelection(deg: number) {
 function setWear(w: number) {
   patchSelected((s) => (s.wear = w));
 }
+/** The X / Y fields read off the mat's rulers: centimetres from their zero,
+ *  in the chalked weapon's own centimetres (MatLayout). */
+const rulerX = (x: number) => (x - matLayout.value.x0) * matLayout.value.cmPerUnit;
+const rulerY = (y: number) => (y - matLayout.value.y0) * matLayout.value.cmPerUnit;
 function setSingle(key: "x" | "y" | "rot", v: number) {
   const s = single.value;
   if (!s || !Number.isFinite(v)) return;
-  if (key === "x") s.x = clampX(v);
-  else if (key === "y") s.y = clampY(v);
+  const l = matLayout.value;
+  if (key === "x") s.x = clampX(Math.round((l.x0 + v / l.cmPerUnit) * 100) / 100);
+  else if (key === "y") s.y = clampY(Math.round((l.y0 + v / l.cmPerUnit) * 100) / 100);
   else s.rot = normDeg(v);
 }
 
@@ -698,20 +711,21 @@ function updateCraft() {
  */
 function craftSpot(list: { x: number; y: number }[]): { x: number; y: number } {
   const half = STICKER_CM / 2;
+  const a = workArea.value;
   const clear = (cx: number, cy: number) =>
     list.every((s) => {
       const x = cx + s.x;
       const y = cy + s.y;
       return (
-        x >= half && x <= GRID_W - half && y >= half && y <= GRID_H - half &&
+        x >= a.x0 + half && x <= a.x1 - half && y >= a.y0 + half && y <= a.y1 - half &&
         !stickers.value.some((o) => Math.hypot(o.x - x, o.y - y) < STICKER_CM * 0.9)
       );
     });
   // The middle of what you are looking at, as for a single sticker.
   const mid = board.value?.viewCentre() ?? { x: GRID_W / 2, y: GRID_H / 2 };
   if (clear(mid.x, mid.y)) return mid;
-  for (let y = 6; y <= GRID_H - 2; y += 6.5) {
-    for (let x = 6; x <= GRID_W - 2; x += 6.5) if (clear(x, y)) return { x, y };
+  for (let y = a.y0 + 6; y <= a.y1 - 2; y += 6.5) {
+    for (let x = a.x0 + 6; x <= a.x1 - 2; x += 6.5) if (clear(x, y)) return { x, y };
   }
   return mid;
 }
@@ -849,8 +863,9 @@ function freeSpot(): { x: number; y: number } {
   // To the tenth of a centimetre the fields and the nudge keys work in.
   const c = { x: Math.round(v.x * 10) / 10, y: Math.round(v.y * 10) / 10 };
   const half = STICKER_CM / 2;
+  const a = workArea.value;
   const clear = (x: number, y: number) =>
-    x >= half && x <= GRID_W - half && y >= half && y <= GRID_H - half &&
+    x >= a.x0 + half && x <= a.x1 - half && y >= a.y0 + half && y <= a.y1 - half &&
     !stickers.value.some((s) => Math.hypot(s.x - x, s.y - y) < STICKER_CM * 0.9);
   if (!stickers.value.some((s) => Math.hypot(s.x - c.x, s.y - c.y) < STICKER_CM * 0.9)) return c;
   // Rings round the middle, a sticker and a bit apart, nearest first.
@@ -904,59 +919,146 @@ function finishRename(entry: SavedCraft, name: string) {
   renameSaved(entry, name);
 }
 
-// ---- the chalk outline ------------------------------------------------------------
+// ---- the chalk outline, and the mat's size -----------------------------------------
 /**
  * A weapon chalked on the mat at sticker scale, to check a layout's size and
  * place against the gun it is for. The model key of the weapon, or "" for none;
- * remembered in this browser. Measured off the weapon's own model, shape only,
- * the first time it is picked (weaponOutline).
+ * remembered in this browser.
+ *
+ * Every weapon's outline ships baked (weaponOutlines.json, made by
+ * tools/shadertest/outlines.html), so a pick lands at once and the cards draw
+ * from it; a weapon the table doesn't have yet is measured off its own model,
+ * shape only, the first time it is picked (weaponOutline + traceOutline).
  */
 const outlineModel = usePersistedString("cs2inv.stickerCrafts.outline", "");
 const outlineBusy = ref(false);
 const outlineError = ref(false);
-/** The weapons that take stickers, by kind, for the picker's groups. */
-const OUTLINE_KINDS = [
-  ["rifle", "Rifles"],
-  ["smg", "SMGs"],
-  ["heavy", "Heavy"],
-  ["secondary", "Pistols"],
-] as const;
-const outlineGroups = computed(() =>
-  OUTLINE_KINDS.map(([kind, label]) => ({
-    label,
-    weapons: props.weapons.filter((w) => w.category === kind).sort((a, b) => a.name.localeCompare(b.name)),
-  })).filter((g) => g.weapons.length),
-);
+/** The baked table, by model; null until it has loaded. */
+const baked = shallowRef<Map<string, WeaponOutline> | null>(null);
+const bakedReady = import("../weaponOutlines.json")
+  .then((m) => (m.default as unknown as { outlines: WeaponOutline[] }).outlines)
+  .catch(() => [] as WeaponOutline[])
+  .then((list) => void (baked.value = new Map(list.map((o) => [o.model, o]))));
+/** One measured live, for a weapon the table doesn't have. */
+const traced = shallowRef<WeaponOutline | null>(null);
+const outline = computed<WeaponOutline | null>(() => {
+  const m = outlineModel.value;
+  if (!m) return null;
+  return baked.value?.get(m) ?? (traced.value?.model === m ? traced.value : null);
+});
 let outlineToken = 0;
-async function applyOutline() {
-  const b = board.value;
-  const model = outlineModel.value;
-  const token = ++outlineToken;
-  outlineError.value = false;
-  if (!b || !model) {
-    b?.setOutline(null);
+watch(
+  [outlineModel, baked],
+  async ([model, table]) => {
+    const token = ++outlineToken;
+    outlineError.value = false;
     outlineBusy.value = false;
-    return;
+    if (!model || !table || table.has(model) || traced.value?.model === model) return;
+    outlineBusy.value = true;
+    try {
+      const geo = await fetchStickerGeometry(model);
+      const [{ weaponOutline }, { traceOutline }] = await Promise.all([import("../viewer3d"), import("../outlineTrace")]);
+      const side = await weaponOutline(model, geo.slots);
+      if (token !== outlineToken) return;
+      traced.value = side ? traceOutline(model, side) : null;
+      outlineError.value = !traced.value;
+    } catch {
+      if (token === outlineToken) outlineError.value = true;
+    } finally {
+      if (token === outlineToken) outlineBusy.value = false;
+    }
+  },
+  { immediate: true },
+);
+/** The weapons that take stickers, by kind: the outline cards, in this order. */
+const OUTLINE_KINDS = ["rifle", "smg", "heavy", "secondary"] as const;
+const outlineItems = computed<RailItem[]>(() => [
+  { key: "none", name: tr("inventory.stickerCrafts.noOutline", "No outline"), short: tr("inventory.stickerCrafts.outlineNone", "None") },
+  ...OUTLINE_KINDS.flatMap((kind) =>
+    props.weapons
+      .filter((w) => w.category === kind)
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map((w) => ({ key: w.model, name: w.name, short: w.name })),
+  ),
+]);
+/** A card's drawing: the outline's loops as one SVG path, and its box. */
+const outlineArt = computed(() => {
+  const out = new Map<string, { d: string; box: string }>();
+  for (const [model, o] of baked.value ?? []) {
+    out.set(model, { d: o.paths.map((p) => "M" + p.join(" ") + "Z").join(""), box: `0 0 ${o.w} ${o.h}` });
   }
-  outlineBusy.value = true;
-  try {
-    const geo = await fetchStickerGeometry(model);
-    const { weaponOutline } = await import("../viewer3d");
-    const o = await weaponOutline(model, geo.slots);
-    if (token !== outlineToken || board.value !== b) return;
-    b.setOutline(o);
-    outlineError.value = !o;
-  } catch {
-    if (token === outlineToken) outlineError.value = true;
-  } finally {
-    if (token === outlineToken) outlineBusy.value = false;
+  return out;
+});
+/** The chalked weapon's size and its stickers', in its own centimetres. */
+const outlineSize = computed(() => {
+  const o = outline.value;
+  if (!o) return null;
+  const f = o.stickerCm / STICKER_CM;
+  return { w: Math.round(o.w * f), h: Math.round(o.h * f), sticker: o.stickerCm.toFixed(1) };
+});
+
+/**
+ * Where stickers may go: the home grid — or, with a weapon chalked, the
+ * weapon's box and OUTLINE_ROOM round it, centred on the home grid's middle
+ * where the board chalks it. A small gun's mat is narrower than the home grid,
+ * a long one's wider.
+ */
+const workArea = computed(() => {
+  const o = outline.value;
+  if (!o) return { x0: 0, y0: 0, x1: GRID_W, y1: GRID_H };
+  const r = (v: number) => Math.round(v * 10) / 10;
+  return {
+    x0: r(GRID_W / 2 - o.w / 2 - OUTLINE_ROOM),
+    y0: r(GRID_H / 2 - o.h / 2 - OUTLINE_ROOM),
+    x1: r(GRID_W / 2 + o.w / 2 + OUTLINE_ROOM),
+    y1: r(GRID_H / 2 + o.h / 2 + OUTLINE_ROOM),
+  };
+});
+/** A sticker or turn handle being dragged: the mat holds its size till it's let go. */
+const moving = ref(false);
+let heldLayout: MatLayout = HOME_LAYOUT;
+/**
+ * The mat: the work area, grown to take in any sticker left outside it (put
+ * down for a bigger gun, say), so nothing ever sits off the edge; its rulers
+ * in the chalked weapon's centimetres.
+ */
+const matLayout = computed<MatLayout>(() => {
+  if (moving.value) return heldLayout;
+  const a = workArea.value;
+  const pad = STICKER_CM / 2 + 0.5;
+  let { x0, y0, x1, y1 } = a;
+  for (const s of stickers.value) {
+    x0 = Math.min(x0, s.x - pad);
+    y0 = Math.min(y0, s.y - pad);
+    x1 = Math.max(x1, s.x + pad);
+    y1 = Math.max(y1, s.y + pad);
   }
-}
+  const r = (v: number) => Math.round(v * 10) / 10;
+  const o = outline.value;
+  const next = { x0: r(x0), y0: r(y0), x1: r(x1), y1: r(y1), cmPerUnit: o ? o.stickerCm / STICKER_CM : 1 };
+  const h = heldLayout;
+  // The same numbers keep the same object, so the board isn't told twice.
+  if (h.x0 === next.x0 && h.y0 === next.y0 && h.x1 === next.x1 && h.y1 === next.y1 && h.cmPerUnit === next.cmPerUnit) return h;
+  return (heldLayout = next);
+});
 // ---- the board ----------------------------------------------------------------------
 const stageEl = ref<HTMLElement | null>(null);
 const board = shallowRef<StickerBoard | null>(null);
-// The outline follows the pick, and comes back when the board is (re)made.
-watch([outlineModel, board], () => void applyOutline());
+// The chalk and the mat's size follow the pick (and the board when it is made).
+// A new weapon flies the view out or in to fit; the mat growing round a
+// sticker left outside the work area leaves the camera be.
+watch([outline, board], ([o, b]) => b?.setOutline(o), { immediate: true });
+let layoutFor: WeaponOutline | null | undefined;
+watch(
+  [matLayout, board],
+  ([l, b]) => {
+    if (!b) return;
+    const refit = layoutFor !== undefined && layoutFor !== outline.value;
+    layoutFor = outline.value;
+    b.setLayout(l, refit);
+  },
+  { immediate: true },
+);
 const boardError = ref<string | null>(null);
 const boardLoading = ref(true);
 let dragFrom: Map<string, { x: number; y: number }> | null = null;
@@ -972,11 +1074,14 @@ watch(boardView, (v) => board.value?.setView(v));
 
 onMounted(async () => {
   try {
-    const { mountStickerBoard } = await import("../stickerBoard");
+    // The outline table with three: the mat starts at the chalked weapon's
+    // size rather than growing to it as the view flies in.
+    const [{ mountStickerBoard }] = await Promise.all([import("../stickerBoard"), bakedReady]);
     if (!stageEl.value) return;
     const b = await mountStickerBoard(stageEl.value, {
       pick: pickFromBoard,
       dragStart(uid) {
+        moving.value = true;
         dragLead = uid;
         dragFrom = new Map(sel.value.map((s) => [s.uid, { x: s.x, y: s.y }]));
       },
@@ -988,8 +1093,11 @@ onMounted(async () => {
         let nx = lead.x + dx;
         let ny = lead.y + dy;
         if (snap.value) {
-          nx = Math.round(nx / SNAP_CM) * SNAP_CM;
-          ny = Math.round(ny / SNAP_CM) * SNAP_CM;
+          // On the rulers' half centimetres, which are the chalked weapon's.
+          const l = matLayout.value;
+          const step = SNAP_CM / l.cmPerUnit;
+          nx = l.x0 + Math.round((nx - l.x0) / step) * step;
+          ny = l.y0 + Math.round((ny - l.y0) / step) * step;
         }
         const ddx = nx - lead.x;
         const ddy = ny - lead.y;
@@ -1003,8 +1111,10 @@ onMounted(async () => {
       dragEnd() {
         dragFrom = null;
         dragLead = null;
+        moving.value = false;
       },
       turnStart() {
+        moving.value = true;
         turning = sel.value.length ? { from: poses(), c: centroid(sel.value) } : null;
       },
       turn(deg) {
@@ -1013,9 +1123,10 @@ onMounted(async () => {
       },
       turnEnd() {
         turning = null;
+        moving.value = false;
       },
       rotate: rotateSelection,
-    });
+    }, { ...matLayout.value });
     // Navigated away while three was still arriving.
     if (!stageEl.value) {
       b.dispose();
@@ -1235,7 +1346,8 @@ const FIELD =
 
     <div class="flex min-h-0 flex-1 overflow-hidden" :class="compact ? 'flex-col' : ''">
       <!-- ============ STAGE ============ -->
-      <div class="relative min-w-0 overflow-hidden" :class="compact ? 'aspect-[3/2] w-full flex-none' : 'min-h-[280px] flex-1'">
+      <div class="flex min-w-0 flex-col" :class="compact ? 'w-full flex-none' : 'min-h-[280px] flex-1'">
+      <div class="relative min-w-0 overflow-hidden" :class="compact ? 'aspect-[3/2] w-full flex-none' : 'min-h-0 flex-1'">
         <div ref="stageEl" class="absolute inset-0"></div>
 
         <!-- A finger has no Shift or Alt: on a phone, choose what is selected
@@ -1296,7 +1408,7 @@ const FIELD =
           </div>
         </template>
 
-        <!-- View, snap and outline, top-left over the mat — and over the empty
+        <!-- View and snap, top-left over the mat — and over the empty
              mat's card, which on a phone's short stage reaches up to them. -->
         <div class="pointer-events-none absolute left-3 top-3 z-[3] flex items-center gap-2">
           <PillTabs
@@ -1323,27 +1435,6 @@ const FIELD =
             <Magnet class="h-3.5 w-3.5" />
             <span>{{ tr("inventory.stickerCrafts.snap", "Snap") }}</span>
           </button>
-          <!-- A weapon chalked on the mat at sticker scale, to check a layout
-               against the gun it is for. -->
-          <label
-            class="pointer-events-auto flex h-7 items-center gap-1.5 rounded-lg border border-border bg-card/80 pl-2 pr-1 text-muted-foreground backdrop-blur tac-action"
-            :class="[outlineModel ? 'tac-on' : '', outlineError ? '!text-destructive' : '']"
-            :title="outlineError ? 'This weapon\'s outline could not be measured — try another, or again later' : 'Chalk a weapon\'s side on the mat at sticker scale, with its slots, to check a layout\'s size and place'"
-          >
-            <Loader2 v-if="outlineBusy" class="h-3.5 w-3.5 flex-none animate-spin" />
-            <Ruler v-else class="h-3.5 w-3.5 flex-none" />
-            <select
-              v-model="outlineModel"
-              class="cursor-pointer truncate bg-transparent text-f10 uppercase tracking-cs1 outline-none"
-              :class="compact ? 'max-w-[6.5rem]' : 'max-w-[9rem]'"
-              aria-label="Weapon outline"
-            >
-              <option value="">{{ tr("inventory.stickerCrafts.noOutline", "No outline") }}</option>
-              <optgroup v-for="g in outlineGroups" :key="g.label" :label="g.label">
-                <option v-for="w in g.weapons" :key="w.model" :value="w.model">{{ w.name }}</option>
-              </optgroup>
-            </select>
-          </label>
         </div>
 
         <!-- How to drive it, for what is selected now. Desktop only: on touch
@@ -1396,6 +1487,53 @@ const FIELD =
         </div>
       </div>
 
+      <!-- The weapon outlines along the bottom: a card per gun, drawn from the
+           baked table, on the rail the knife and glove sheets pick models with
+           (ModelRail). The chosen one is chalked on the mat, and the mat grows
+           or narrows to it. -->
+      <div
+        class="flex flex-none items-center gap-2 border-t border-border bg-background py-1"
+        :class="compact ? 'min-h-[58px] px-2' : 'min-h-[62px] px-3'"
+      >
+        <ModelRail
+          :label="tr('inventory.stickerCrafts.outline', 'Outline')"
+          :items="outlineItems"
+          :current="outlineModel || 'none'"
+          :compact="compact"
+          active-bg="color-mix(in srgb, var(--acc) 12%, transparent)"
+          up
+          @select="(k: string) => (outlineModel = k === 'none' ? '' : k)"
+        >
+          <template #art="{ item }">
+            <Loader2 v-if="item.key === outlineModel && outlineBusy" class="h-4 w-4 animate-spin" />
+            <svg v-else-if="item.key === 'none'" viewBox="0 0 45 30" class="h-full w-full" aria-hidden="true">
+              <rect x="1" y="1" width="43" height="28" rx="2" fill="none" stroke="currentColor" stroke-width="1" stroke-dasharray="4 3" vector-effect="non-scaling-stroke" />
+            </svg>
+            <svg v-else-if="outlineArt.get(item.key)" :viewBox="outlineArt.get(item.key)!.box" class="h-full w-full" aria-hidden="true">
+              <path
+                :d="outlineArt.get(item.key)!.d"
+                fill="currentColor"
+                fill-opacity="0.16"
+                fill-rule="evenodd"
+                stroke="currentColor"
+                stroke-width="1"
+                stroke-linejoin="round"
+                vector-effect="non-scaling-stroke"
+              />
+            </svg>
+            <Ruler v-else class="h-4 w-4" :class="item.key === outlineModel && outlineError ? '!text-destructive' : ''" />
+          </template>
+        </ModelRail>
+        <!-- What the chalk measures, in the weapon's own centimetres: CS2
+             sizes stickers per gun, so the rulers do too. -->
+        <span
+          v-if="!compact && outlineSize"
+          class="flex-none whitespace-nowrap font-mono text-f9 text-muted-foreground"
+          title="The weapon's length and height, and one sticker's width on it — the mat's rulers read in these centimetres"
+        >{{ outlineSize.w }} × {{ outlineSize.h }} cm · sticker {{ outlineSize.sticker }} cm</span>
+      </div>
+      </div>
+
       <!-- ============ SIDEBAR ============ -->
       <aside
         ref="asideEl"
@@ -1438,11 +1576,11 @@ const FIELD =
             <div v-if="single" class="mb-2 grid grid-cols-2 gap-2">
               <label class="flex flex-col gap-1">
                 <span class="font-mono text-f8 uppercase tracking-cs1 text-muted-foreground">X · cm</span>
-                <input :class="FIELD" type="number" step="0.1" :value="fmt(single.x)" @change="setSingle('x', ($event.target as HTMLInputElement).valueAsNumber)" />
+                <input :class="FIELD" type="number" step="0.1" :value="fmt(rulerX(single.x))" @change="setSingle('x', ($event.target as HTMLInputElement).valueAsNumber)" />
               </label>
               <label class="flex flex-col gap-1">
                 <span class="font-mono text-f8 uppercase tracking-cs1 text-muted-foreground">Y · cm</span>
-                <input :class="FIELD" type="number" step="0.1" :value="fmt(single.y)" @change="setSingle('y', ($event.target as HTMLInputElement).valueAsNumber)" />
+                <input :class="FIELD" type="number" step="0.1" :value="fmt(rulerY(single.y))" @change="setSingle('y', ($event.target as HTMLInputElement).valueAsNumber)" />
               </label>
             </div>
             <div v-if="single" class="mb-1.5 flex items-center gap-2">

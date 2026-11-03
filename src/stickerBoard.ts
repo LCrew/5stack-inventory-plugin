@@ -25,13 +25,14 @@ import type * as ThreeNS from "three";
 import { applyStickerSfx } from "./stickerShader";
 import { createStickerGlow } from "./stickerGlow";
 import { paintTextureUrl } from "./paintComposite";
-import { loadStickerTexture, loadThree, stickerArtInfo, type SideOutline, type ThreeBundle } from "./viewer3d";
-import { GRID_H, GRID_W, MARGIN, STICKER_CM, type BoardSticker, type CraftSticker } from "./stickerCraftsModel";
+import { loadStickerTexture, loadThree, stickerArtInfo, type ThreeBundle } from "./viewer3d";
+import type { WeaponOutline } from "./outlineTrace";
+import { GRID_H, GRID_W, HOME_LAYOUT, MARGIN, STICKER_CM, type BoardSticker, type CraftSticker, type MatLayout } from "./stickerCraftsModel";
 
 /** Texture resolution of the mat. 40 px per cm keeps the mm ticks crisp. */
 const PX_PER_CM = 40;
-const MAT_W = GRID_W + MARGIN * 2;
-const MAT_H = GRID_H + MARGIN * 2;
+
+
 
 export interface BoardCallbacks {
   /** A press on a sticker (uid) or on the empty mat (null). Fired on pointer
@@ -65,8 +66,12 @@ export interface StickerBoard {
   /** The point of the mat in the middle of the view, in cm on the grid — where
    *  a sticker added now should land. Clamped to the grid. */
   viewCentre(): { x: number; y: number };
-  /** A weapon's side outline chalked on the mat at sticker scale, or none. */
-  setOutline(outline: SideOutline | null): void;
+  /** A weapon's side outline chalked on the mat at sticker scale, its box
+   *  centred on the home grid's middle, or none. */
+  setOutline(outline: WeaponOutline | null): void;
+  /** Grow or shrink the mat to this, animated — and with `refit`, fly the
+   *  view out (or in) to fit it, on the same beat. */
+  setLayout(layout: MatLayout, refit: boolean): void;
   dispose(): void;
 }
 
@@ -125,12 +130,15 @@ function studioEnv(THREE: typeof ThreeNS) {
 }
 
 /** Draw the mat into a canvas: grid, rulers, numbers and the angle guides. */
-function drawMat(): HTMLCanvasElement {
+function drawMat(l: MatLayout, ppc: number): HTMLCanvasElement {
+  const gwU = l.x1 - l.x0;
+  const ghU = l.y1 - l.y0;
   const cv = document.createElement("canvas");
-  cv.width = MAT_W * PX_PER_CM;
-  cv.height = MAT_H * PX_PER_CM;
+  cv.width = Math.max(2, Math.round((gwU + MARGIN * 2) * ppc));
+  cv.height = Math.max(2, Math.round((ghU + MARGIN * 2) * ppc));
   const g = cv.getContext("2d")!;
-  const px = (cm: number) => cm * PX_PER_CM;
+  const px = (u: number) => u * ppc;
+  const f = l.cmPerUnit;
   // A self-healing mat's deep green, a touch cooler than the classic so it
   // sits with the panel's dark chrome instead of glowing out of it.
   g.fillStyle = "#183a31";
@@ -150,58 +158,69 @@ function drawMat(): HTMLCanvasElement {
     g.lineTo(x2, y2);
     g.stroke();
   };
+  const gw = px(gwU);
+  const gh = px(ghU);
   // Angle guides first, so the grid draws over them.
   g.strokeStyle = "rgba(190, 230, 210, 0.13)";
-  g.lineWidth = 2;
-  const gw = px(GRID_W);
-  const gh = px(GRID_H);
+  g.lineWidth = Math.max(1, ppc / 20);
   line(ox, oy + gh, ox + gh, oy); // 45° from the bottom-left corner
   line(ox + gw, oy + gh, ox + gw - gh, oy); // and from the bottom-right
   line(ox, oy + gh, ox + gh / Math.tan(Math.PI / 3), oy); // 60°
   line(ox + gw, oy + gh, ox + gw - gh / Math.tan(Math.PI / 3), oy);
-  // The grid: every centimetre, stronger every five.
-  for (let c = 0; c <= GRID_W; c++) {
+  // The grid: every (real) centimetre, stronger every five.
+  const cmW = gwU * f;
+  const cmH = ghU * f;
+  const at = (cm: number) => px(cm / f);
+  for (let c = 0; c <= cmW + 1e-6; c++) {
     const major = c % 5 === 0;
     g.strokeStyle = major ? "rgba(190, 230, 210, 0.42)" : "rgba(190, 230, 210, 0.17)";
-    g.lineWidth = major ? 3 : 1.5;
-    line(ox + px(c), oy, ox + px(c), oy + gh);
+    g.lineWidth = Math.max(0.75, (major ? 3 : 1.5) * (ppc / PX_PER_CM));
+    line(ox + at(c), oy, ox + at(c), oy + gh);
   }
-  for (let r = 0; r <= GRID_H; r++) {
+  for (let r = 0; r <= cmH + 1e-6; r++) {
     const major = r % 5 === 0;
     g.strokeStyle = major ? "rgba(190, 230, 210, 0.42)" : "rgba(190, 230, 210, 0.17)";
-    g.lineWidth = major ? 3 : 1.5;
-    line(ox, oy + px(r), ox + gw, oy + px(r));
+    g.lineWidth = Math.max(0.75, (major ? 3 : 1.5) * (ppc / PX_PER_CM));
+    line(ox, oy + at(r), ox + gw, oy + at(r));
   }
-  // Millimetre ticks along the top and left edges, the ones you measure from.
-  g.strokeStyle = "rgba(220, 240, 230, 0.55)";
-  g.lineWidth = 1.5;
-  for (let mm = 0; mm <= GRID_W * 10; mm++) {
-    const len = mm % 10 === 0 ? 0.55 : mm % 5 === 0 ? 0.38 : 0.22;
-    const x = ox + px(mm / 10);
-    line(x, oy, x, oy - px(len));
-    line(x, oy + gh, x, oy + gh + px(len));
+  // Millimetre ticks along the edges, the ones you measure from — when a
+  // millimetre is wide enough to see (not in the quick frames of a resize).
+  if (at(0.1) >= 2) {
+    g.strokeStyle = "rgba(220, 240, 230, 0.55)";
+    g.lineWidth = 1.5;
+    for (let mm = 0; mm <= cmW * 10 + 1e-6; mm++) {
+      const len = mm % 10 === 0 ? 0.55 : mm % 5 === 0 ? 0.38 : 0.22;
+      const x = ox + at(mm / 10);
+      line(x, oy, x, oy - px(len));
+      line(x, oy + gh, x, oy + gh + px(len));
+    }
+    for (let mm = 0; mm <= cmH * 10 + 1e-6; mm++) {
+      const len = mm % 10 === 0 ? 0.55 : mm % 5 === 0 ? 0.38 : 0.22;
+      const y = oy + at(mm / 10);
+      line(ox, y, ox - px(len), y);
+      line(ox + gw, y, ox + gw + px(len), y);
+    }
   }
-  for (let mm = 0; mm <= GRID_H * 10; mm++) {
-    const len = mm % 10 === 0 ? 0.55 : mm % 5 === 0 ? 0.38 : 0.22;
-    const y = oy + px(mm / 10);
-    line(ox, y, ox - px(len), y);
-    line(ox + gw, y, ox + gw + px(len), y);
-  }
-  // Numbers every centimetre: along the top, down the left.
+  // Numbers along the top and down the left: every centimetre where there is
+  // room for one, else every 2, 5 or 10.
+  const fontPx = px(0.42);
+  const labelEvery = [1, 2, 5, 10].find((n) => at(n) >= fontPx * 1.9) ?? 10;
   g.fillStyle = "rgba(220, 240, 230, 0.7)";
-  g.font = `600 ${px(0.42)}px ui-monospace, SFMono-Regular, Menlo, monospace`;
+  g.font = `600 ${fontPx}px ui-monospace, SFMono-Regular, Menlo, monospace`;
   g.textBaseline = "bottom";
   g.textAlign = "center";
-  for (let c = 0; c <= GRID_W; c++) g.fillText(String(c), ox + px(c), oy - px(0.6));
+  for (let c = 0; c <= cmW + 1e-6; c += labelEvery) g.fillText(String(c), ox + at(c), oy - px(0.6));
   g.textBaseline = "middle";
   g.textAlign = "right";
-  for (let r = 0; r <= GRID_H; r++) g.fillText(String(r), ox - px(0.62), oy + px(r));
-  // The maker's mark, bottom-right in the border.
+  for (let r = 0; r <= cmH + 1e-6; r += labelEvery) g.fillText(String(r), ox - px(0.62), oy + at(r));
+  // The maker's mark, bottom-right in the border — and, sized to a weapon,
+  // what a sticker measures on it.
   g.fillStyle = "rgba(220, 240, 230, 0.35)";
   g.font = `600 ${px(0.45)}px ui-sans-serif, system-ui, sans-serif`;
   g.textAlign = "right";
   g.textBaseline = "middle";
-  g.fillText("STICKER CRAFTS  ·  CM", ox + gw, oy + gh + px(MARGIN * 0.62));
+  const mark = f === 1 ? "STICKER CRAFTS  ·  CM" : `STICKER CRAFTS  ·  CM  ·  1 STICKER = ${(STICKER_CM * f).toFixed(1)} CM`;
+  g.fillText(mark, ox + gw, oy + gh + px(MARGIN * 0.62));
   return cv;
 }
 
@@ -287,66 +306,65 @@ async function stickerMaterial(THREE: typeof ThreeNS, image: string, wear: numbe
   return { mat, inkW, inkH, backing: info.sfx?.backing ?? null };
 }
 
-/** Texture resolution of the chalk outline layer: it covers the whole mat. */
+/** Texture resolution of the chalk outline layer. */
 const CHALK_PX_PER_CM = 24;
+/** Chalk room round the outline on its own layer, in units. */
+const CHALK_PAD = 1;
 /**
- * A weapon's side outline in chalk, on a mat-sized canvas.
- *
- * At STICKER scale: one sticker on the gun (`o.stickerWorld`) is one sticker on
- * the mat (STICKER_CM), so a layout laid against it is the size it will be on
- * that gun. Placed with its sticker slots' anchors centred on the mat, where
- * the layouts are made; a rifle is longer than the mat and runs off its ends,
- * as chalk would. Each slot's default spot is a dashed sticker square with its
- * number.
+ * A weapon's side outline in chalk, on a canvas the size of the outline (and
+ * CHALK_PAD round it): its baked paths (outlineTrace) at the mat's scale — one
+ * sticker on the gun is STICKER_CM on the mat — and each slot's default spot as
+ * a dashed, numbered sticker square.
  */
-function drawChalkOutline(o: SideOutline): HTMLCanvasElement {
+function drawChalkOutline(o: WeaponOutline): HTMLCanvasElement {
   const c = document.createElement("canvas");
-  c.width = Math.round(MAT_W * CHALK_PX_PER_CM);
-  c.height = Math.round(MAT_H * CHALK_PX_PER_CM);
+  const k = CHALK_PX_PER_CM;
+  c.width = Math.round((o.w + CHALK_PAD * 2) * k);
+  c.height = Math.round((o.h + CHALK_PAD * 2) * k);
   const g = c.getContext("2d")!;
-  const cmPerPx = o.worldPerPx * (STICKER_CM / o.stickerWorld);
-  const ax = o.anchors.length ? o.anchors.reduce((a, p) => a + p.x, 0) / o.anchors.length : o.width / 2;
-  const ay = o.anchors.length ? o.anchors.reduce((a, p) => a + p.y, 0) / o.anchors.length : o.height / 2;
-  // Mask pixel -> canvas pixel.
-  const toX = (mx: number) => (GRID_W / 2 + (mx - ax) * cmPerPx + MARGIN) * CHALK_PX_PER_CM;
-  const toY = (my: number) => (GRID_H / 2 + (my - ay) * cmPerPx + MARGIN) * CHALK_PX_PER_CM;
-  const { width: W, height: H, mask } = o;
-  const inside = (x: number, y: number) => x >= 0 && y >= 0 && x < W && y < H && mask[y * W + x] === 1;
+  const X = (u: number) => (u + CHALK_PAD) * k;
+  const shape = new Path2D();
+  for (const p of o.paths) {
+    shape.moveTo(X(p[0]), X(p[1]));
+    for (let i = 2; i < p.length; i += 2) shape.lineTo(X(p[i]), X(p[i + 1]));
+    shape.closePath();
+  }
   // A whisper of fill, so the shape reads at a glance under the stickers.
   g.fillStyle = "rgba(235, 242, 236, 0.05)";
-  const step = Math.max(1, Math.floor(1 / (cmPerPx * CHALK_PX_PER_CM)));
-  const cell = cmPerPx * CHALK_PX_PER_CM * step + 0.6;
-  for (let y = 0; y < H; y += step) {
-    for (let x = 0; x < W; x += step) if (inside(x, y)) g.fillRect(toX(x), toY(y), cell, cell);
-  }
-  // The edge, in chalk: a dot per edge pixel, a little uneven in place and in
+  g.fill(shape, "evenodd");
+  // The line, in chalk: dots along it, a little uneven in place and in
   // strength, which is what makes a line read as drawn rather than printed.
   let seed = 7;
-  const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
-  for (let y = 0; y < H; y++) {
-    for (let x = 0; x < W; x++) {
-      if (!inside(x, y)) continue;
-      if (inside(x - 1, y) && inside(x + 1, y) && inside(x, y - 1) && inside(x, y + 1)) continue;
-      g.fillStyle = `rgba(240, 245, 238, ${0.45 + rnd() * 0.45})`;
-      g.beginPath();
-      g.arc(toX(x) + (rnd() - 0.5) * 1.2, toY(y) + (rnd() - 0.5) * 1.2, 1.1 + rnd() * 0.9, 0, Math.PI * 2);
-      g.fill();
+  const rnd = () => (seed = (seed * 16807) % 2147483647) / 2147483647;
+  for (const p of o.paths) {
+    const n = p.length / 2;
+    for (let i = 0; i < n; i++) {
+      const x0 = X(p[i * 2]);
+      const y0 = X(p[i * 2 + 1]);
+      const x1 = X(p[((i + 1) % n) * 2]);
+      const y1 = X(p[((i + 1) % n) * 2 + 1]);
+      const steps = Math.max(1, Math.ceil(Math.hypot(x1 - x0, y1 - y0) / 1.3));
+      for (let s = 0; s < steps; s++) {
+        const t = s / steps;
+        g.fillStyle = `rgba(240, 245, 238, ${0.45 + rnd() * 0.45})`;
+        g.beginPath();
+        g.arc(x0 + (x1 - x0) * t + (rnd() - 0.5) * 1.2, y0 + (y1 - y0) * t + (rnd() - 0.5) * 1.2, 1.1 + rnd() * 0.9, 0, Math.PI * 2);
+        g.fill();
+      }
     }
   }
   // Each slot's default spot: a dashed sticker square, numbered.
-  const side = STICKER_CM * CHALK_PX_PER_CM;
+  const side = STICKER_CM * k;
   g.setLineDash([7, 6]);
   g.lineWidth = 2;
   g.strokeStyle = "rgba(240, 245, 238, 0.55)";
   g.fillStyle = "rgba(240, 245, 238, 0.75)";
-  g.font = `600 ${Math.round(CHALK_PX_PER_CM * 1.1)}px sans-serif`;
+  g.font = `600 ${Math.round(k * 1.1)}px sans-serif`;
   g.textAlign = "center";
   g.textBaseline = "middle";
   for (const a of o.anchors) {
-    const x = toX(a.x);
-    const y = toY(a.y);
-    g.strokeRect(x - side / 2, y - side / 2, side, side);
-    g.fillText(String(a.index + 1), x, y);
+    g.strokeRect(X(a.x) - side / 2, X(a.y) - side / 2, side, side);
+    g.fillText(String(a.index + 1), X(a.x), X(a.y));
   }
   return c;
 }
@@ -415,31 +433,50 @@ type Node = {
   wearTimer?: ReturnType<typeof setTimeout>;
 };
 
-export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbacks): Promise<StickerBoard> {
+export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbacks, start: MatLayout = HOME_LAYOUT): Promise<StickerBoard> {
   const bundle: ThreeBundle = await loadThree();
   const { THREE, OrbitControls } = bundle;
 
   const { renderer, canvas } = makeRenderer(THREE, container);
   const { pmrem, envTex } = makeEnv(THREE, renderer);
 
-  // The mat: a thin slab, its top face printed, its edges plain.
-  const matTex = new THREE.CanvasTexture(drawMat());
-  matTex.colorSpace = THREE.SRGBColorSpace;
-  matTex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+  // The mat: a thin slab, its top face printed, its edges plain. Sized and
+  // printed for a layout (MatLayout), which can change under you: `layout` is
+  // where it is going, `shown` where it is this frame.
+  let layout: MatLayout = start;
+  let shown: MatLayout = start;
+  /** The texture's resolution for a mat this size: as sharp as a texture may be. */
+  const ppcFor = (l: MatLayout) =>
+    Math.min(PX_PER_CM, Math.floor(Math.min(4096, renderer.capabilities.maxTextureSize) / (Math.max(l.x1 - l.x0, l.y1 - l.y0) + MARGIN * 2)));
   const edgeMat = new THREE.MeshStandardMaterial({ color: 0x10261f, roughness: 0.9 });
-  const topMat = new THREE.MeshStandardMaterial({ map: matTex, roughness: 0.82, metalness: 0 });
-  const slabGeom = new THREE.BoxGeometry(MAT_W, 0.3, MAT_H);
+  const topMat = new THREE.MeshStandardMaterial({ roughness: 0.82, metalness: 0 });
+  function printMat(l: MatLayout, ppc: number) {
+    const tex = new THREE.CanvasTexture(drawMat(l, ppc));
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+    topMat.map?.dispose();
+    topMat.map = tex;
+    topMat.needsUpdate = true;
+  }
+  printMat(shown, ppcFor(shown));
+  const slabGeom = new THREE.BoxGeometry(1, 0.3, 1);
+  /** A slab over a layout's grid and its ruled border, in world space. */
+  const fitSlab = (slab: ThreeNS.Mesh, l: MatLayout) => {
+    slab.scale.set(l.x1 - l.x0 + MARGIN * 2, 1, l.y1 - l.y0 + MARGIN * 2);
+    slab.position.set((l.x0 + l.x1) / 2 - GRID_W / 2, -0.15, (l.y0 + l.y1) / 2 - GRID_H / 2);
+  };
 
   /** A lit scene holding the mat: the board's, and a snapshot's of its own. */
   const stage = () => {
     const s = new THREE.Scene();
     addLights(THREE, s, envTex);
     const slab = new THREE.Mesh(slabGeom, [edgeMat, edgeMat, topMat, edgeMat, edgeMat, edgeMat]);
-    slab.position.y = -0.15;
+    fitSlab(slab, shown);
     s.add(slab);
     return s;
   };
   const scene = stage();
+  const mainSlab = scene.children.find((o) => (o as ThreeNS.Mesh).geometry === slabGeom) as ThreeNS.Mesh;
 
   const camera = new THREE.PerspectiveCamera(35, 1, 1, 600);
   // Each view is a direction to look from; the distance is worked out from the
@@ -450,9 +487,16 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
   };
   const viewPose = (v: keyof typeof VIEWS) => {
     const t = Math.tan((camera.fov * Math.PI) / 360);
-    const fit = Math.max(MAT_H / 2 / t, MAT_W / 2 / (t * camera.aspect)) * VIEWS[v].margin;
-    return { pos: VIEWS[v].target.clone().addScaledVector(VIEWS[v].dir, fit), target: VIEWS[v].target };
+    const matW = layout.x1 - layout.x0 + MARGIN * 2;
+    const matH = layout.y1 - layout.y0 + MARGIN * 2;
+    const fit = Math.max(matH / 2 / t, matW / 2 / (t * camera.aspect)) * VIEWS[v].margin;
+    const target = VIEWS[v].target
+      .clone()
+      .add(new THREE.Vector3((layout.x0 + layout.x1) / 2 - GRID_W / 2, 0, (layout.y0 + layout.y1) / 2 - GRID_H / 2));
+    return { pos: target.clone().addScaledVector(VIEWS[v].dir, fit), target };
   };
+  /** The view last asked for — refitted to the mat when the mat changes. */
+  let currentView: keyof typeof VIEWS = "angled";
 
   // The board's own pointer handling is registered BEFORE the controls, so a
   // press that lands on a sticker can switch the controls off before they see
@@ -654,7 +698,7 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
   controls.dampingFactor = 0.12;
   controls.screenSpacePanning = true;
   controls.minDistance = 10;
-  controls.maxDistance = 140;
+  controls.maxDistance = 240;
   // Never under the mat: it is a slab on a table, not a model to turn over.
   controls.maxPolarAngle = Math.PI * 0.42;
 
@@ -668,6 +712,7 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
     fly = null;
   };
   const setView = (v: "angled" | "top") => {
+    currentView = v;
     land();
     const fromPos = camera.position.clone();
     const fromTarget = controls.target.clone();
@@ -693,22 +738,22 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
   scene.add(groupLines);
 
   // ---- the chalk outline ------------------------------------------------------------
-  // One mat-sized plane just above the mat's face and under every sticker, its
-  // texture redrawn per weapon (drawChalkOutline). Off the mat it is cut by the
-  // canvas's own edge, as chalk on a mat would be.
-  const chalkGeom = new THREE.PlaneGeometry(MAT_W, MAT_H);
-  chalkGeom.rotateX(-Math.PI / 2);
+  // A plane the size of the outline, just above the mat's face and under every
+  // sticker, centred on the home grid's middle (world origin) — where the mat
+  // is sized round it (StickerCrafts' matLayout). Redrawn per weapon.
   const chalkMat = new THREE.MeshBasicMaterial({ transparent: true, depthWrite: false, toneMapped: false });
-  const chalk = new THREE.Mesh(chalkGeom, chalkMat);
+  const chalk = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), chalkMat);
   chalk.position.y = 0.02;
   chalk.renderOrder = 0;
   chalk.visible = false;
   scene.add(chalk);
-  function setOutline(o: SideOutline | null) {
+  function setOutline(o: WeaponOutline | null) {
     chalkMat.map?.dispose();
     chalkMat.map = null;
     chalk.visible = !!o;
     if (o) {
+      chalk.geometry.dispose();
+      chalk.geometry = new THREE.PlaneGeometry(o.w + CHALK_PAD * 2, o.h + CHALK_PAD * 2).rotateX(-Math.PI / 2);
       const tex = new THREE.CanvasTexture(drawChalkOutline(o));
       tex.colorSpace = THREE.SRGBColorSpace;
       tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
@@ -717,14 +762,55 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
     chalkMat.needsUpdate = true;
     dirty = true;
   }
+
+  // ---- the mat's size ----------------------------------------------------------------
+  /** A resize in progress: the mat eases from `from` to `to`, its rulers
+   *  redrawn each frame at a quick resolution and once, sharp, at the end. */
+  let matAnim: { t0: number; from: MatLayout; to: MatLayout } | null = null;
+  const MAT_MS = 650;
+  const QUICK_PPC = 10;
+  const sameLayout = (a: MatLayout, b: MatLayout) =>
+    a.x0 === b.x0 && a.y0 === b.y0 && a.x1 === b.x1 && a.y1 === b.y1 && a.cmPerUnit === b.cmPerUnit;
+  function setLayout(next: MatLayout, refit: boolean) {
+    if (sameLayout(next, layout)) return;
+    layout = next;
+    if (typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      shown = next;
+      fitSlab(mainSlab, shown);
+      printMat(shown, ppcFor(shown));
+      matAnim = null;
+    } else {
+      matAnim = { t0: performance.now(), from: shown, to: next };
+    }
+    if (refit) setView(currentView);
+    dirty = true;
+  }
+  function stepMat(now: number) {
+    const m = matAnim;
+    if (!m) return;
+    const t = Math.min(1, (now - m.t0) / MAT_MS);
+    const k = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+    const mix = (a: number, b: number) => a + (b - a) * k;
+    shown = t >= 1 ? m.to : {
+      x0: mix(m.from.x0, m.to.x0),
+      y0: mix(m.from.y0, m.to.y0),
+      x1: mix(m.from.x1, m.to.x1),
+      y1: mix(m.from.y1, m.to.y1),
+      cmPerUnit: mix(m.from.cmPerUnit, m.to.cmPerUnit),
+    };
+    fitSlab(mainSlab, shown);
+    printMat(shown, t >= 1 ? ppcFor(shown) : QUICK_PPC);
+    if (t >= 1) matAnim = null;
+    dirty = true;
+  }
   /** The mat under the middle of the view (see StickerBoard.viewCentre). */
   function viewCentre(): { x: number; y: number } {
     const at = new THREE.Vector3();
     raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
     const hit = raycaster.ray.intersectPlane(boardPlane, at) ?? controls.target.clone();
     return {
-      x: Math.min(GRID_W, Math.max(0, hit.x + GRID_W / 2)),
-      y: Math.min(GRID_H, Math.max(0, hit.z + GRID_H / 2)),
+      x: Math.min(layout.x1, Math.max(layout.x0, hit.x + GRID_W / 2)),
+      y: Math.min(layout.y1, Math.max(layout.y0, hit.z + GRID_H / 2)),
     };
   }
 
@@ -1041,6 +1127,7 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
   const frame = () => {
     raf = requestAnimationFrame(frame);
     const now = performance.now();
+    stepMat(now);
     if (fly) {
       const t = Math.min(1, (now - fly.t0) / fly.ms);
       fly.at((fly.ease ?? ease)(t));
@@ -1067,6 +1154,7 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
     },
     viewCentre,
     setOutline,
+    setLayout,
     dispose() {
       disposed = true;
       cancelAnimationFrame(raf);
@@ -1091,13 +1179,13 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
       handleMat.dispose();
       chalkMat.map?.dispose();
       chalkMat.dispose();
-      chalkGeom.dispose();
+      chalk.geometry.dispose();
+      topMat.map?.dispose();
       stemGeom.dispose();
       stemMat.dispose();
       slabGeom.dispose();
       topMat.dispose();
       edgeMat.dispose();
-      matTex.dispose();
       envTex.dispose();
       pmrem.dispose();
       renderer.dispose();

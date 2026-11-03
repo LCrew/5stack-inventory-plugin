@@ -611,3 +611,17 @@
   filter: none;
   opacity: 1;
 }
+/* Sticker Crafts' outline cards are line drawings: grey at rest, bright on
+   hover and on the one chalked. */
+.craft-rail svg {
+  color: hsl(var(--muted-foreground));
+  opacity: 0.8;
+  transition:
+    color 150ms,
+    opacity 150ms;
+}
+.craft-rail button:hover:not(:disabled) svg,
+.craft-rail [aria-current] svg {
+  color: hsl(var(--foreground));
+  opacity: 1;
+}

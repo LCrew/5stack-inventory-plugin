@@ -40,6 +40,18 @@ export const MARGIN = 1.5;
  * lands on any weapon the same way (see applyStickerCraft in App.vue).
  */
 export const STICKER_CM = 5;
+/**
+ * The mat's size and its rulers: the grid's extent in grid units (the home
+ * grid is 0..GRID_W by 0..GRID_H, and stickers keep their place in it however
+ * the mat grows round them), and the real centimetres one unit stands for: 1
+ * with no weapon chalked, else that weapon's sticker over STICKER_CM, so the
+ * rulers measure the weapon in its own centimetres (CS2 sizes stickers per
+ * gun: a Glock's are 4.4 cm across, an AWP's 7.7).
+ */
+export type MatLayout = { x0: number; y0: number; x1: number; y1: number; cmPerUnit: number };
+export const HOME_LAYOUT: MatLayout = { x0: 0, y0: 0, x1: GRID_W, y1: GRID_H, cmPerUnit: 1 };
+/** Room round a chalked weapon's outline, where stickers may still go, in units. */
+export const OUTLINE_ROOM = 3;
 /** A grouping is one weapon's worth: CS2 takes five stickers (CS2_MAX_STICKERS). */
 export const MAX_PER_GROUPING = 5;
 /** The whole mat. Room for a few groupings side by side, not a load test. */

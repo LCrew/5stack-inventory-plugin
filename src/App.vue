@@ -111,6 +111,7 @@ import ItemTile from "./components/ItemTile.vue";
 import MusicPlayer from "./components/MusicPlayer.vue";
 import MusicVolume from "./components/MusicVolume.vue";
 import TileActions from "./components/TileActions.vue";
+import ModelRail from "./components/ModelRail.vue";
 import FilterDropdown from "./components/FilterDropdown.vue";
 import InfiniteSentinel from "./components/InfiniteSentinel.vue";
 import SortDirection from "./components/SortDirection.vue";
@@ -5998,72 +5999,9 @@ async function jumpToCraftModel(key: string) {
   spyCraftSection(el);
 }
 
-const craftRailEdge = ref({ l: false, r: false });
-let craftRailEl: HTMLElement | null = null;
-const craftRailRo = new ResizeObserver(() => measureCraftRail());
-onBeforeUnmount(() => craftRailRo.disconnect());
-/** Fades and arrows only on a side that has more models past it. */
-function measureCraftRail() {
-  const r = craftRailEl;
-  if (!r) return;
-  const l = r.scrollLeft > 4;
-  const right = r.scrollLeft < r.scrollWidth - r.clientWidth - 4;
-  if (l !== craftRailEdge.value.l || right !== craftRailEdge.value.r) craftRailEdge.value = { l, r: right };
-}
-function centerCraftRail(smooth = true) {
-  const r = craftRailEl;
-  const b = r?.querySelector<HTMLElement>(`[data-model="${CSS.escape(craftCurrent.value)}"]`);
-  if (!r || !b) return;
-  r.scrollTo({ left: b.offsetLeft - (r.clientWidth - b.offsetWidth) / 2, behavior: smooth && !prefersReducedMotion() ? "smooth" : "auto" });
-}
-// Function ref, called on every render: only a NEW element is set up, or each
-// re-render would yank the rail back to centre while you're browsing it.
-function setCraftRailEl(el: unknown) {
-  const next = (el as HTMLElement) ?? null;
-  if (next === craftRailEl) return;
-  if (craftRailEl) craftRailRo.unobserve(craftRailEl);
-  craftRailEl = next;
-  if (!next) return;
-  craftRailRo.observe(next);
-  nextTick(() => {
-    centerCraftRail(false);
-    measureCraftRail();
-  });
-}
-watch(craftCurrent, () => centerCraftRail());
-watch(craftModels, () => nextTick(measureCraftRail));
-function nudgeCraftRail(dir: -1 | 1) {
-  craftRailEl?.scrollBy({ left: dir * craftRailEl.clientWidth * 0.8, behavior: prefersReducedMotion() ? "auto" : "smooth" });
-}
-// Mouse drag scrolls the rail (touch already does, natively).
-let railDrag: { x: number; left: number } | null = null;
-let railDragged = false;
-function onCraftRailDown(e: PointerEvent) {
-  if (e.pointerType !== "mouse" || e.button !== 0 || !craftRailEl) return;
-  railDrag = { x: e.clientX, left: craftRailEl.scrollLeft };
-  railDragged = false;
-  window.addEventListener("pointermove", onCraftRailMove);
-  window.addEventListener("pointerup", onCraftRailUp);
-  window.addEventListener("pointercancel", onCraftRailUp);
-}
-function onCraftRailMove(e: PointerEvent) {
-  if (!railDrag || !craftRailEl) return;
-  const dx = e.clientX - railDrag.x;
-  if (Math.abs(dx) > 5) railDragged = true;
-  if (railDragged) craftRailEl.scrollLeft = railDrag.left - dx;
-}
-function onCraftRailUp() {
-  window.removeEventListener("pointermove", onCraftRailMove);
-  window.removeEventListener("pointerup", onCraftRailUp);
-  window.removeEventListener("pointercancel", onCraftRailUp);
-  railDrag = null;
-  // The click that ends a drag lands on whatever silhouette is under the
-  // pointer; it isn't a pick.
-  setTimeout(() => (railDragged = false));
-}
-function pickCraftModel(key: string) {
-  if (!railDragged) void jumpToCraftModel(key);
-}
+// The rail itself — scrolling, fades, drag, centring — is ModelRail's.
+/** Each model's card art, by key, for the rail's art slot. */
+const railArtByKey = computed(() => new Map(craftModels.value.map((m) => [m.key, m.art])));
 
 // Selecting a slot from anywhere else (focus rail, a menu action, equipping)
 // pulls the rail to the category that actually contains it — otherwise the
@@ -9857,88 +9795,30 @@ if (MDEBUG) {
           class="flex flex-none items-center gap-2 border-b border-border py-1"
           :class="isCompact ? 'min-h-[62px] px-3' : 'min-h-[66px] px-6'"
         >
-          <!-- A fixed label, not the current model: the pinned header right
-               below already names it, and a button that grew and shrank with
-               the name shoved the whole rail sideways as you scrolled. -->
-          <FilterDropdown
-            class="flex-none"
+          <!-- The model rail (ModelRail): the pinned header right below
+               already names the model, so the menu keeps a fixed label. -->
+          <ModelRail
             label="Jump to"
-            :model-value="craftCurrent"
-            :options="craftModels.map((m) => ({ value: m.key, label: m.name, disabled: !m.count }))"
-            @update:model-value="jumpToCraftModel"
-          />
-          <span class="h-9 w-px flex-none bg-border" aria-hidden="true"></span>
-          <div class="relative min-w-0 flex-1">
-            <div
-              :ref="setCraftRailEl"
-              class="craft-rail relative flex gap-1 overflow-x-auto overscroll-x-contain"
-              @scroll.passive="measureCraftRail"
-              @pointerdown="onCraftRailDown"
-            >
-              <button
-                v-for="m in craftModels"
-                :key="m.key"
-                type="button"
-                :data-model="m.key"
-                class="flex flex-none flex-col items-center gap-[3px] rounded-md border px-1 py-1 transition-colors disabled:cursor-default disabled:opacity-30"
-                :class="[
-                  isCompact ? 'w-[80px]' : 'w-[92px]',
-                  craftCurrent === m.key ? 'border-[color:var(--acc)]' : 'border-transparent',
-                ]"
-                :style="craftCurrent === m.key ? { background: accentSoft } : {}"
-                :title="m.name"
-                :aria-label="m.name"
-                :aria-current="craftCurrent === m.key || undefined"
-                :disabled="!m.count"
-                @click="pickCraftModel(m.key)"
-              >
-                <!-- Fixed tracks: with an auto row the art's height:100% has
-                     nothing to resolve against and it draws at its natural
-                     height, straight over the label.
-                     Small on purpose. The sheet under the loadout is ~430px
-                     tall, and at 62px of art the rail and the pinned header
-                     left less than one 218px row of knives. -->
-                <span class="grid w-full place-items-center" :class="isCompact ? 'h-[30px]' : 'h-[34px]'" style="grid-template: 100% / 100%">
-                  <img
-                    :src="catalogArt[m.art.id] ?? m.art.image ?? undefined"
-                    alt=""
-                    draggable="false"
-                    class="h-full w-full select-none object-contain"
-                    @error="onCatalogArtError($event, m.art)"
-                    @load="onCatalogArtLoad"
-                  />
-                </span>
-                <span
-                  class="max-w-full truncate text-f8 uppercase leading-tight tracking-wider"
-                  :class="craftCurrent === m.key ? 'text-foreground' : 'text-muted-foreground/60'"
-                >{{ m.short }}</span>
-              </button>
-            </div>
-            <div
-              v-show="craftRailEdge.l"
-              class="pointer-events-none absolute inset-y-0 left-0 flex w-14 items-center"
-              style="background: linear-gradient(90deg, hsl(var(--background)) 30%, transparent)"
-            >
-              <button
-                type="button"
-                class="pointer-events-auto grid h-8 w-6 place-items-center rounded-md border border-border bg-card text-foreground transition-colors hover:border-muted-foreground"
-                aria-label="Scroll models left"
-                @click="nudgeCraftRail(-1)"
-              ><ChevronLeft class="h-3.5 w-3.5" /></button>
-            </div>
-            <div
-              v-show="craftRailEdge.r"
-              class="pointer-events-none absolute inset-y-0 right-0 flex w-14 items-center justify-end"
-              style="background: linear-gradient(270deg, hsl(var(--background)) 30%, transparent)"
-            >
-              <button
-                type="button"
-                class="pointer-events-auto grid h-8 w-6 place-items-center rounded-md border border-border bg-card text-foreground transition-colors hover:border-muted-foreground"
-                aria-label="Scroll models right"
-                @click="nudgeCraftRail(1)"
-              ><ChevronRight class="h-3.5 w-3.5" /></button>
-            </div>
-          </div>
+            :items="craftModels.map((m) => ({ key: m.key, name: m.name, short: m.short, disabled: !m.count }))"
+            :current="craftCurrent"
+            :compact="isCompact"
+            :active-bg="accentSoft"
+            @select="jumpToCraftModel"
+          >
+            <!-- Small on purpose. The sheet under the loadout is ~430px tall,
+                 and at 62px of art the rail and the pinned header left less
+                 than one 218px row of knives. -->
+            <template #art="{ item }">
+              <img
+                :src="catalogArt[railArtByKey.get(item.key)!.id] ?? railArtByKey.get(item.key)!.image ?? undefined"
+                alt=""
+                draggable="false"
+                class="h-full w-full select-none object-contain"
+                @error="onCatalogArtError($event, railArtByKey.get(item.key)!)"
+                @load="onCatalogArtLoad"
+              />
+            </template>
+          </ModelRail>
         </div>
 
         <div
