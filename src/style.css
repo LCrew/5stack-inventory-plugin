@@ -588,6 +588,85 @@
   color: hsl(240 5% 82%);
 }
 
+/* The Sticker Crafts tab's "NEW" thought bubble (App.vue), until the tab has
+   been opened once: an amber pill over the tab's top-right corner, floating
+   gently, with two small circles trailing down toward the label. It stays
+   inside the header's own top padding: the app frame clips above it. */
+[data-cs2-inventory] .new-bubble {
+  position: absolute;
+  top: -11px;
+  right: -6px;
+  z-index: 2;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: hsl(var(--tac-amber, 33 94% 58%));
+  color: hsl(var(--background));
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 14px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  box-shadow: 0 0 10px hsl(var(--tac-amber, 33 94% 58%) / 0.45);
+  pointer-events: none;
+  animation: new-bubble-float 2.6s ease-in-out infinite;
+}
+[data-cs2-inventory] .new-bubble::before,
+[data-cs2-inventory] .new-bubble::after {
+  content: "";
+  position: absolute;
+  border-radius: 50%;
+  background: inherit;
+}
+[data-cs2-inventory] .new-bubble::before {
+  width: 5px;
+  height: 5px;
+  left: 5px;
+  bottom: -4px;
+}
+[data-cs2-inventory] .new-bubble::after {
+  width: 3px;
+  height: 3px;
+  left: 1px;
+  bottom: -8px;
+}
+/* A phone's header has 6px over its tabs, not 16: smaller, and lower, over
+   the tab's top-right corner. */
+[data-cs2-inventory] .new-bubble.is-compact {
+  top: -1px;
+  right: -7px;
+  padding: 0 4px;
+  font-size: 8px;
+  line-height: 11px;
+}
+[data-cs2-inventory] .new-bubble.is-compact::after {
+  display: none;
+}
+@keyframes new-bubble-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-1px);
+  }
+}
+/* Opened: it pops away. */
+[data-cs2-inventory] .new-bubble-leave-active {
+  animation: none;
+  transition:
+    opacity 220ms ease,
+    transform 220ms ease;
+}
+[data-cs2-inventory] .new-bubble-leave-to {
+  opacity: 0;
+  transform: scale(0.5) translateY(4px);
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-cs2-inventory] .new-bubble {
+    animation: none;
+  }
+}
+
 /* The knife/glove model rail (craftModelList in App.vue). It scrolls sideways
    under its own arrows and edge fades, so a scrollbar would be a second control
    for the same thing. Shapes rest grey and come up in colour on hover and on

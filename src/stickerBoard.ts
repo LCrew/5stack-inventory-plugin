@@ -568,10 +568,12 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
    *           release (`uid` / `wasSelected`).
    *   press — pressed on the empty mat: the camera's (a drag pans), unless it
    *           ends as a click.
-   *   view  — the right button (or Ctrl + click), anywhere: turn the view about
-   *           the middle of the screen — in Top, the mat spins in place — or,
-   *           with Shift, tilt it. Ours, not OrbitControls': its rotate is both
-   *           at once, and Top has to stay top-down while it turns.
+   *   view  — the right button (or Ctrl + click), anywhere: turn and tilt the
+   *           view about the middle of the screen; with Shift, turn it about
+   *           the upright axis only (in Top the mat spins in place, still
+   *           straight down). Tilting out of Top makes the view Angled where it
+   *           is (BoardCallbacks.viewChanged). Ours, not OrbitControls', for
+   *           that Shift and that hand-over.
    */
   type Gesture =
     | { kind: "move"; id: number; uid: string; from: { x: number; y: number }; moved: boolean }
@@ -579,7 +581,7 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
     | { kind: "spin"; id: number; c: { x: number; y: number }; d: number; last: number; total: number; moved: boolean }
     | { kind: "turn"; id: number; x0: number; moved: boolean; uid: string | null; wasSelected: boolean; alt: boolean }
     | { kind: "press"; id: number; x: number; y: number }
-    | { kind: "view"; id: number; x: number; y: number; tilt: boolean; phi0: number };
+    | { kind: "view"; id: number; x: number; y: number; turnOnly: boolean; phi0: number };
   let gesture: Gesture | null = null;
   const capture = (id: number) => {
     controls.enabled = false;
@@ -595,7 +597,7 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
     if (e.pointerType === "mouse" && (e.button === 2 || (e.button === 0 && e.ctrlKey))) {
       land();
       const sph = new THREE.Spherical().setFromVector3(camera.position.clone().sub(controls.target));
-      gesture = { kind: "view", id: e.pointerId, x: e.clientX, y: e.clientY, tilt: e.shiftKey, phi0: sph.phi };
+      gesture = { kind: "view", id: e.pointerId, x: e.clientX, y: e.clientY, turnOnly: e.shiftKey, phi0: sph.phi };
       capture(e.pointerId);
       e.preventDefault();
       return;
@@ -664,15 +666,15 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
         g.y = e.clientY;
         const off = camera.position.clone().sub(controls.target);
         const sph = new THREE.Spherical().setFromVector3(off);
-        if (g.tilt) {
+        sph.theta -= dx * turnPerPx();
+        if (!g.turnOnly) {
           // Drag down to look more from above, as OrbitControls does.
           sph.phi = Math.min(controls.maxPolarAngle, Math.max(0.0002, sph.phi - dy * turnPerPx()));
-          if (currentView === "top" && Math.abs(sph.phi - g.phi0) > 0.03) {
+          // Out of Top by a few pixels' worth, not by a wobble of the hand.
+          if (currentView === "top" && Math.abs(sph.phi - g.phi0) > 0.05) {
             currentView = "angled";
             cb.viewChanged("angled");
           }
-        } else {
-          sph.theta -= dx * turnPerPx();
         }
         camera.position.copy(controls.target).add(off.setFromSpherical(sph));
         camera.lookAt(controls.target);
@@ -756,7 +758,7 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
   controls.dampingFactor = 0.12;
   controls.screenSpacePanning = true;
   // Left-drag on the empty mat pans; the right button is the board's own view
-  // gesture (turn, Shift to tilt — see Gesture); the wheel zooms. Touch keeps
+  // gesture (turn and tilt; Shift to turn only — see Gesture); the wheel zooms. Touch keeps
   // OrbitControls' own: one finger orbits, two pan and pinch.
   controls.mouseButtons = { LEFT: THREE.MOUSE.PAN, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: null };
   controls.minDistance = 10;

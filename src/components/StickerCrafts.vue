@@ -1331,7 +1331,7 @@ const VIEWS = [
 /** The mat's key hint, for what is selected now: [keys, what they do] pairs. */
 const keyHint = computed<[string, string][]>(() => {
   if (!sel.value.length) {
-    return [["Click", "select"], ["Shift-click", "select several"], ["Drag", "pan"], ["Right-drag", "turn view"], ["Shift + right-drag", "tilt"]];
+    return [["Click", "select"], ["Shift-click", "select several"], ["Drag", "pan"], ["Right-drag", "turn & tilt"], ["Shift + right-drag", "turn only"]];
   }
   const out: [string, string][] = [["Drag", "move"], ["Shift + drag", "turn"], ["Q / E", "turn 5°"], ["Arrows / WASD", "nudge"]];
   if (sel.value.some((s) => s.group)) out.push(["Alt-click", "one of a group"]);

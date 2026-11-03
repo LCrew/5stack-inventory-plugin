@@ -5081,6 +5081,13 @@ const viewTabs = computed(() => [
     : []),
 ]);
 
+/**
+ * The Sticker Crafts tab's "NEW" thought bubble: up until Sticker Crafts has
+ * been opened once in this browser — by its tab, a link or the back button.
+ */
+const stickerCraftsSeen = usePersistedBool("cs2inv.stickerCrafts.seen", false);
+watch(view, (v) => v === "stickers" && (stickerCraftsSeen.value = true), { immediate: true });
+
 /** Owned only exists when signed in; Replace only on a weapon slot. */
 const sheetModeTabs = computed(() => [
   ...(signedIn.value ? [{ key: "owned", label: "Owned" }] : []),
@@ -8867,6 +8874,15 @@ if (MDEBUG) {
           <component :is="t.icon" class="h-3.5 w-3.5" />
           <span v-if="!isCompact">{{ t.label }}</span>
           <span v-if="t.key === 'inventory' && inventory.length" class="font-mono text-f10 text-muted-foreground">{{ inventory.length }}</span>
+          <!-- Sticker Crafts is new: a thought bubble over its tab until it
+               has been opened once (stickerCraftsSeen). -->
+          <Transition name="new-bubble">
+            <span
+              v-if="t.key === 'stickers' && !stickerCraftsSeen"
+              class="new-bubble"
+              :class="isCompact ? 'is-compact' : ''"
+            >{{ tr("inventory.stickerCrafts.newBadge", "New") }}</span>
+          </Transition>
         </template>
       </PillTabs>
     </header>
