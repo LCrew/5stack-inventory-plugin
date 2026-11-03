@@ -32,6 +32,7 @@ import {
   LayoutGrid,
   ListChecks,
   ListPlus,
+  Ruler,
   Loader2,
   Lock,
   Magnet,
@@ -50,9 +51,9 @@ import {
   View,
   X,
 } from "lucide-vue-next";
-import type { InventoryItem } from "../api";
+import { fetchStickerGeometry, type CatalogWeapon, type InventoryItem } from "../api";
 import { useAttachmentPicker, type PickerRow } from "../composables/useAttachmentPicker";
-import { usePersistedBool } from "../composables/usePersistedRef";
+import { usePersistedBool, usePersistedString } from "../composables/usePersistedRef";
 import {
   GRID_H,
   GRID_W,
@@ -84,6 +85,8 @@ const props = defineProps<{
   /** App's `attachedName`: what an owned sticker is already stuck to. */
   attachedName: (inst?: InventoryItem | null) => string | null;
   compact: boolean;
+  /** The catalog's weapons — the chalk outline's choices. */
+  weapons: CatalogWeapon[];
 }>();
 
 const tr = inject<(k: string, f: string) => string>("tr", (_k, f) => f);
@@ -704,7 +707,8 @@ function craftSpot(list: { x: number; y: number }[]): { x: number; y: number } {
         !stickers.value.some((o) => Math.hypot(o.x - x, o.y - y) < STICKER_CM * 0.9)
       );
     });
-  const mid = { x: GRID_W / 2, y: GRID_H / 2 };
+  // The middle of what you are looking at, as for a single sticker.
+  const mid = board.value?.viewCentre() ?? { x: GRID_W / 2, y: GRID_H / 2 };
   if (clear(mid.x, mid.y)) return mid;
   for (let y = 6; y <= GRID_H - 2; y += 6.5) {
     for (let x = 6; x <= GRID_W - 2; x += 6.5) if (clear(x, y)) return { x, y };
@@ -835,19 +839,32 @@ const pickerTitle = computed(() =>
   pickerView.pickerSource.value !== "crafts" ? undefined : pickerView.craftsScope.value === "store" ? "Craft Store" : "Your crafts",
 );
 /**
- * Where a new sticker lands: the first free cell of a 6.5 cm lattice across the
- * mat, so a few picked in a row lie side by side instead of on top of each
- * other. A full lattice falls back to the middle.
+ * Where a new sticker lands: the middle of what the camera is looking at (where
+ * it is turned does not matter — a new sticker is never turned), or the clear
+ * spot nearest to it, so a few picked in a row lie side by side instead of on
+ * top of each other. Nowhere clear: the middle anyway.
  */
 function freeSpot(): { x: number; y: number } {
-  for (let row = 0; row < 4; row++) {
-    for (let col = 0; col < 6; col++) {
-      const x = 6 + col * 6.5;
-      const y = 6 + row * 6.5;
-      if (!stickers.value.some((s) => Math.hypot(s.x - x, s.y - y) < 3)) return { x, y };
+  const v = board.value?.viewCentre() ?? { x: GRID_W / 2, y: GRID_H / 2 };
+  // To the tenth of a centimetre the fields and the nudge keys work in.
+  const c = { x: Math.round(v.x * 10) / 10, y: Math.round(v.y * 10) / 10 };
+  const half = STICKER_CM / 2;
+  const clear = (x: number, y: number) =>
+    x >= half && x <= GRID_W - half && y >= half && y <= GRID_H - half &&
+    !stickers.value.some((s) => Math.hypot(s.x - x, s.y - y) < STICKER_CM * 0.9);
+  if (!stickers.value.some((s) => Math.hypot(s.x - c.x, s.y - c.y) < STICKER_CM * 0.9)) return c;
+  // Rings round the middle, a sticker and a bit apart, nearest first.
+  for (let ring = 1; ring <= 6; ring++) {
+    const r = ring * (STICKER_CM + 1);
+    const steps = ring * 8;
+    for (let i = 0; i < steps; i++) {
+      const a = (i / steps) * Math.PI * 2;
+      const x = c.x + Math.cos(a) * r;
+      const y = c.y + Math.sin(a) * r;
+      if (clear(x, y)) return { x: Math.round(x * 10) / 10, y: Math.round(y * 10) / 10 };
     }
   }
-  return { x: GRID_W / 2, y: GRID_H / 2 };
+  return c;
 }
 function addSticker(row: PickerRow) {
   picker.value = null;
@@ -887,9 +904,59 @@ function finishRename(entry: SavedCraft, name: string) {
   renameSaved(entry, name);
 }
 
+// ---- the chalk outline ------------------------------------------------------------
+/**
+ * A weapon chalked on the mat at sticker scale, to check a layout's size and
+ * place against the gun it is for. The model key of the weapon, or "" for none;
+ * remembered in this browser. Measured off the weapon's own model, shape only,
+ * the first time it is picked (weaponOutline).
+ */
+const outlineModel = usePersistedString("cs2inv.stickerCrafts.outline", "");
+const outlineBusy = ref(false);
+const outlineError = ref(false);
+/** The weapons that take stickers, by kind, for the picker's groups. */
+const OUTLINE_KINDS = [
+  ["rifle", "Rifles"],
+  ["smg", "SMGs"],
+  ["heavy", "Heavy"],
+  ["secondary", "Pistols"],
+] as const;
+const outlineGroups = computed(() =>
+  OUTLINE_KINDS.map(([kind, label]) => ({
+    label,
+    weapons: props.weapons.filter((w) => w.category === kind).sort((a, b) => a.name.localeCompare(b.name)),
+  })).filter((g) => g.weapons.length),
+);
+let outlineToken = 0;
+async function applyOutline() {
+  const b = board.value;
+  const model = outlineModel.value;
+  const token = ++outlineToken;
+  outlineError.value = false;
+  if (!b || !model) {
+    b?.setOutline(null);
+    outlineBusy.value = false;
+    return;
+  }
+  outlineBusy.value = true;
+  try {
+    const geo = await fetchStickerGeometry(model);
+    const { weaponOutline } = await import("../viewer3d");
+    const o = await weaponOutline(model, geo.slots);
+    if (token !== outlineToken || board.value !== b) return;
+    b.setOutline(o);
+    outlineError.value = !o;
+  } catch {
+    if (token === outlineToken) outlineError.value = true;
+  } finally {
+    if (token === outlineToken) outlineBusy.value = false;
+  }
+}
 // ---- the board ----------------------------------------------------------------------
 const stageEl = ref<HTMLElement | null>(null);
 const board = shallowRef<StickerBoard | null>(null);
+// The outline follows the pick, and comes back when the board is (re)made.
+watch([outlineModel, board], () => void applyOutline());
 const boardError = ref<string | null>(null);
 const boardLoading = ref(true);
 let dragFrom: Map<string, { x: number; y: number }> | null = null;
@@ -1229,8 +1296,9 @@ const FIELD =
           </div>
         </template>
 
-        <!-- View and snap, top-left over the mat. -->
-        <div class="pointer-events-none absolute left-3 top-3 flex items-center gap-2">
+        <!-- View, snap and outline, top-left over the mat — and over the empty
+             mat's card, which on a phone's short stage reaches up to them. -->
+        <div class="pointer-events-none absolute left-3 top-3 z-[3] flex items-center gap-2">
           <PillTabs
             class="pointer-events-auto rounded-lg border border-border bg-card/80 p-0.5 backdrop-blur"
             :items="VIEWS"
@@ -1255,6 +1323,27 @@ const FIELD =
             <Magnet class="h-3.5 w-3.5" />
             <span>{{ tr("inventory.stickerCrafts.snap", "Snap") }}</span>
           </button>
+          <!-- A weapon chalked on the mat at sticker scale, to check a layout
+               against the gun it is for. -->
+          <label
+            class="pointer-events-auto flex h-7 items-center gap-1.5 rounded-lg border border-border bg-card/80 pl-2 pr-1 text-muted-foreground backdrop-blur tac-action"
+            :class="[outlineModel ? 'tac-on' : '', outlineError ? '!text-destructive' : '']"
+            :title="outlineError ? 'This weapon\'s outline could not be measured — try another, or again later' : 'Chalk a weapon\'s side on the mat at sticker scale, with its slots, to check a layout\'s size and place'"
+          >
+            <Loader2 v-if="outlineBusy" class="h-3.5 w-3.5 flex-none animate-spin" />
+            <Ruler v-else class="h-3.5 w-3.5 flex-none" />
+            <select
+              v-model="outlineModel"
+              class="cursor-pointer truncate bg-transparent text-f10 uppercase tracking-cs1 outline-none"
+              :class="compact ? 'max-w-[6.5rem]' : 'max-w-[9rem]'"
+              aria-label="Weapon outline"
+            >
+              <option value="">{{ tr("inventory.stickerCrafts.noOutline", "No outline") }}</option>
+              <optgroup v-for="g in outlineGroups" :key="g.label" :label="g.label">
+                <option v-for="w in g.weapons" :key="w.model" :value="w.model">{{ w.name }}</option>
+              </optgroup>
+            </select>
+          </label>
         </div>
 
         <!-- How to drive it, for what is selected now. Desktop only: on touch

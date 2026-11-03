@@ -3779,7 +3779,7 @@ const craftDrop = useStickerCraftPlacement({
   },
   // Close in on the sticker surface while it waits; back out if it is put
   // back. A viewer still mounting picks it up in its ready callback below.
-  onWait: () => modalViewer.current()?.frameStickers("in"),
+  onWait: () => modalViewer.current()?.frameStickers("in", craftPending.value?.slots),
   onSettle: (placed) => {
     modalViewer.current()?.frameStickers(placed ? "stay" : "back");
     if (placed) showCraftPlacedTip();
@@ -3988,7 +3988,7 @@ async function mountModalViewer() {
     (handle) => {
       // A craft picked while this was mounting (the picker switches the editor
       // to 3D for it) still gets the close look at the sticker surface.
-      if (craftPending.value) handle.frameStickers("in");
+      if (craftPending.value) handle.frameStickers("in", craftPending.value.slots);
       // Re-apply the chosen pose: the 2D/3D toggle remounts, and a viewer that
       // came back in the default stance after the user picked "Open" would look
       // like the control had stopped working.
@@ -9044,6 +9044,7 @@ if (MDEBUG) {
         :inventory="inventory"
         :attached-name="attachedName"
         :compact="isCompact"
+        :weapons="weapons"
       />
 
       <!-- ============ INVENTORY VIEW ============ -->

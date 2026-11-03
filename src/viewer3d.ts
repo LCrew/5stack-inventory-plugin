@@ -665,6 +665,9 @@ export interface GltfVariant {
   legacy: boolean;
   /** A paint will be composited over the body, replacing its base colour. */
   painted: boolean;
+  /** Shape only — every image skipped. For a mount that is measured, never
+   *  looked at (weaponOutline). */
+  bare?: boolean;
 }
 
 /** 1x1 transparent PNG. Stands in for an image we have decided not to fetch. */
@@ -822,7 +825,7 @@ const gltfCache = new Map<string, Promise<import("three/examples/jsm/loaders/GLT
 // occupy two entries (hd painted for the viewer, hd unpainted for the default).
 const GLTF_CACHE_MAX = 12;
 async function loadGltf(model: string, variant: GltfVariant) {
-  const key = `${model}|${variant.legacy ? "legacy" : "hd"}|${variant.painted ? "p" : "u"}`;
+  const key = `${model}|${variant.legacy ? "legacy" : "hd"}|${variant.painted ? "p" : "u"}${variant.bare ? "|bare" : ""}`;
   // Hit or miss, this parse is in use — src/prefetch.ts won't warm it again.
   notePrefetchUse(gltfUseKey(modelUrlFor(model), variant));
   const existing = gltfCache.get(key);
@@ -844,7 +847,11 @@ async function loadGltf(model: string, variant: GltfVariant) {
       return r.arrayBuffer();
     });
     const json = glbJson(buf);
-    const drop = json ? discardableImages(json, variant) : new Set<string>();
+    const drop = !json
+      ? new Set<string>()
+      : variant.bare
+        ? new Set(((json as { images?: { uri?: string }[] }).images ?? []).flatMap((i) => (i.uri ? [i.uri] : [])))
+        : discardableImages(json, variant);
     // Textures a warm is still downloading are waited for rather than asked
     // for a second time — the modifier below can only hand over what is
     // already held. Free when nothing was warmed.
@@ -2523,6 +2530,60 @@ export async function withSharedRenderer<T>(
   }
 }
 
+/** A weapon seen square from its sticker side, measured — the viewer's
+ *  sideOutline, for the Sticker Crafts mat's chalk outline. */
+export interface SideOutline {
+  /** The silhouette, top row first: 1 inside the weapon, 0 outside. */
+  width: number;
+  height: number;
+  mask: Uint8Array;
+  /** World units across one pixel of it. */
+  worldPerPx: number;
+  /** One sticker's width on this weapon, in world units. */
+  stickerWorld: number;
+  /** Where each slot's anchor falls on it, in pixels. */
+  anchors: { index: number; x: number; y: number }[];
+}
+const outlineCache = new Map<string, Promise<SideOutline | null>>();
+/**
+ * A weapon's side outline: mounted offscreen like a card bake, the shape only
+ * (no textures fetched — see GltfVariant.bare), measured and thrown away.
+ * Cached for the session; a failure is not, so it can be asked again.
+ */
+export function weaponOutline(model: string, slots: StickerSlot[]): Promise<SideOutline | null> {
+  let hit = outlineCache.get(model);
+  if (!hit) {
+    hit = (async () => {
+      const holder = document.createElement("div");
+      holder.style.cssText = "position:fixed;left:-10000px;top:0;width:640px;height:480px;pointer-events:none;";
+      document.body.appendChild(holder);
+      let handle: ViewerHandle | null = null;
+      try {
+        handle = await mountViewer(holder, model, {
+          kind: "weapon",
+          interactive: false,
+          still: true,
+          bloom: false,
+          frame: "fit",
+          outline: true,
+          stickerSlots: slots,
+        });
+        return handle.sideOutline();
+      } catch {
+        return null;
+      } finally {
+        handle?.dispose();
+        holder.remove();
+      }
+    })();
+    outlineCache.set(model, hit);
+    void hit.then((r) => {
+      if (!r) outlineCache.delete(model);
+    });
+  }
+  return hit;
+}
+
 export const viewerStats = () => ({
   live: liveViewers,
   building: buildsInFlight,
@@ -2809,8 +2870,11 @@ export interface ViewerHandle {
    * pixels across. "in" eases there from wherever the camera is (once; again
    * is a no-op), "back" eases back to where it was (the craft was put back),
    * "stay" keeps the close view (it was placed, and is adjusted from there).
+   * `slots` (0-based) narrows "in" to the slots the craft will take.
    */
-  frameStickers: (mode: "in" | "back" | "stay") => void;
+  frameStickers: (mode: "in" | "back" | "stay", slots?: number[]) => void;
+  /** The weapon seen square from its sticker side, measured — see sideOutline. */
+  sideOutline: () => SideOutline | null;
   /**
    * Stop drawing without unmounting — for a viewer that is still on the page but
    * behind something. See the note on `suspended`: a modal over the focus view
@@ -3737,6 +3801,9 @@ export interface ViewerOpts {
   /** Per-slot UV anchors from the model. Without them placement falls back to
    *  the old silhouette guess, which does NOT match the game. */
   stickerSlots?: StickerSlot[];
+  /** Mounted to be MEASURED (weaponOutline): the model's shape only, no
+   *  textures fetched. Never shown. */
+  outline?: boolean;
   /** The weapon's sticker mask per body (bare filenames under /models) — where
    *  a sticker may SHOW. See applyStickerMask. */
   stickerMasks?: Partial<Record<"body_hd" | "body_legacy", string>>;
@@ -3941,6 +4008,7 @@ async function buildViewer(
     : await loadGltf(model, {
         legacy: !!opts?.legacyPaint,
         painted: !!weaponPaint,
+        bare: !!opts?.outline,
       });
   mt.mark("glb");
   // The last checkpoint before a GL context exists, and so the one that matters:
@@ -6475,6 +6543,88 @@ async function buildViewer(
     }
     return (stickerBox = box.isEmpty() ? null : box);
   };
+  /**
+   * Each anchor's point on the gun, in world space: where its UV1 position lies
+   * on the surface — the triangle whose UV1 holds it, read back through the
+   * same barycentric weights. A UV1 point can sit in more than one triangle
+   * (islands overlap, a part is mirrored, a stock reuses the receiver's space),
+   * so the one facing the home camera — the side the stickers are on — wins.
+   * Measured once per mount.
+   */
+  let anchorWorld: { index: number; p: import("three").Vector3; scale: number }[] | undefined;
+  const anchorPoints = () => {
+    if (anchorWorld) return anchorWorld;
+    const out: { index: number; p: import("three").Vector3; scale: number }[] = [];
+    const toHome = homeCamPos.clone().sub(homeTarget).normalize();
+    const a = new THREE.Vector3();
+    const b = new THREE.Vector3();
+    const c = new THREE.Vector3();
+    const n = new THREE.Vector3();
+    const e = new THREE.Vector3();
+    for (const mk of anchors) {
+      const u = mk.offset[0] + 0.5;
+      const v = mk.offset[1] + 0.5;
+      let best: import("three").Vector3 | null = null;
+      let bestFacing = -Infinity;
+      for (const mesh of uv1Meshes) {
+        const geom = mesh.geometry as import("three").BufferGeometry;
+        const uv = geom.getAttribute("uv1") ?? geom.getAttribute("uv2");
+        const pos = geom.getAttribute("position");
+        if (!uv || !pos) continue;
+        mesh.updateMatrixWorld();
+        const idx = geom.getIndex();
+        const tris = idx ? idx.count / 3 : pos.count / 3;
+        for (let t = 0; t < tris; t++) {
+          const i0 = idx ? idx.getX(t * 3) : t * 3;
+          const i1 = idx ? idx.getX(t * 3 + 1) : t * 3 + 1;
+          const i2 = idx ? idx.getX(t * 3 + 2) : t * 3 + 2;
+          const u0 = uv.getX(i0), v0 = uv.getY(i0);
+          const u1 = uv.getX(i1), v1 = uv.getY(i1);
+          const u2 = uv.getX(i2), v2 = uv.getY(i2);
+          const d = (v1 - v2) * (u0 - u2) + (u2 - u1) * (v0 - v2);
+          if (Math.abs(d) < 1e-14) continue;
+          const l0 = ((v1 - v2) * (u - u2) + (u2 - u1) * (v - v2)) / d;
+          const l1 = ((v2 - v0) * (u - u2) + (u0 - u2) * (v - v2)) / d;
+          const l2 = 1 - l0 - l1;
+          if (l0 < -1e-6 || l1 < -1e-6 || l2 < -1e-6) continue;
+          a.fromBufferAttribute(pos, i0).applyMatrix4(mesh.matrixWorld);
+          b.fromBufferAttribute(pos, i1).applyMatrix4(mesh.matrixWorld);
+          c.fromBufferAttribute(pos, i2).applyMatrix4(mesh.matrixWorld);
+          n.subVectors(b, a).cross(e.subVectors(c, a)).normalize();
+          const facing = n.dot(toHome);
+          if (facing <= bestFacing) continue;
+          bestFacing = facing;
+          best = new THREE.Vector3().addScaledVector(a, l0).addScaledVector(b, l1).addScaledVector(c, l2);
+        }
+      }
+      if (best) out.push({ index: mk.index, p: best, scale: mk.scale });
+    }
+    return (anchorWorld = out);
+  };
+  /** One sticker's width on this gun, in world units: its UV1 square over the
+   *  unwrap's density, at the anchors' own scale. */
+  const stickerWorld = () => {
+    const sc = anchors.map((a) => a.scale).filter((x) => x > 0).sort((x, y) => x - y);
+    const mid = sc.length ? sc[Math.floor(sc.length / 2)] : 0;
+    return uv1Density && mid ? uv1Density / mid : DECAL_SIZE;
+  };
+  /**
+   * Where the stickers go, as a world box: the anchors' points with a sticker's
+   * width round each. Every vertex near an anchor's UV1 (the first try) also
+   * took in parts that share the receiver's UV1 space, and framed the M4A4 on
+   * its stock.
+   */
+  const stickerZone = (slots?: number[]) => {
+    const all = anchorPoints();
+    if (!all.length) return stickerArea();
+    // The slots the craft will take, when it is known which: framing every
+    // anchor took in the M4A4's stock slot and sat the view on the back half.
+    const some = slots?.length ? all.filter((a) => slots.includes(a.index)) : [];
+    const pts = some.length ? some : all;
+    const box = new THREE.Box3();
+    for (const a of pts) box.expandByPoint(a.p);
+    return box.expandByScalar(stickerWorld() * 1.25);
+  };
   type CamPose = { pos: import("three").Vector3; target: import("three").Vector3; zoom: number; pan: import("three").Vector2 };
   const poseNow = (): CamPose => ({
     pos: camera.position.clone(),
@@ -6506,7 +6656,73 @@ async function buildViewer(
     if (t >= 1) camFlight = null;
   };
   controls.addEventListener("start", () => (camFlight = null));
-  function frameStickers(mode: "in" | "back" | "stay") {
+  /**
+   * The weapon seen square from its sticker side, for the Sticker Crafts mat's
+   * chalk outline: its silhouette as a mask, how big a pixel of it is, one
+   * sticker's width in the same units, and where the anchors fall on it.
+   *
+   * Looked at along the third axis (neither length nor height) from the side
+   * the home camera is on, the way up the editor shows it, so the barrel points
+   * the same way as it does there. Drawn in one flat colour into a target of
+   * its own and read back: the shape, not the look.
+   */
+  function sideOutline(): SideOutline | null {
+    if (disposed) return null;
+    const box = new THREE.Box3().setFromObject(object, true);
+    if (box.isEmpty()) return null;
+    const centre = box.getCenter(new THREE.Vector3());
+    const dims = box.getSize(new THREE.Vector3()).toArray();
+    const lenW = dims[AXIS_L];
+    const lenH = dims[AXIS_H];
+    const side = new THREE.Vector3().setComponent(AXIS_S, 1);
+    if (homeCamPos.getComponent(AXIS_S) - homeTarget.getComponent(AXIS_S) < 0) side.negate();
+    const up = new THREE.Vector3().setComponent(AXIS_H, 1);
+    const W = 1600;
+    const H = Math.max(8, Math.round((W * lenH) / lenW));
+    const pad = 1.03;
+    const cam = new THREE.OrthographicCamera((-lenW / 2) * pad, (lenW / 2) * pad, (lenH / 2) * pad, (-lenH / 2) * pad, 0.001, radius * 40);
+    cam.up.copy(up);
+    cam.position.copy(centre).addScaledVector(side, radius * 10);
+    cam.lookAt(centre);
+    cam.updateMatrixWorld();
+    cam.updateProjectionMatrix();
+    // The weapon alone, in white, on nothing.
+    const flat = new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide });
+    const stage = new THREE.Scene();
+    stage.overrideMaterial = flat;
+    const parent = object.parent;
+    const rt = new THREE.WebGLRenderTarget(W, H);
+    const clear = renderer.getClearColor(new THREE.Color());
+    const clearA = renderer.getClearAlpha();
+    const px = new Uint8Array(W * H * 4);
+    try {
+      stage.add(object);
+      renderer.setRenderTarget(rt);
+      renderer.setClearColor(0x000000, 0);
+      renderer.clear();
+      renderer.render(stage, cam);
+      renderer.readRenderTargetPixels(rt, 0, 0, W, H, px);
+    } finally {
+      renderer.setRenderTarget(null);
+      renderer.setClearColor(clear, clearA);
+      if (parent) parent.add(object);
+      rt.dispose();
+      flat.dispose();
+    }
+    // Top row first, as an image is.
+    const mask = new Uint8Array(W * H);
+    for (let y = 0; y < H; y++) {
+      const src = (H - 1 - y) * W * 4;
+      for (let x = 0; x < W; x++) mask[y * W + x] = px[src + x * 4] > 127 ? 1 : 0;
+    }
+    const at = new THREE.Vector3();
+    const pts = anchorPoints().map((a) => {
+      at.copy(a.p).project(cam);
+      return { index: a.index, x: ((at.x + 1) / 2) * W, y: ((1 - at.y) / 2) * H };
+    });
+    return { width: W, height: H, mask, worldPerPx: (lenW * pad) / W, stickerWorld: stickerWorld(), anchors: pts };
+  }
+  function frameStickers(mode: "in" | "back" | "stay", slots?: number[]) {
     if (disposed) return;
     if (mode === "stay") {
       stickerReturn = null;
@@ -6518,7 +6734,7 @@ async function buildViewer(
       return;
     }
     if (stickerReturn) return;
-    const box = stickerArea();
+    const box = stickerZone(slots);
     if (!box) return;
     stickerReturn = poseNow();
     // From the home side — the side the slots are on — measured in that
@@ -15054,7 +15270,8 @@ async function buildViewer(
       target: controls.target.toArray() as [number, number, number],
     }),
     resetCamera: (side) => resetCamera(side),
-    frameStickers: (mode) => frameStickers(mode),
+    frameStickers: (mode, slots) => frameStickers(mode, slots),
+    sideOutline: () => sideOutline(),
     setSuspended: (on) => {
       if (on === suspended || disposed) return;
       suspended = on;

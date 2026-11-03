@@ -25,7 +25,7 @@ import type * as ThreeNS from "three";
 import { applyStickerSfx } from "./stickerShader";
 import { createStickerGlow } from "./stickerGlow";
 import { paintTextureUrl } from "./paintComposite";
-import { loadStickerTexture, loadThree, stickerArtInfo, type ThreeBundle } from "./viewer3d";
+import { loadStickerTexture, loadThree, stickerArtInfo, type SideOutline, type ThreeBundle } from "./viewer3d";
 import { GRID_H, GRID_W, MARGIN, STICKER_CM, type BoardSticker, type CraftSticker } from "./stickerCraftsModel";
 
 /** Texture resolution of the mat. 40 px per cm keeps the mm ticks crisp. */
@@ -62,6 +62,11 @@ export interface StickerBoard {
   snapshot(stickers: CraftSticker[]): Promise<string>;
   /** The "it's over here" flash on stickers just put on the mat — once each is drawn. */
   flash(uids: string[]): void;
+  /** The point of the mat in the middle of the view, in cm on the grid — where
+   *  a sticker added now should land. Clamped to the grid. */
+  viewCentre(): { x: number; y: number };
+  /** A weapon's side outline chalked on the mat at sticker scale, or none. */
+  setOutline(outline: SideOutline | null): void;
   dispose(): void;
 }
 
@@ -280,6 +285,70 @@ async function stickerMaterial(THREE: typeof ThreeNS, image: string, wear: numbe
     mat.color.set(0x55605c);
   }
   return { mat, inkW, inkH, backing: info.sfx?.backing ?? null };
+}
+
+/** Texture resolution of the chalk outline layer: it covers the whole mat. */
+const CHALK_PX_PER_CM = 24;
+/**
+ * A weapon's side outline in chalk, on a mat-sized canvas.
+ *
+ * At STICKER scale: one sticker on the gun (`o.stickerWorld`) is one sticker on
+ * the mat (STICKER_CM), so a layout laid against it is the size it will be on
+ * that gun. Placed with its sticker slots' anchors centred on the mat, where
+ * the layouts are made; a rifle is longer than the mat and runs off its ends,
+ * as chalk would. Each slot's default spot is a dashed sticker square with its
+ * number.
+ */
+function drawChalkOutline(o: SideOutline): HTMLCanvasElement {
+  const c = document.createElement("canvas");
+  c.width = Math.round(MAT_W * CHALK_PX_PER_CM);
+  c.height = Math.round(MAT_H * CHALK_PX_PER_CM);
+  const g = c.getContext("2d")!;
+  const cmPerPx = o.worldPerPx * (STICKER_CM / o.stickerWorld);
+  const ax = o.anchors.length ? o.anchors.reduce((a, p) => a + p.x, 0) / o.anchors.length : o.width / 2;
+  const ay = o.anchors.length ? o.anchors.reduce((a, p) => a + p.y, 0) / o.anchors.length : o.height / 2;
+  // Mask pixel -> canvas pixel.
+  const toX = (mx: number) => (GRID_W / 2 + (mx - ax) * cmPerPx + MARGIN) * CHALK_PX_PER_CM;
+  const toY = (my: number) => (GRID_H / 2 + (my - ay) * cmPerPx + MARGIN) * CHALK_PX_PER_CM;
+  const { width: W, height: H, mask } = o;
+  const inside = (x: number, y: number) => x >= 0 && y >= 0 && x < W && y < H && mask[y * W + x] === 1;
+  // A whisper of fill, so the shape reads at a glance under the stickers.
+  g.fillStyle = "rgba(235, 242, 236, 0.05)";
+  const step = Math.max(1, Math.floor(1 / (cmPerPx * CHALK_PX_PER_CM)));
+  const cell = cmPerPx * CHALK_PX_PER_CM * step + 0.6;
+  for (let y = 0; y < H; y += step) {
+    for (let x = 0; x < W; x += step) if (inside(x, y)) g.fillRect(toX(x), toY(y), cell, cell);
+  }
+  // The edge, in chalk: a dot per edge pixel, a little uneven in place and in
+  // strength, which is what makes a line read as drawn rather than printed.
+  let seed = 7;
+  const rnd = () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      if (!inside(x, y)) continue;
+      if (inside(x - 1, y) && inside(x + 1, y) && inside(x, y - 1) && inside(x, y + 1)) continue;
+      g.fillStyle = `rgba(240, 245, 238, ${0.45 + rnd() * 0.45})`;
+      g.beginPath();
+      g.arc(toX(x) + (rnd() - 0.5) * 1.2, toY(y) + (rnd() - 0.5) * 1.2, 1.1 + rnd() * 0.9, 0, Math.PI * 2);
+      g.fill();
+    }
+  }
+  // Each slot's default spot: a dashed sticker square, numbered.
+  const side = STICKER_CM * CHALK_PX_PER_CM;
+  g.setLineDash([7, 6]);
+  g.lineWidth = 2;
+  g.strokeStyle = "rgba(240, 245, 238, 0.55)";
+  g.fillStyle = "rgba(240, 245, 238, 0.75)";
+  g.font = `600 ${Math.round(CHALK_PX_PER_CM * 1.1)}px sans-serif`;
+  g.textAlign = "center";
+  g.textBaseline = "middle";
+  for (const a of o.anchors) {
+    const x = toX(a.x);
+    const y = toY(a.y);
+    g.strokeRect(x - side / 2, y - side / 2, side, side);
+    g.fillText(String(a.index + 1), x, y);
+  }
+  return c;
 }
 
 /** The turn handle's picture: a dark disc with a light rim and a turning arrow. */
@@ -623,6 +692,42 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
   const groupLines = new THREE.Group();
   scene.add(groupLines);
 
+  // ---- the chalk outline ------------------------------------------------------------
+  // One mat-sized plane just above the mat's face and under every sticker, its
+  // texture redrawn per weapon (drawChalkOutline). Off the mat it is cut by the
+  // canvas's own edge, as chalk on a mat would be.
+  const chalkGeom = new THREE.PlaneGeometry(MAT_W, MAT_H);
+  chalkGeom.rotateX(-Math.PI / 2);
+  const chalkMat = new THREE.MeshBasicMaterial({ transparent: true, depthWrite: false, toneMapped: false });
+  const chalk = new THREE.Mesh(chalkGeom, chalkMat);
+  chalk.position.y = 0.02;
+  chalk.renderOrder = 0;
+  chalk.visible = false;
+  scene.add(chalk);
+  function setOutline(o: SideOutline | null) {
+    chalkMat.map?.dispose();
+    chalkMat.map = null;
+    chalk.visible = !!o;
+    if (o) {
+      const tex = new THREE.CanvasTexture(drawChalkOutline(o));
+      tex.colorSpace = THREE.SRGBColorSpace;
+      tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+      chalkMat.map = tex;
+    }
+    chalkMat.needsUpdate = true;
+    dirty = true;
+  }
+  /** The mat under the middle of the view (see StickerBoard.viewCentre). */
+  function viewCentre(): { x: number; y: number } {
+    const at = new THREE.Vector3();
+    raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+    const hit = raycaster.ray.intersectPlane(boardPlane, at) ?? controls.target.clone();
+    return {
+      x: Math.min(GRID_W, Math.max(0, hit.x + GRID_W / 2)),
+      y: Math.min(GRID_H, Math.max(0, hit.z + GRID_H / 2)),
+    };
+  }
+
   // ---- the turn handle ------------------------------------------------------------
   // A round grip above the selection, on a stem from its top edge: drag it round
   // to turn the selection about its centre — what Shift + drag does with a
@@ -960,6 +1065,8 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
     flash(uids) {
       for (const uid of uids) flashWhenDrawn.add(uid);
     },
+    viewCentre,
+    setOutline,
     dispose() {
       disposed = true;
       cancelAnimationFrame(raf);
@@ -982,6 +1089,9 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
       groupMat.dispose();
       handleTex.dispose();
       handleMat.dispose();
+      chalkMat.map?.dispose();
+      chalkMat.dispose();
+      chalkGeom.dispose();
       stemGeom.dispose();
       stemMat.dispose();
       slabGeom.dispose();
