@@ -7,6 +7,9 @@
 // between them the tile says what is in it, where it would go, and — in the
 // store — who made it and how it is rated. A craft with more stickers than
 // there is room for stays on the shelf, greyed, saying how much room it needs.
+//
+// No hover tooltips (title): they popped up over the pictures. What a control
+// does is on it or beside it; screen readers get aria-labels.
 import { computed } from "vue";
 import { ArrowBigDown, ArrowBigUp, Box, Globe } from "lucide-vue-next";
 import type { SavedCraft, StoreCraft } from "../stickerCraftsModel";
@@ -59,7 +62,7 @@ const where = computed(() => {
          picture to a strip. -->
     <button
       class="relative aspect-[2/1] w-full flex-none overflow-hidden bg-[#183a31]"
-      :title="'Look at ' + craft.name + ' in 3D'"
+      :aria-label="'Look at ' + craft.name + ' in 3D'"
       @click="emit('preview')"
     >
       <img
@@ -94,7 +97,7 @@ const where = computed(() => {
         <span>{{ n }} {{ n === 1 ? "sticker" : "stickers" }}</span>
         <!-- Not when the caller's own switch below already says so. -->
         <span v-if="published && !$slots.actions" class="flex items-center gap-1 text-foreground"><Globe class="h-3.5 w-3.5" /> In the store</span>
-        <span v-if="published && score" class="font-mono" :title="`${score.ups} up · ${score.downs} down`">▲ {{ score.ups }} · ▼ {{ score.downs }}</span>
+        <span v-if="published && score" class="font-mono">▲ {{ score.ups }} · ▼ {{ score.downs }}</span>
       </div>
       <!-- What is in it: every sticker, named, in slot order — on a phone there
            is no hover to find out, and stacked ones can't be counted. -->
@@ -104,7 +107,6 @@ const where = computed(() => {
           :key="si"
           :src="s.image"
           :alt="shortName(s.name)"
-          :title="shortName(s.name)"
           class="h-7 w-7 rounded bg-secondary/40 object-contain p-0.5"
           draggable="false"
         />
@@ -118,14 +120,14 @@ const where = computed(() => {
             class="flex items-center gap-0.5 rounded px-1 transition-colors disabled:opacity-50"
             :class="[store.myVote === 1 ? 'text-success' : 'hover:text-foreground', isCompact ? 'h-9' : 'h-7']"
             :disabled="store.mine"
-            :title="store.mine ? 'Your craft' : store.myVote === 1 ? 'Take your upvote back' : 'Upvote'"
+            :aria-label="store.mine ? 'Your craft' : store.myVote === 1 ? 'Take your upvote back' : 'Upvote'"
             @click="emit('vote', 1)"
           ><ArrowBigUp class="h-4 w-4" />{{ store.ups }}</button>
           <button
             class="flex items-center gap-0.5 rounded px-1 transition-colors disabled:opacity-50"
             :class="[store.myVote === -1 ? 'text-destructive' : 'hover:text-foreground', isCompact ? 'h-9' : 'h-7']"
             :disabled="store.mine"
-            :title="store.mine ? 'Your craft' : store.myVote === -1 ? 'Take your downvote back' : 'Downvote'"
+            :aria-label="store.mine ? 'Your craft' : store.myVote === -1 ? 'Take your downvote back' : 'Downvote'"
             @click="emit('vote', -1)"
           ><ArrowBigDown class="h-4 w-4" />{{ store.downs }}</button>
         </span>
@@ -142,7 +144,6 @@ const where = computed(() => {
           class="tac-action flex flex-none items-center rounded-md border border-border px-3 text-f11 uppercase tracking-cs1 text-foreground disabled:pointer-events-none disabled:text-muted-foreground disabled:opacity-60"
           :class="isCompact ? 'h-9' : 'h-8'"
           :disabled="!fits"
-          :title="fits ? (target === 'mat' ? 'Place it on the mat' : 'Use this craft') : where"
           @click="emit('use')"
         >{{ fits ? (target === "mat" ? "Place" : "Use") : "Doesn't fit" }}</button>
       </div>

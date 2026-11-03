@@ -93,7 +93,7 @@ const mouse = (e: PointerEvent) => e.pointerType === "mouse";
     type="button"
     class="flex h-7 min-w-0 items-center gap-1 rounded border border-border bg-background/90 px-1.5 text-f10 uppercase tracking-cs1 text-foreground transition-colors hover:border-[color:var(--acc)]"
     :class="pinned ? 'border-[color:var(--acc)]' : ''"
-    :title="`Proposed use: ${useCase.weapon} — click to see where it goes`"
+    :aria-label="`Proposed use: ${useCase.weapon} — show where it goes`"
     :aria-expanded="open"
     @pointerenter="(e: PointerEvent) => mouse(e) && (hovered = true)"
     @pointerleave="(e: PointerEvent) => mouse(e) && (hovered = false)"
