@@ -589,24 +589,26 @@
 }
 
 /* The Sticker Crafts tab's "NEW" thought bubble (App.vue), until the tab has
-   been opened once: an amber pill over the tab's top-right corner, floating
-   gently, with two small circles trailing down toward the label. It stays
-   inside the header's own top padding: the app frame clips above it. */
+   been opened once: an amber pill hanging under the tab's icon, floating
+   gently, with two small circles trailing up to the icon. Under the tab, not
+   over it: the app frame clips right above the header, and boxed into that
+   strip it was too small to read. */
 [data-cs2-inventory] .new-bubble {
   position: absolute;
-  top: -11px;
-  right: -6px;
-  z-index: 2;
-  padding: 0 6px;
+  top: calc(100% + 8px);
+  left: 2px;
+  z-index: 5;
+  padding: 0 9px;
   border-radius: 999px;
   background: hsl(var(--tac-amber, 33 94% 58%));
   color: hsl(var(--background));
-  font-size: 9px;
+  font-size: 11px;
   font-weight: 700;
-  line-height: 14px;
-  letter-spacing: 0.1em;
+  line-height: 19px;
+  letter-spacing: 0.12em;
+  white-space: nowrap;
   text-transform: uppercase;
-  box-shadow: 0 0 10px hsl(var(--tac-amber, 33 94% 58%) / 0.45);
+  box-shadow: 0 2px 12px hsl(var(--tac-amber, 33 94% 58%) / 0.45);
   pointer-events: none;
   animation: new-bubble-float 2.6s ease-in-out infinite;
 }
@@ -617,26 +619,37 @@
   border-radius: 50%;
   background: inherit;
 }
+/* The trail, stepping up to the icon's middle (the tab's px-3 + half of 14px). */
 [data-cs2-inventory] .new-bubble::before {
-  width: 5px;
-  height: 5px;
-  left: 5px;
-  bottom: -4px;
+  width: 6px;
+  height: 6px;
+  left: 12px;
+  top: -5px;
 }
 [data-cs2-inventory] .new-bubble::after {
-  width: 3px;
-  height: 3px;
-  left: 1px;
-  bottom: -8px;
+  width: 4px;
+  height: 4px;
+  left: 15px;
+  top: -10px;
 }
-/* A phone's header has 6px over its tabs, not 16: smaller, and lower, over
-   the tab's top-right corner. */
+/* A phone's tab is the icon alone, with the header's buttons right under it:
+   the bubble sits across the tab's bottom edge, centred under the icon. */
 [data-cs2-inventory] .new-bubble.is-compact {
-  top: -1px;
-  right: -7px;
-  padding: 0 4px;
-  font-size: 8px;
-  line-height: 11px;
+  top: calc(100% - 4px);
+  left: 50%;
+  margin-left: -19px;
+  width: 38px;
+  padding: 0;
+  text-align: center;
+  font-size: 9px;
+  line-height: 15px;
+  letter-spacing: 0.08em;
+}
+[data-cs2-inventory] .new-bubble.is-compact::before {
+  left: calc(50% - 2.5px);
+  width: 5px;
+  height: 5px;
+  top: -3px;
 }
 [data-cs2-inventory] .new-bubble.is-compact::after {
   display: none;
@@ -647,7 +660,7 @@
     transform: translateY(0);
   }
   50% {
-    transform: translateY(-1px);
+    transform: translateY(2px);
   }
 }
 /* Opened: it pops away. */
@@ -659,7 +672,7 @@
 }
 [data-cs2-inventory] .new-bubble-leave-to {
   opacity: 0;
-  transform: scale(0.5) translateY(4px);
+  transform: scale(0.5) translateY(-6px);
 }
 @media (prefers-reduced-motion: reduce) {
   [data-cs2-inventory] .new-bubble {
