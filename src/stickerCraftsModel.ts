@@ -92,7 +92,15 @@ export interface SavedCraft {
   preview?: string;
   /** The PREVIEW_VERSION it was drawn at; an older one is redrawn. */
   previewV?: number;
+  /** Where its author means it to go: saved with a weapon's outline chalked
+   *  under it, the board's top-down picture of it on that outline. Travels into
+   *  the Craft Store with the craft, behind the tile's info chip. */
+  useCase?: CraftUseCase;
 }
+/** A craft's proposed use: the weapon, and the craft on that weapon's outline. */
+export type CraftUseCase = { model: string; weapon: string; image: string };
+/** Largest craft the server keeps, in characters of JSON (backend/src/stickerCrafts.ts MAX_BYTES.craft). */
+export const CRAFT_MAX_CHARS = 160_000;
 
 /**
  * Bump when the board's look or framing changes (light, materials, the fixed
@@ -174,7 +182,14 @@ function cleanCraft(raw: unknown): SavedCraft | null {
     savedAt: num(e.savedAt, 0),
     stickers,
     ...(typeof e.preview === "string" && e.preview.startsWith("data:image/") ? { preview: e.preview, previewV: num(e.previewV, 1) } : {}),
+    ...(cleanUseCase(e.useCase) ? { useCase: cleanUseCase(e.useCase)! } : {}),
   };
+}
+function cleanUseCase(raw: unknown): CraftUseCase | null {
+  const u = raw as Partial<CraftUseCase> | null;
+  if (!u || typeof u !== "object" || typeof u.image !== "string" || !u.image.startsWith("data:image/")) return null;
+  if (typeof u.model !== "string" || !u.model) return null;
+  return { model: u.model, weapon: typeof u.weapon === "string" && u.weapon ? u.weapon : u.model, image: u.image };
 }
 
 function cleanBoard(raw: unknown): BoardDoc {

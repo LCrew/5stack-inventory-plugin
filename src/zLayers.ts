@@ -32,6 +32,9 @@ export const Z = {
   /** A toast raised from inside the picker — the Sticker Crafts tab's Undo for a
    *  craft deleted from its tiles — over it, under its 3D preview. */
   pickerToast: 1350,
+  /** A craft tile's proposed-use picture (CraftUseCase), opened from the
+   *  picker's tiles and the mat's panel: over the picker, under its 3D preview. */
+  infoPopover: 1360,
   /** The picker's own 3D preview, which must cover the picker. */
   previewStage: 1400,
   /**

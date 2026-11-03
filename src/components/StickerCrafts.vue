@@ -61,6 +61,7 @@ import {
   MAX_ON_BOARD,
   MAX_PER_GROUPING,
   PREVIEW_VERSION,
+  CRAFT_MAX_CHARS,
   OUTLINE_ROOM,
   STICKER_CM,
   deleteCraft,
@@ -71,6 +72,7 @@ import {
   type BoardSticker,
   type CraftsHome,
   type CraftSticker,
+  type CraftUseCase as UseCase,
   type Grouping,
   type MatLayout,
   type SavedCraft,
@@ -80,6 +82,7 @@ import type { StickerBoard } from "../stickerBoard";
 import type { WeaponOutline } from "../outlineTrace";
 import AttachmentPicker from "./AttachmentPicker.vue";
 import ModelRail, { type RailItem } from "./ModelRail.vue";
+import CraftUseCase from "./CraftUseCase.vue";
 import PillTabs from "./PillTabs.vue";
 import { CTA_CLASS, CTA_STYLE } from "../ctaButton";
 import { Z } from "../zLayers";
@@ -604,22 +607,69 @@ function clearBoard() {
 }
 
 // ---- the library ------------------------------------------------------------------
-/** Draw a craft's preview on the board and keep it with the entry. */
-async function renderPreview(id: string) {
+/**
+ * Draw a craft's preview on the board and keep it with the entry — and, given
+ * where its stickers lie on the mat (`onMat`) with a weapon chalked under them,
+ * its proposed use as well. One write for both, so neither save can land over
+ * the other.
+ */
+async function renderPreview(id: string, onMat?: CraftSticker[]) {
   const b = board.value;
   const entry = library.value.find((e) => e.id === id);
   if (!b || !entry) return;
   try {
     const url = await b.snapshot(toRaw(entry.stickers).map((s) => toRaw(s)));
+    const useCase = onMat ? await shootUseCase(entry, onMat, url).catch(() => null) : null;
     const now = library.value.find((e) => e.id === id);
     if (now) {
       now.preview = url;
       now.previewV = PREVIEW_VERSION;
+      if (useCase) now.useCase = useCase;
       persistCraft(now);
     }
   } catch {
     /* no preview is a plainer card, not an error */
   }
+}
+
+// ---- a craft's proposed use -------------------------------------------------------
+/**
+ * A craft saved (or published) with a weapon's Outline chalked under it keeps
+ * a picture of itself on that outline and the weapon's name: where its author
+ * means it to go on which gun. It travels into the Craft Store with the craft
+ * and opens from the info chip on its tile (CraftUseCase).
+ */
+const weaponName = (model: string) => props.weapons.find((w) => w.model === model)?.name ?? model;
+/** Whether any of these stickers (mat places) sits on the chalked weapon's box. */
+function onOutline(list: { x: number; y: number }[]): boolean {
+  const o = outline.value;
+  if (!o) return false;
+  return list.some((s) => Math.abs(s.x - GRID_W / 2) <= o.w / 2 && Math.abs(s.y - GRID_H / 2) <= o.h / 2);
+}
+/** Mat stickers as plain craft stickers, where they lie now. */
+const matCopy = (list: BoardSticker[]): CraftSticker[] =>
+  list.map((s) => ({ id: s.id, name: s.name, image: s.image, x: s.x, y: s.y, rot: s.rot, wear: s.wear }));
+/** The craft on the chalked weapon, or null: no weapon chalked, the craft off it, or no picture that fits. */
+async function shootUseCase(entry: SavedCraft, onMat: CraftSticker[], preview: string | undefined): Promise<UseCase | null> {
+  const b = board.value;
+  const o = outline.value;
+  if (!b || !o || !onMat.length || !onOutline(onMat)) return null;
+  const weapon = weaponName(o.model);
+  // What the rest of the craft takes of the server's room, and a margin.
+  const rest = JSON.stringify({ ...toRaw(entry), preview, useCase: { model: o.model, weapon, image: "" } }).length;
+  const image = await b.useCaseShot(onMat, weapon, CRAFT_MAX_CHARS - 4_000 - rest);
+  return image ? { model: o.model, weapon, image } : null;
+}
+/** The craft's own stickers on the mat, as it is saved (same stickers, same layout), or null. */
+function onMatAsSaved(entry: SavedCraft): BoardSticker[] | null {
+  const list = stickers.value.filter((s) => s.craft === entry.id);
+  if (list.length !== entry.stickers.length) return null;
+  const c = centroid(list);
+  const same = list.every((s, i) => {
+    const e = entry.stickers[i];
+    return e.image === s.image && Math.abs(s.x - c.x - e.x) < 0.06 && Math.abs(s.y - c.y - e.y) < 0.06 && Math.abs(s.rot - e.rot) < 0.6;
+  });
+  return same ? list : null;
 }
 /** `base`, or "base (2)", "base (3)"… — the first no saved craft is called. */
 function uniqueName(base: string) {
@@ -681,7 +731,7 @@ function saveSelection() {
   // These stickers are that craft now: the next change can Update it.
   patchSelected((s) => (s.craft = entry.id));
   persistCraft(entry);
-  void renderPreview(entry.id);
+  void renderPreview(entry.id, matCopy(sel.value));
   showSaved(entry.id);
 }
 /** Write the selection back over the craft it came from. A published craft's
@@ -689,16 +739,21 @@ function saveSelection() {
 function updateCraft() {
   const entry = updateTarget.value;
   if (!entry) return;
-  entry.stickers = selectionLayout();
+  const layout = selectionLayout();
+  const moved = JSON.stringify(layout) !== JSON.stringify(toRaw(entry.stickers));
+  entry.stickers = layout;
   entry.savedAt = Date.now();
-  // The old picture is the old layout: draw it again.
+  // The old picture is the old layout: draw it again. So is its proposed use,
+  // which is drawn again too when a weapon is chalked under it — and kept, for
+  // the same layout, when none is.
   delete entry.preview;
   delete entry.previewV;
+  if (moved) delete entry.useCase;
   // Saved just now, so first — the panel shows the newest few.
   library.value = [entry, ...library.value.filter((e) => e !== entry)];
   patchSelected((s) => (s.craft = entry.id));
   persistCraft(entry);
-  void renderPreview(entry.id);
+  void renderPreview(entry.id, matCopy(sel.value));
   showSaved(entry.id);
   say(published.value.has(entry.id) ? `Updated “${entry.name}” — the Craft Store has the new layout` : `Updated “${entry.name}”`);
 }
@@ -786,7 +841,14 @@ async function togglePublish(entry: SavedCraft) {
   const on = !published.value.has(entry.id);
   publishing.value = new Set([...publishing.value, entry.id]);
   const write = (async () => {
-    if (on) await storeCraft(home.value, entry, library.value);
+    if (on) {
+      // On the mat as saved, on a chalked weapon: publish with its place on
+      // that weapon as it lies now.
+      const lying = onMatAsSaved(entry);
+      const useCase = lying ? await shootUseCase(entry, matCopy(lying), entry.preview).catch(() => null) : null;
+      if (useCase) entry.useCase = useCase;
+      await storeCraft(home.value, entry, library.value);
+    }
     await setPublished(entry.id, on);
     const next = new Set(published.value);
     if (on) next.add(entry.id);
@@ -796,7 +858,13 @@ async function togglePublish(entry: SavedCraft) {
   try {
     await track(write);
     await write;
-    say(on ? `“${entry.name}” is in the Craft Store — everyone on the panel can use it` : `“${entry.name}” is private again`);
+    say(
+      !on
+        ? `“${entry.name}” is private again`
+        : entry.useCase
+          ? `“${entry.name}” is in the Craft Store, shown on the ${entry.useCase.weapon} — everyone on the panel can use it`
+          : `“${entry.name}” is in the Craft Store — to show which gun it's for, pick an Outline under it on the mat and press Update`,
+    );
   } catch {
     say(on ? `Couldn't publish “${entry.name}” — try again` : `Couldn't take “${entry.name}” out of the store — try again`, true);
   } finally {
@@ -1075,7 +1143,11 @@ watch(
   () => board.value?.sync(toRaw(stickers.value).map((s) => toRaw(s)), toRaw(selected.value)),
   { deep: true },
 );
-watch(boardView, (v) => board.value?.setView(v));
+// Asked for here: fly there. Changed on the board by hand (tilting out of Top
+// makes it Angled), the board is already there — only the buttons follow.
+watch(boardView, (v) => {
+  if (board.value && board.value.view() !== v) board.value.setView(v);
+});
 
 onMounted(async () => {
   try {
@@ -1131,6 +1203,7 @@ onMounted(async () => {
         moving.value = false;
       },
       rotate: rotateSelection,
+      viewChanged: (v) => (boardView.value = v),
     }, { ...matLayout.value });
     // Navigated away while three was still arriving.
     if (!stageEl.value) {
@@ -1257,7 +1330,9 @@ const VIEWS = [
 ] as const;
 /** The mat's key hint, for what is selected now: [keys, what they do] pairs. */
 const keyHint = computed<[string, string][]>(() => {
-  if (!sel.value.length) return [["Click", "select"], ["Shift-click", "select several"], ["Right-drag", "pan"]];
+  if (!sel.value.length) {
+    return [["Click", "select"], ["Shift-click", "select several"], ["Drag", "pan"], ["Right-drag", "turn view"], ["Shift + right-drag", "tilt"]];
+  }
   const out: [string, string][] = [["Drag", "move"], ["Shift + drag", "turn"], ["Q / E", "turn 5°"], ["Arrows / WASD", "nudge"]];
   if (sel.value.some((s) => s.group)) out.push(["Alt-click", "one of a group"]);
   return out;
@@ -1807,6 +1882,9 @@ const FIELD =
                 <div class="relative mb-2 grid aspect-[2/1] w-full place-items-center overflow-hidden rounded bg-[#183a31]">
                   <img v-if="entry.preview" :src="entry.preview" alt="" class="h-full w-full object-cover" draggable="false" />
                   <Loader2 v-else class="h-4 w-4 animate-spin text-muted-foreground" />
+                  <div v-if="entry.useCase" class="absolute left-1.5 top-1.5 flex max-w-[calc(100%-0.75rem)]">
+                    <CraftUseCase :use-case="entry.useCase" author="you" />
+                  </div>
                 </div>
                 <div class="mb-1.5 flex items-center gap-1.5">
                   <input

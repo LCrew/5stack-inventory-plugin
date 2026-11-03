@@ -50,6 +50,9 @@ export interface BoardCallbacks {
   turnEnd(): void;
   /** Alt + wheel over the mat: rotate the selection by this many degrees. */
   rotate(deg: number): void;
+  /** The view became another by hand: tilting out of Top (Shift + right-drag)
+   *  makes it Angled, where it already is — no flight. */
+  viewChanged(view: "angled" | "top"): void;
 }
 
 export interface StickerBoard {
@@ -57,6 +60,8 @@ export interface StickerBoard {
   sync(stickers: BoardSticker[], selected: ReadonlySet<string>): void;
   /** "angled" is the default three-quarter look; "top" is straight down, for measuring. */
   setView(view: "angled" | "top"): void;
+  /** The view it is in now (it changes by hand: see BoardCallbacks.viewChanged). */
+  view(): "angled" | "top";
   /** A top-down picture of a craft on the mat, as a JPEG data URL — the library
    *  card and the weapon picker's tile. Rendered by this board, so it is the
    *  board's own look and not an approximation of it. */
@@ -69,6 +74,13 @@ export interface StickerBoard {
   /** A weapon's side outline chalked on the mat at sticker scale, its box
    *  centred on the home grid's middle, or none. */
   setOutline(outline: WeaponOutline | null): void;
+  /**
+   * The craft (these stickers, at their places on the mat) on the chalked
+   * weapon, top-down, framed on the weapon, the weapon's name chalked in a
+   * corner: the proposed use a published craft carries. A JPEG data URL of at
+   * most `maxChars`, or null with no weapon chalked or no quality that fits.
+   */
+  useCaseShot(stickers: CraftSticker[], weapon: string, maxChars: number): Promise<string | null>;
   /** Grow or shrink the mat to this, animated — and with `refit`, fly the
    *  view out (or in) to fit it, on the same beat. */
   setLayout(layout: MatLayout, refit: boolean): void;
@@ -554,14 +566,20 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
    *   turn  — Shift held: left/right turns the selection about its centre. A
    *           Shift press that never moves is still a Shift-click, settled on
    *           release (`uid` / `wasSelected`).
-   *   press — pressed on the empty mat: the camera's, unless it ends as a click.
+   *   press — pressed on the empty mat: the camera's (a drag pans), unless it
+   *           ends as a click.
+   *   view  — the right button (or Ctrl + click), anywhere: turn the view about
+   *           the middle of the screen — in Top, the mat spins in place — or,
+   *           with Shift, tilt it. Ours, not OrbitControls': its rotate is both
+   *           at once, and Top has to stay top-down while it turns.
    */
   type Gesture =
     | { kind: "move"; id: number; uid: string; from: { x: number; y: number }; moved: boolean }
     /** The turn handle: around the selection's centre `c`, `d` cm out. */
     | { kind: "spin"; id: number; c: { x: number; y: number }; d: number; last: number; total: number; moved: boolean }
     | { kind: "turn"; id: number; x0: number; moved: boolean; uid: string | null; wasSelected: boolean; alt: boolean }
-    | { kind: "press"; id: number; x: number; y: number };
+    | { kind: "press"; id: number; x: number; y: number }
+    | { kind: "view"; id: number; x: number; y: number; tilt: boolean; phi0: number };
   let gesture: Gesture | null = null;
   const capture = (id: number) => {
     controls.enabled = false;
@@ -573,7 +591,16 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
   };
 
   const onDown = (e: PointerEvent) => {
-    if (e.button !== 0 || gesture) return;
+    if (gesture) return;
+    if (e.pointerType === "mouse" && (e.button === 2 || (e.button === 0 && e.ctrlKey))) {
+      land();
+      const sph = new THREE.Spherical().setFromVector3(camera.position.clone().sub(controls.target));
+      gesture = { kind: "view", id: e.pointerId, x: e.clientX, y: e.clientY, tilt: e.shiftKey, phi0: sph.phi };
+      capture(e.pointerId);
+      e.preventDefault();
+      return;
+    }
+    if (e.button !== 0) return;
     setNdc(e);
     // The turn handle sits over everything, so it is asked first.
     if (handle.visible && raycaster.intersectObject(handle, false).length) {
@@ -604,7 +631,12 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
       return;
     }
     gesture = { kind: "press", id: e.pointerId, x: e.clientX, y: e.clientY };
+    // A drag on the empty mat pans. OrbitControls turns a Shift / Cmd drag
+    // into its own orbit, which would tilt Top without leaving it: not here.
+    if (e.pointerType === "mouse" && (e.shiftKey || e.metaKey)) e.stopImmediatePropagation();
   };
+  /** Radians of turn per pixel dragged: a drag the canvas's height is a full turn, as OrbitControls. */
+  const turnPerPx = () => (2 * Math.PI) / Math.max(1, canvas.clientHeight);
   const onMove = (e: PointerEvent) => {
     setNdc(e);
     const g = gesture;
@@ -625,6 +657,26 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
           cb.turnStart();
         }
         cb.turn(dx * TURN_PER_PX);
+      } else if (g.kind === "view") {
+        const dx = e.clientX - g.x;
+        const dy = e.clientY - g.y;
+        g.x = e.clientX;
+        g.y = e.clientY;
+        const off = camera.position.clone().sub(controls.target);
+        const sph = new THREE.Spherical().setFromVector3(off);
+        if (g.tilt) {
+          // Drag down to look more from above, as OrbitControls does.
+          sph.phi = Math.min(controls.maxPolarAngle, Math.max(0.0002, sph.phi - dy * turnPerPx()));
+          if (currentView === "top" && Math.abs(sph.phi - g.phi0) > 0.03) {
+            currentView = "angled";
+            cb.viewChanged("angled");
+          }
+        } else {
+          sph.theta -= dx * turnPerPx();
+        }
+        camera.position.copy(controls.target).add(off.setFromSpherical(sph));
+        camera.lookAt(controls.target);
+        dirty = true;
       } else if (g.kind === "spin") {
         const at = boardPoint();
         if (!at) return;
@@ -669,6 +721,8 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
       if (g.moved) cb.turnEnd();
       release(e.pointerId);
       dirty = true;
+    } else if (g.kind === "view") {
+      release(e.pointerId);
     } else if (g.kind === "turn") {
       if (g.moved) cb.turnEnd();
       // A Shift-click on one that was already picked takes it back out.
@@ -692,11 +746,19 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
   canvas.addEventListener("pointercancel", onUp);
   canvas.addEventListener("pointerleave", onLeave);
   canvas.addEventListener("wheel", onWheel, { passive: false });
+  // The right button turns the view: never the browser's menu (OrbitControls
+  // only holds it back while it is enabled, and a turn disables it).
+  const onMenu = (e: Event) => e.preventDefault();
+  canvas.addEventListener("contextmenu", onMenu);
 
   const controls = new OrbitControls(camera, canvas);
   controls.enableDamping = true;
   controls.dampingFactor = 0.12;
   controls.screenSpacePanning = true;
+  // Left-drag on the empty mat pans; the right button is the board's own view
+  // gesture (turn, Shift to tilt — see Gesture); the wheel zooms. Touch keeps
+  // OrbitControls' own: one finger orbits, two pan and pinch.
+  controls.mouseButtons = { LEFT: THREE.MOUSE.PAN, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: null };
   controls.minDistance = 10;
   controls.maxDistance = 240;
   // Never under the mat: it is a slab on a table, not a model to turn over.
@@ -747,7 +809,10 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
   chalk.renderOrder = 0;
   chalk.visible = false;
   scene.add(chalk);
+  /** The weapon chalked now, for the use-case shot. */
+  let outlineNow: WeaponOutline | null = null;
   function setOutline(o: WeaponOutline | null) {
+    outlineNow = o;
     chalkMat.map?.dispose();
     chalkMat.map = null;
     chalk.visible = !!o;
@@ -1011,58 +1076,120 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
    * snapshot's size and handed back with the board redrawn in the same task, so
    * the page never composites a frame of it.
    */
-  async function snapshot(list: CraftSticker[]): Promise<string> {
-    const snap = stage();
+  /** Stickers into a scene of their own, at world (x, z) = `at(s)`; and the box round their ink. */
+  async function layStickers(into: ThreeNS.Scene, list: CraftSticker[], at: (s: CraftSticker) => { x: number; z: number }) {
     const made = await Promise.all(list.map((s) => stickerMaterial(THREE, s.image, s.wear).catch(() => null)));
-    let minX = Infinity;
-    let minY = Infinity;
-    let maxX = -Infinity;
-    let maxY = -Infinity;
+    const box = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
     list.forEach((s, i) => {
       const built = made[i];
       if (!built) return;
+      const p = at(s);
       const mesh = new THREE.Mesh(quadGeom, built.mat);
       mesh.scale.set(STICKER_CM, 1, STICKER_CM);
-      mesh.position.set(s.x, 0.05, s.y);
+      mesh.position.set(p.x, 0.05, p.z);
       mesh.rotation.y = (-s.rot * Math.PI) / 180;
       mesh.renderOrder = i + 1;
-      snap.add(mesh);
+      into.add(mesh);
       const { ex, ey } = extent(s.rot, built.inkW, built.inkH);
-      minX = Math.min(minX, s.x - ex);
-      maxX = Math.max(maxX, s.x + ex);
-      minY = Math.min(minY, s.y - ey);
-      maxY = Math.max(maxY, s.y + ey);
+      box.minX = Math.min(box.minX, p.x - ex);
+      box.maxX = Math.max(box.maxX, p.x + ex);
+      box.minY = Math.min(box.minY, p.z - ey);
+      box.maxY = Math.max(box.maxY, p.z + ey);
     });
-    if (!Number.isFinite(minX)) [minX, maxX, minY, maxY] = [-2.5, 2.5, -2.5, 2.5];
-    const aspect = SNAP_W / SNAP_H;
-    const pad = 1;
-    const halfW = Math.max(SNAP_SPAN_CM / 2, (maxX - minX) / 2 + pad, ((maxY - minY) / 2 + pad) * aspect);
-    const halfH = halfW / aspect;
-    const cx = (minX + maxX) / 2;
-    const cy = (minY + maxY) / 2;
+    return { box, dispose: () => made.forEach((m) => m?.mat.dispose()) };
+  }
+  /**
+   * Render a scene top-down onto a canvas of its own, (cx, cz) in the middle
+   * and halfW of the mat either side. The drawing buffer is borrowed at the
+   * picture's size and handed back with the board redrawn in the same task, so
+   * the page never composites a frame of it.
+   */
+  function shootTopDown(snap: ThreeNS.Scene, cx: number, cz: number, halfW: number, w: number, h: number): HTMLCanvasElement {
+    const halfH = halfW / (w / h);
     const cam = new THREE.OrthographicCamera(-halfW, halfW, halfH, -halfH, 1, 300);
     // Screen-up is the mat's top edge (-z), as in the Top view.
     cam.up.set(0, 0, -1);
-    cam.position.set(cx, 120, cy);
-    cam.lookAt(cx, 0, cy);
-
+    cam.position.set(cx, 120, cz);
+    cam.lookAt(cx, 0, cz);
     const size = renderer.getSize(new THREE.Vector2());
     const ratio = renderer.getPixelRatio();
     const out = document.createElement("canvas");
-    out.width = SNAP_W;
-    out.height = SNAP_H;
+    out.width = w;
+    out.height = h;
     try {
       renderer.setPixelRatio(1);
-      renderer.setSize(SNAP_W, SNAP_H, false);
+      renderer.setSize(w, h, false);
       renderer.render(snap, cam);
-      out.getContext("2d")!.drawImage(canvas, 0, 0, SNAP_W, SNAP_H);
+      out.getContext("2d")!.drawImage(canvas, 0, 0, w, h);
     } finally {
       renderer.setPixelRatio(ratio);
       renderer.setSize(size.x, size.y, false);
       renderer.render(scene, camera);
-      for (const m of made) m?.mat.dispose();
     }
-    return out.toDataURL("image/jpeg", 0.85);
+    return out;
+  }
+  /**
+   * Render a craft top-down, framed on itself, into a JPEG.
+   *
+   * Its own scene (the same mat, light and reflections), so whatever else is on
+   * the board stays out of the picture.
+   */
+  async function snapshot(list: CraftSticker[]): Promise<string> {
+    const snap = stage();
+    const laid = await layStickers(snap, list, (s) => ({ x: s.x, z: s.y }));
+    let { minX, minY, maxX, maxY } = laid.box;
+    if (!Number.isFinite(minX)) [minX, maxX, minY, maxY] = [-2.5, 2.5, -2.5, 2.5];
+    const aspect = SNAP_W / SNAP_H;
+    const pad = 1;
+    const halfW = Math.max(SNAP_SPAN_CM / 2, (maxX - minX) / 2 + pad, ((maxY - minY) / 2 + pad) * aspect);
+    try {
+      return shootTopDown(snap, (minX + maxX) / 2, (minY + maxY) / 2, halfW, SNAP_W, SNAP_H).toDataURL("image/jpeg", 0.85);
+    } finally {
+      laid.dispose();
+    }
+  }
+  async function useCaseShot(list: CraftSticker[], weapon: string, maxChars: number): Promise<string | null> {
+    const o = outlineNow;
+    if (!o || !chalkMat.map) return null;
+    const snap = stage();
+    // The chalk, shared with the board's (a mesh lives in one scene; its
+    // geometry and material can be in many).
+    const ch = new THREE.Mesh(chalk.geometry, chalkMat);
+    ch.position.y = chalk.position.y;
+    snap.add(ch);
+    const laid = await layStickers(snap, list, (s) => ({ x: s.x - GRID_W / 2, z: s.y - GRID_H / 2 }));
+    try {
+      // The weapon's box (centred on the world origin) and the craft, a little room round both.
+      const b = laid.box;
+      const minX = Math.min(-o.w / 2, b.minX);
+      const maxX = Math.max(o.w / 2, b.maxX);
+      const minY = Math.min(-o.h / 2, b.minY);
+      const maxY = Math.max(o.h / 2, b.maxY);
+      const pad = 2;
+      const spanW = maxX - minX + pad * 2;
+      const spanH = maxY - minY + pad * 2;
+      const aspect = Math.min(3.2, Math.max(1.6, spanW / spanH));
+      const W = 800;
+      const H = Math.round(W / aspect);
+      const halfW = Math.max(spanW / 2, (spanH / 2) * aspect);
+      const shot = shootTopDown(snap, (minX + maxX) / 2, (minY + maxY) / 2, halfW, W, H);
+      // The weapon's name, chalked in the bottom-left corner.
+      const g = shot.getContext("2d")!;
+      g.font = "600 26px ui-sans-serif, system-ui, sans-serif";
+      g.textBaseline = "bottom";
+      g.fillStyle = "rgba(240, 245, 238, 0.85)";
+      g.shadowColor = "rgba(0, 0, 0, 0.45)";
+      g.shadowBlur = 6;
+      g.fillText(weapon.toUpperCase(), 18, H - 14);
+      // As good as fits the craft's room on the server.
+      for (const q of [0.82, 0.7, 0.58, 0.46]) {
+        const url = shot.toDataURL("image/jpeg", q);
+        if (url.length <= maxChars) return url;
+      }
+      return null;
+    } finally {
+      laid.dispose();
+    }
   }
 
   // ---- size and loop ------------------------------------------------------------
@@ -1149,6 +1276,8 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
     sync,
     setView,
     snapshot,
+    useCaseShot,
+    view: () => currentView,
     flash(uids) {
       for (const uid of uids) flashWhenDrawn.add(uid);
     },
@@ -1160,6 +1289,7 @@ export async function mountStickerBoard(container: HTMLElement, cb: BoardCallbac
       cancelAnimationFrame(raf);
       ro.disconnect();
       canvas.removeEventListener("pointerdown", onDown);
+      canvas.removeEventListener("contextmenu", onMenu);
       canvas.removeEventListener("pointermove", onMove);
       canvas.removeEventListener("pointerup", onUp);
       canvas.removeEventListener("pointercancel", onUp);

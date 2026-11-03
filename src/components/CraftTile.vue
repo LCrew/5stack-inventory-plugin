@@ -13,6 +13,7 @@ import type { SavedCraft, StoreCraft } from "../stickerCraftsModel";
 import type { CraftPlan } from "../composables/useAttachmentPicker";
 import { planLine } from "../craftPlanText";
 import { isCompact } from "../responsive";
+import CraftUseCase from "./CraftUseCase.vue";
 
 const props = defineProps<{
   craft: SavedCraft | StoreCraft;
@@ -82,6 +83,11 @@ const where = computed(() => {
         <Box class="h-3.5 w-3.5" /> 3D
       </span>
     </button>
+    <!-- Its proposed use: the gun it is meant for, and (on the chip) where on
+         it. Beside the picture's button, not in it — a button can't hold one. -->
+    <div v-if="craft.useCase" class="absolute left-1.5 top-1.5 flex max-w-[calc(100%-4.5rem)]">
+      <CraftUseCase :use-case="craft.useCase" :author="store ? (store.mine ? 'you' : store.author.name) : 'you'" />
+    </div>
     <div class="flex flex-none flex-col gap-1.5 p-2">
       <div class="truncate text-f13 font-semibold text-foreground">{{ craft.name }}</div>
       <div class="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-f11 text-muted-foreground">
