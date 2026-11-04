@@ -15,11 +15,11 @@ name: dev-plugin
 
 on:
   push:
-    # The dev copy follows ONE branch: `experimental` while untested features
-    # are tried there (docs/DEV-PLUGIN.md, "Which branch the dev copy runs").
-    # Pages only deploys from branches the github-pages environment allows.
+    # The dev copy follows ONE branch, and it is `main` now (upstream's main
+    # plus the dev-copy files). This branch builds nothing: a push here runs
+    # this file, which names only main.
     branches:
-      - "experimental"
+      - "main"
   workflow_dispatch:
 
 concurrency:
