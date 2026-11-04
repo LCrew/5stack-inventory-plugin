@@ -5698,6 +5698,16 @@ app.delete("/api/admin/prices", async (request, reply) => {
 // cdn.cstrike.app was assets quietly arriving from somewhere the operator did
 // not choose; a first-party CDN is fine, silently switching to it is not.
 const ASSET_CDN_BASE = process.env.INVENTORY_ASSET_CDN ?? "https://skins.5stack.gg";
+/**
+ * `INVENTORY_ASSET_CDN=off` (or empty): this backend never hands out the CDN,
+ * whatever the shared setting says. The LCrew fork's dev backend (k8s/dev)
+ * runs that way: it shares the database — and with it the `asset_cdn` setting —
+ * with the installed plugin, but serves its own models mount, so a change to
+ * the extraction is tested against the files it made. Also refuses to change
+ * the setting from here, since that would change where the installed plugin
+ * gets its assets. Unset, nothing changes.
+ */
+const ASSET_CDN_OFF = ASSET_CDN_BASE === "" || ASSET_CDN_BASE === "off";
 
 async function assetCdnEnabled(): Promise<boolean> {
   const { rows } = await pool.query<{ value: string }>(
@@ -5759,6 +5769,7 @@ async function hasLocalAssets(): Promise<boolean> {
 }
 
 async function assetOrigin(): Promise<string> {
+  if (ASSET_CDN_OFF) return "";
   // Two ways to end up on the CDN:
   //
   //   1. The operator opted in.
@@ -6136,6 +6147,8 @@ async function requireAdmin(request: Parameters<typeof getIdentity>[0]) {
 app.get("/api/admin/asset-cdn", async (request, reply) => {
   const denied = await requireAdmin(request);
   if (denied) return reply.status(denied.code).send({ error: denied.error });
+  // The panel hides the row on an error, as it does on a backend without it.
+  if (ASSET_CDN_OFF) return reply.status(404).send({ error: "This backend always serves its own assets (INVENTORY_ASSET_CDN=off)." });
   const enabled = await assetCdnEnabled();
   const mine = await localAssetKey();
   const theirs = await assetCdnStamp();
@@ -6173,6 +6186,9 @@ app.get("/api/admin/asset-cdn", async (request, reply) => {
 app.put<{ Body: { enabled?: boolean } }>("/api/admin/asset-cdn", async (request, reply) => {
   const denied = await requireAdmin(request);
   if (denied) return reply.status(denied.code).send({ error: denied.error });
+  if (ASSET_CDN_OFF) {
+    return reply.status(409).send({ error: "This backend always serves its own assets; the CDN switch belongs to the installed plugin." });
+  }
   const enabled = request.body?.enabled === true;
   await pool.query(
     `INSERT INTO inventory.settings (key, value, updated_at) VALUES ('asset_cdn', $1, now())
