@@ -70,6 +70,9 @@ jobs:
       - name: Model decompile failures stop before merge and stamping
         run: npm run check:extract-shards
 
+      - name: Source 2 Viewer 20.x models go back to the 19.x layout
+        run: npm run check:glb-source-space
+
       - name: Typecheck
         run: npm run typecheck
 
@@ -78,6 +81,9 @@ jobs:
 
       - name: Steam import covers the economy
         run: npm run check:steam-sync
+
+      - name: Steam sync backs off while Steam rate-limits this server
+        run: npm run check:steam-cooldown
 
       - name: Inspect link round-trips
         run: npm run check:inspect
@@ -150,6 +156,18 @@ jobs:
 
       - name: Guidelines turned off by 5stack Ranks count as off
         run: npm run check:guidelines
+
+      - name: Only an administrator fills the shared composite store
+        run: npm run check:composite-store
+
+      - name: The sign-in cache stays bounded
+        run: npm run check:identity-cache
+
+      - name: The StatTrak key is compared in constant time
+        run: npm run check:server-key
+
+      - name: A player keeps their CS2 guns unless they ask for the grid in game
+        run: npm run check:loadout-feed
 
   # NOT in the job above: tools/charmsim-check.ts needs a directory of
   # *.phys.json from the extracted CS2 assets, which no clean runner has. Run it

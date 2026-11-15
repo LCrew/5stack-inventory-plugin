@@ -3788,6 +3788,14 @@ export interface ViewerOpts {
    * what is actually visible rather than half under the item's spec panel.
    */
   frameInset?: { right?: number };
+  /**
+   * A pane narrower than it is tall (the docked layout's focus
+   * stage) keeps the whole weapon across it: no inset shift once the room left
+   * of the panel is narrower than the pane is tall (the gun sits below the
+   * panel, and the shift pushed it off the left edge), and a zoom out by the
+   * aspect once the pane itself is.
+   */
+  narrowFit?: boolean;
   stickers?: StickerPlacement[];
   /**
    * Patches on an AGENT, slot-ordered, by inventory image — `kind: "agent"`.
@@ -5573,10 +5581,11 @@ async function buildViewer(
    * unchanged at every window size it reaches, and a pane that narrows below
    * the reference crops its sides rather than shrinking the weapon, as before.
    */
-  const frameHalfH = (aspect: number) =>
-    opts?.frame === "fit"
-      ? halfH
-      : Math.max(halfH * Math.min(1, FRAME_REF_ASPECT / Math.max(aspect, 1e-3)), Math.min(halfH, extentUp * FRAME_MIN_SLACK));
+  const frameHalfH = (aspect: number) => {
+    if (opts?.frame === "fit") return halfH;
+    const h = Math.max(halfH * Math.min(1, FRAME_REF_ASPECT / Math.max(aspect, 1e-3)), Math.min(halfH, extentUp * FRAME_MIN_SLACK));
+    return opts?.narrowFit && aspect < 1 ? Math.max(h, halfH / Math.max(aspect, 1e-3)) : h;
+  };
   // The standoff is arbitrary under a parallel projection — it changes nothing
   // about what is drawn. It is picked far enough out that no orbit can push
   // geometry through the near plane, and so that `camera.position` still reads
@@ -5721,14 +5730,15 @@ async function buildViewer(
     panPx.y = clamp(panPx.y, -maxPx, maxPx);
     // Cheap enough to call every frame from the zoom re-clamp below, because
     // rebuilding the projection is skipped whenever nothing actually moved.
-    if (panPx.x === panApplied.x && panPx.y === panApplied.y && frameInsetRight === insetApplied) return;
+    const inset = opts?.narrowFit && cssW - frameInsetRight < cssH ? 0 : frameInsetRight;
+    if (panPx.x === panApplied.x && panPx.y === panApplied.y && inset === insetApplied) return;
     panApplied.copy(panPx);
-    insetApplied = frameInsetRight;
+    insetApplied = inset;
     // Negated: setViewOffset picks the sub-window's top-left out of the full
     // image, so shifting the window left is what moves the content right. The
     // inset is NOT negated for exactly that reason — moving the window right is
     // what walks the weapon out from under the panel.
-    const dx = -panPx.x + frameInsetRight / 2;
+    const dx = -panPx.x + inset / 2;
     if (dx === 0 && panPx.y === 0) camera.clearViewOffset();
     else camera.setViewOffset(cssW, cssH, dx, -panPx.y, cssW, cssH);
   };
@@ -6940,6 +6950,28 @@ async function buildViewer(
   };
   type DecalEntry = { key: string; seq: number };
   const decals = new Map<number, DecalEntry>();
+  // A sticker fades on when it first lands in its slot, not popping in as
+  // its art arrives. A drag reuses its mesh and never fades; a still (a bake)
+  // and reduced motion never fade at all.
+  const DECAL_FADE_MS = 380;
+  // The fade advances at most FADE_STEP_MAX per frame, not by the clock.
+  // Opening a gun runs several slow frames in a row (its shaders, textures, the
+  // charm: 868ms then 288ms, measured), and a clock-driven fade was over before
+  // any of them finished, so the stickers still popped. Clamped, it waits them out.
+  const FADE_STEP_MAX = 32;
+  const decalFade = new Map<import("three").Mesh, { e: number; last: number }>();
+  function stepDecalFade(now: number) {
+    for (const [mesh, f] of decalFade) {
+      if (f.last) f.e += Math.min(now - f.last, FADE_STEP_MAX);
+      f.last = now;
+      const t = Math.min(1, f.e / DECAL_FADE_MS);
+      (mesh.material as import("three").Material).opacity = 1 - (1 - t) ** 3;
+      if (t >= 1) decalFade.delete(mesh);
+    }
+  }
+  // The stickers a viewer opens with are already on the item: they arrive
+  // quietly, without the "it's over here" flash a sticker you place gets.
+  const quietDecalSlots = new Set<number>();
   // Rendered decal meshes live in a separate registry: async builds supersede
   // each other via `decals`, but the on-screen mesh must be disposed exactly
   // once regardless of how many in-flight builds got aborted.
@@ -6954,6 +6986,7 @@ async function buildViewer(
       m.geometry.dispose();
       (m.material as import("three").Material).dispose();
       liveMesh.delete(slot);
+      decalFade.delete(m);
     }
     // A flash outlives its mesh otherwise, and would then re-target whatever
     // mesh next lands in this slot.
@@ -7721,6 +7754,10 @@ async function buildViewer(
       mesh.userData.stickerImage = st.image;
       mesh.userData.stickerWear = st.w ?? 0;
       mesh.renderOrder = 10 + st.slot;
+      if (!opts?.still && !reducedMotion.value) {
+        mat.opacity = 0;
+        decalFade.set(mesh, { e: 0, last: 0 });
+      }
       scene.add(mesh);
       liveMesh.set(st.slot, mesh);
     }
@@ -7749,7 +7786,7 @@ async function buildViewer(
       mesh.matrixAutoUpdate = true;
       mesh.matrixWorldNeedsUpdate = true;
     }
-    if (isNew) flashSticker(st.slot);
+    if (isNew && !quietDecalSlots.delete(st.slot)) flashSticker(st.slot);
     if (STICKER_LOG) {
       const end = performance.now();
       stickerCost.rebuilds++;
@@ -8986,6 +9023,127 @@ async function buildViewer(
     (charm.line.material as import("three").Material).dispose();
     charm = null;
     charmLastT = 0;
+    charmFadeAt = 0;
+    charmFadeList = [];
+  }
+
+  // The charm fades on as it lands, on the stickers' 380ms and clamp.
+  //
+  // ONLY ON MATERIALS THIS CHARM OWNS. A charm's untuned parts (the clasp, the
+  // chain, a whole untuned charm) wear the gltf cache's own materials, shared
+  // with every other viewer and every bake on the page, so fading those in place
+  // left them see-through or invisible for all of them whenever a fade was cut
+  // short (a charm swapped or a viewer closed mid-fade). Each shared one is
+  // swapped for a private copy first; tuned ones are already this mesh's own
+  // (tuneCharmShading clones them). The copies stay on afterwards and go with
+  // the charm in removeCharm.
+  //
+  // Fading needs `transparent`, and turning it on or off swaps the shader. The
+  // swap back at the end must not compile, so the first frame draws the charm
+  // as it really is, opaque, with colour and depth writes off — invisible, but
+  // its real program now exists. The next frame turns transparent on (that
+  // program compiles there, at opacity 0), and the clock starts the frame after,
+  // so no part of the fade is spent inside a slow frame. renderer.compile() was
+  // tried and missed: its key differs from the draw's, so the end still linked.
+  // Depth writes stay off until the end, or the see-through charm would hide
+  // the stickers behind it.
+  //
+  // charmFadeAt: 0 idle, -1 drawing opaque, -2 going transparent, -3 start
+  // the clock, else the last frame's time (charmFadeE holds the progress).
+  let charmFadeAt = 0;
+  let charmFadeE = 0;
+  type FadeEntry = { m: import("three").Material; op: number; tr: boolean; at: number; cw: boolean; dw: boolean };
+  let charmFadeList: FadeEntry[] = [];
+  /** A private copy of a shared material that compiles to the same program. */
+  function charmOwnCopy(m: import("three").Material) {
+    // Material.copy round-trips userData through JSON, which flattens anything
+    // a patch keeps there. Shared by reference instead, as the original has it.
+    const ud = m.userData;
+    let c: import("three").Material;
+    m.userData = {};
+    try {
+      c = m.clone();
+    } finally {
+      m.userData = ud;
+    }
+    c.userData = ud;
+    c.name = m.name;
+    // clone() drops onBeforeCompile, and the key has to stay the original's or
+    // three would build the copy a program of its own.
+    const patch = m.onBeforeCompile;
+    c.onBeforeCompile = (shader, renderer) => patch.call(c, shader, renderer);
+    c.customProgramCacheKey = () => m.customProgramCacheKey();
+    return c;
+  }
+  function beginCharmFade() {
+    if (!charm || opts?.still || reducedMotion.value) return;
+    const copies = new Map<import("three").Material, import("three").Material>();
+    const own = (mesh: import("three").Object3D, m: import("three").Material) => {
+      if (mesh === charm!.line || mesh.userData.charmTuned === m) return m;
+      let c = copies.get(m);
+      if (!c) copies.set(m, (c = charmOwnCopy(m)));
+      return c;
+    };
+    const seen = new Set<import("three").Material>();
+    charmFadeList = [];
+    const visit = (o: import("three").Object3D) => {
+      const mesh = o as import("three").Mesh;
+      if (!mesh.material) return;
+      mesh.material = Array.isArray(mesh.material) ? mesh.material.map((m) => own(mesh, m)) : own(mesh, mesh.material);
+      for (const m of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
+        if (seen.has(m)) continue;
+        seen.add(m);
+        charmFadeList.push({ m, op: m.opacity, tr: m.transparent, at: m.alphaTest, cw: m.colorWrite, dw: m.depthWrite });
+        m.colorWrite = false;
+        m.depthWrite = false;
+      }
+    };
+    charm.sprite.traverse(visit);
+    visit(charm.line);
+    charmFadeAt = -1;
+  }
+  function stepCharmFade(now: number) {
+    if (!charmFadeAt) return;
+    if (charmFadeAt === -1) {
+      charmFadeAt = -2;
+      return;
+    }
+    if (charmFadeAt === -2) {
+      for (const f of charmFadeList) {
+        f.m.colorWrite = f.cw;
+        f.m.transparent = true;
+        f.m.opacity = 0;
+        if (f.at > 0) f.m.alphaTest = 1e-3;
+        f.m.needsUpdate = true;
+      }
+      charmFadeAt = -3;
+      return;
+    }
+    if (charmFadeAt === -3) {
+      charmFadeAt = now;
+      charmFadeE = 0;
+    } else charmFadeE += Math.min(now - charmFadeAt, FADE_STEP_MAX);
+    charmFadeAt = now;
+    const t = Math.min(1, charmFadeE / DECAL_FADE_MS);
+    const k = 1 - (1 - t) ** 3;
+    for (const f of charmFadeList) {
+      if (t < 1) {
+        f.m.opacity = f.op * k;
+        if (f.at > 0) f.m.alphaTest = Math.max(1e-3, f.at * k);
+        continue;
+      }
+      f.m.opacity = f.op;
+      f.m.alphaTest = f.at;
+      f.m.depthWrite = f.dw;
+      if (f.m.transparent !== f.tr) {
+        f.m.transparent = f.tr;
+        f.m.needsUpdate = true;
+      }
+    }
+    if (t >= 1) {
+      charmFadeAt = 0;
+      charmFadeList = [];
+    }
   }
 
   // Cast upward from below the body to find the ACTUAL underside surface at
@@ -10402,6 +10560,7 @@ async function buildViewer(
     line.visible = false;
     scene.add(line);
     charm = { sprite, line, pivot, pos, prev: pos.clone(), key, side: 1, cy: c.y ?? 0, cz: c.z ?? 0, w: cw, h: ch, d: cd, off: cOff, sim, shading: found?.shading ?? null, masks: found?.masks ?? null };
+    beginCharmFade();
     // Face the flank it is actually clipped to, before the first frame draws.
     orientCharmToFlank(charm);
     if (sim) {
@@ -12773,6 +12932,7 @@ async function buildViewer(
   // glove they are not "wrong-looking", they are a raycast into geometry that
   // has no such space. A silent no-op is the only sane answer.
   if (pres.attachments) {
+    for (const st of opts?.stickers ?? []) quietDecalSlots.add(st.slot);
     setStickers(opts?.stickers ?? []);
     mt.mark("stickers");
     // NOT awaited — the charm's GLB, its cloth sidecar and its tint masks are
@@ -15305,6 +15465,8 @@ async function buildViewer(
     updateRing();
     const tCharm = perfHud ? performance.now() : 0;
     stepDecalGlow(performance.now());
+    stepDecalFade(performance.now());
+    stepCharmFade(performance.now());
     stepStickerHolo();
     // Split the first frame's cost in two: `wait` is everything from the last
     // build stage to the draw call (the rAF wait, controls, the charm's first

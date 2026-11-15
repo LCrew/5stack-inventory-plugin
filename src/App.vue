@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, provide, ref, shallowRef, type ComputedRef, watch } from "vue";
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, provide, reactive, ref, shallowRef, type ComputedRef, watch } from "vue";
 import { cn } from "@5stack/ui";
 import { useI18n } from "./composables/useI18n";
 import {
@@ -13,6 +13,7 @@ import {
   fetchSkins,
   type AttachSort,
   fetchCatalogItems,
+  fetchCharmHighlights,
   fetchLoadout,
   fetchInventory,
   craftItem,
@@ -48,6 +49,8 @@ import {
   unequip,
   fetchPresets,
   fetchPlayerPresets,
+  fetchLoadoutSettings,
+  saveLoadoutSettings,
   createPreset,
   renamePreset,
   deletePreset,
@@ -74,7 +77,8 @@ import {
   renderUrlFor,
   type GameConfigState,
 } from "./api";
-import { usePluginRouter, type HostRouting } from "./pluginRouter";
+import { usePluginRouter, type HostCrumb, type HostRouting } from "./pluginRouter";
+import { adminTabLabel } from "./adminTabs";
 import {
   parsePath,
   buildPath,
@@ -125,6 +129,9 @@ import PriceTag from "./components/PriceTag.vue";
 const ItemSpecs = defineAsyncComponent(() => import("./components/ItemSpecs.vue"));
 const PetControls = defineAsyncComponent(() => import("./components/PetControls.vue"));
 const AgentControls = defineAsyncComponent(() => import("./components/AgentControls.vue"));
+// Editor-only, and only on a souvenir finish or a highlight charm.
+const SouvenirPanel = defineAsyncComponent(() => import("./components/SouvenirPanel.vue"));
+const HighlightPicker = defineAsyncComponent(() => import("./components/HighlightPicker.vue"));
 import TraitBars, { type TraitRow } from "./components/TraitBars.vue";
 import { DEFAULT_PET_CLIP, loadPetClipIndex, petWanderPool } from "./petAnim";
 import ItemBadges from "./components/ItemBadges.vue";
@@ -185,7 +192,7 @@ import { gloveLegacySeedMoves, loadGlovePaintDef } from "./gloveComposite";
 import { glovePlacementAt, glovePlacementTable, glovePlacementTraits } from "./glovePattern";
 import { isCompact, isCoarse, reducedMotion } from "./responsive";
 import { slotsText } from "./craftPlanText";
-import { revealInScroller, scrollFade, scrollPanelToTop } from "./dom";
+import { scrollFade, scrollPanelToTop } from "./dom";
 import { hasModel, hasModelSync } from "./modelAvailability";
 import { INCOMPLETE } from "./viewerSentinel";
 import { snapshotModel, viewersIdle, viewerStats } from "./viewer3dLazy";
@@ -233,6 +240,10 @@ const router = usePluginRouter(props);
 const weapons = ref<CatalogWeapon[]>([]);
 const specialDefaults = ref<DefaultsMap | null>(null);
 const loadout = ref<LoadoutEntry[]>([]);
+/** Small desktops: the picker is out (a slot was clicked). */
+const dockOpen = ref(false);
+/** Spotlight: the picker card under the pointer, previewed on the left. */
+const dockHover = ref<{ src: string; name: string; rarity?: string | null; equipped?: boolean } | null>(null);
 const inventory = ref<InventoryItem[]>([]);
 const loading = ref(true);
 const error = ref(""); // fatal (initial load) error — shows a retry screen
@@ -456,7 +467,7 @@ function rowFor(pos: string, t: Team = team.value): LoadoutEntry | undefined {
 }
 const weaponByModel = computed(() => new Map(weapons.value.map((w) => [w.model, w])));
 // Every grid position's gun per team, defaults included. The same resolver
-// /api/equipped/v5 sends the game server, so a default you displaced by
+// /api/equipped/v5 uses for a player with the grid on in game, so a default you displaced by
 // placing its gun elsewhere moves over instead of showing twice.
 const gridModels = computed(() => {
   const forTeam = (t: Team) => {
@@ -642,6 +653,8 @@ function cellFacts(pos: string, displayPos: string = pos) {
     dim: weaponSlot ? !isSkinned(rowFor(displayPos)) : !row,
     baking: !!inst && renderingIds.value.has(inst.id),
     queued: !!inst && queuedIds.value.has(inst.id),
+    swap: docked.value,
+    wave: dockWave.value,
   };
 }
 
@@ -1330,7 +1343,9 @@ const replaceOptions = computed(() => {
 const { tr, notify, fail } = useI18n(props);
 
 async function refreshAll() {
-  [loadout.value, inventory.value] = await Promise.all([fetchLoadout(), fetchInventory()]);
+  // See reconcileRefresh.
+  const [l, inv] = await Promise.all([fetchLoadout(), fetchInventory()]);
+  reconcileRefresh(l, inv);
   // After, not with: a craft or an equip should land on screen immediately and
   // have its price catch up.
   void loadPrices();
@@ -1353,6 +1368,48 @@ async function refreshAll() {
 // makes them interesting.
 const presets = ref<LoadoutPreset[]>([]);
 const presetBusy = ref(false);
+
+const IN_GAME_MODES = ["default", "grid"] as const;
+const gridInGame = ref(false);
+// Frontend and backend ship as separate images: on a backend without the route
+// the read fails and the switch stays hidden, rather than offering a save that 404s.
+const gridInGameReady = ref(false);
+const gridInGameBusy = ref(false);
+const inGameLabel = (mode: string) =>
+  mode === "grid" ? tr("inventory.in_game.grid", "This grid") : tr("inventory.in_game.default", "Default");
+const inGameTip = (mode: string) =>
+  mode === "grid"
+    ? tr("inventory.in_game.grid_tip", "This grid: you spawn with the 15 guns on this page.")
+    : tr("inventory.in_game.default_tip", "Default: you keep the guns from your CS2 loadout. Skins show on the ones you carry.");
+
+async function loadLoadoutSettings() {
+  if (!canEdit.value) {
+    gridInGameReady.value = false;
+    return;
+  }
+  try {
+    gridInGame.value = (await fetchLoadoutSettings()).grid_in_game === true;
+    gridInGameReady.value = true;
+  } catch {
+    gridInGameReady.value = false;
+  }
+}
+
+async function setGridInGame(on: boolean) {
+  if (gridInGameBusy.value || gridInGame.value === on) {
+    return;
+  }
+  gridInGameBusy.value = true;
+  gridInGame.value = on;
+  try {
+    await saveLoadoutSettings({ grid_in_game: on });
+  } catch (e) {
+    gridInGame.value = !on;
+    fail(e);
+  } finally {
+    gridInGameBusy.value = false;
+  }
+}
 /** Cursor anchor for the preset menu — same contract as the slot/item menus. */
 const presetCtx = ref<{ x: number; y: number } | null>(null);
 /**
@@ -1722,6 +1779,112 @@ function slotOnTeam(inst: InventoryItem, pos: string, t: Team): string {
   return pos;
 }
 
+// Equip lands on screen the moment it's asked for; the save and
+// the refresh that confirms it run behind. A failed save puts the old loadout
+// back. Only the newest equip refreshes, so a slow confirmation of an earlier
+// click can't flash the slot back to what it was.
+let equipSeq = 0;
+async function equipNow(inst: InventoryItem, pos: string, todo: { team: Team; slot: string }[]): Promise<boolean> {
+  const seq = ++equipSeq;
+  const prevLoadout = loadout.value;
+  const prevInventory = inventory.value;
+  const hit = (e: { team: Team; slot: string }) => todo.some((s) => s.team === e.team && s.slot === e.slot);
+  loadout.value = [
+    ...prevLoadout.filter((e) => !hit(e)),
+    ...todo.map((s) => ({
+      team: s.team,
+      slot: s.slot,
+      item_instance_id: inst.id,
+      skinned: true,
+      item_id: inst.item_id,
+      wear: inst.wear,
+      seed: inst.seed,
+      stattrak: inst.stattrak,
+      stattrak_count: inst.stattrak_count,
+      souvenir: inst.souvenir,
+      nametag: inst.nametag,
+      style: inst.style ?? null,
+      upgrade_level: inst.upgrade_level ?? null,
+      item: inst.item,
+    })),
+  ];
+  // In place, on the two items involved: replacing the inventory array re-ran
+  // every sort and filter in the app (~150ms) for what is a two-item change.
+  const touched: { item: InventoryItem; was: InventoryItem["equipped"] }[] = [];
+  for (const i of prevInventory) {
+    const eq = i.equipped ?? [];
+    const mine = String(i.id) === String(inst.id);
+    const kept = eq.filter((e) => !hit(e));
+    if (!mine && kept.length === eq.length) continue;
+    touched.push({ item: i, was: eq });
+    i.equipped = mine ? [...kept, ...todo] : kept;
+  }
+  // The slot's price, too: the skin plus what is applied to it, as the server
+  // totals it. Left alone it showed the OLD skin's price until prices reloaded.
+  const prevSlotValues = slotValues.value;
+  const worth =
+    (inst.price?.value ?? 0) +
+    inventory.value
+      .filter((i) => i.attached_to != null && String(i.attached_to) === String(inst.id))
+      .reduce((sum, i) => sum + (i.price?.value ?? 0), 0);
+  slotValues.value = { ...prevSlotValues, ...Object.fromEntries(todo.map((s) => [`${s.team}:${s.slot}`, worth])) };
+  pulseSlot(pos);
+  if (sheetMode.value === "replace") sheetMode.value = "owned";
+  try {
+    await Promise.all(todo.map((s) => equip({ team: s.team, slot: s.slot, item_instance_id: inst.id })));
+  } catch (e) {
+    if (seq === equipSeq) {
+      loadout.value = prevLoadout;
+      slotValues.value = prevSlotValues;
+      for (const t of touched) t.item.equipped = t.was;
+    }
+    fail(e);
+    return false;
+  }
+  // One confirming refresh per burst of equips, after the settle has played.
+  clearTimeout(equipRefreshTimer);
+  equipRefreshTimer = setTimeout(() => {
+    if (seq === equipSeq) refreshAll().catch(fail);
+  }, 700);
+  return true;
+}
+let equipRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+// Merge a fresh loadout + inventory into what is on screen: anything unchanged
+// keeps its object, and an unchanged list is not reassigned at all — a refresh
+// that confirms what the screen already shows costs nothing. Prices ride over
+// until loadPrices brings new ones (a fresh inventory arrives unpriced, and the
+// value sort sank and refloated every card in between).
+function dockStable(v: unknown): string {
+  return JSON.stringify(v, (k, val) =>
+    k === "price"
+      ? undefined
+      : k === "equipped" && Array.isArray(val)
+        ? val.map((e: { team: string; slot: string }) => `${e.team}:${e.slot}`).sort()
+        : val,
+  );
+}
+function reconcileRefresh(freshLoadout: LoadoutEntry[], freshInv: InventoryItem[]) {
+  const rowKey = (e: LoadoutEntry) => `${e.team}:${e.slot}`;
+  const cur = new Map(loadout.value.map((e) => [rowKey(e), e]));
+  const rows = freshLoadout.map((e) => {
+    const c = cur.get(rowKey(e));
+    return c && dockStable(c) === dockStable(e) ? c : e;
+  });
+  if (rows.length !== loadout.value.length || rows.some((r) => cur.get(rowKey(r)) !== r)) loadout.value = rows;
+  const prev = new Map(inventory.value.map((i) => [String(i.id), i]));
+  let changed = freshInv.length !== inventory.value.length;
+  const items = freshInv.map((i, idx) => {
+    const p = prev.get(String(i.id));
+    if (p && dockStable(p) === dockStable(i)) {
+      if (inventory.value[idx] !== p) changed = true;
+      return p;
+    }
+    changed = true;
+    if (i.price == null && p?.price != null) i.price = p.price;
+    return i;
+  });
+  if (changed) inventory.value = items;
+}
 /**
  * Equip `inst` at `pos` on `teams` — this side unless told otherwise, and
  * always both for a shared slot. Resolves whether it is now there.
@@ -1738,12 +1901,7 @@ async function equipInstanceAt(inst: InventoryItem, pos: string, teams?: Team[])
     // item that is already on CT writes only T.
     const todo = sides.filter((s) => String(rowFor(s.slot, s.team)?.item_instance_id) !== String(inst.id));
     if (!todo.length) return true;
-    await Promise.all(todo.map((s) => equip({ team: s.team, slot: s.slot, item_instance_id: inst.id })));
-    await refreshAll();
-    pulseSlot(pos);
-    // Replacing lands you on the new gun's Owned skins, ready to re-skin it.
-    if (sheetMode.value === "replace") sheetMode.value = "owned";
-    return true;
+    return await equipNow(inst, pos, todo);
   } catch (e) {
     fail(e);
     return false;
@@ -1951,13 +2109,20 @@ const craft = ref<{
   /** Kills on the StatTrak module, for display only: the owned row's on an
    *  edit, 0 for a new craft. Only the game server writes the count. */
   stattrakCount: number;
+  /** Souvenir finish (cs2-lib 9.10). Never on beside `stattrak` — the toggles
+   *  turn each other off. While on, SouvenirPanel owns the stickers. */
+  souvenir: boolean;
+  /** A highlight charm crafted ON ITS OWN: which highlight it carries. A charm
+   *  on a gun carries its own as `charm.highlight`. */
+  highlight: number | null;
   nametag: string;
   stickers: (Attach | null)[];
   patches: (Attach | null)[];
   /** `seed` is the charm's own PATTERN, the same idea as the weapon's and a
    *  tradeable attribute in its own right. Purely an attribute: CS2 varies no
-   *  charm geometry or art by it, so the 3D viewer never sees it. */
-  charm: (Attach & { z?: number | null; seed?: number | null; inst?: string | null }) | null;
+   *  charm geometry or art by it, so the 3D viewer never sees it. A highlight
+   *  charm has no pattern; `highlight` is what it carries instead. */
+  charm: (Attach & { z?: number | null; seed?: number | null; inst?: string | null; highlight?: number | null }) | null;
   /** PETS only: material group, null = the stock look. */
   style: number | null;
   /** PETS only: life stage (upgrade level), null = the pet's own default. */
@@ -2185,6 +2350,100 @@ const craftHasStatTrak = computed(() =>
   (craftType.value
     ? ["weapon", "melee", "musickit"].includes(craftType.value)
     : craftSlotSays(["agent", "graffiti", "collectible", "pet"])),
+);
+/**
+ * Souvenir (cs2-lib 9.10). Asks the item and ONLY the item, `=== true`: every
+ * painted gun can be one and nothing else can, so there is no type-level answer
+ * to fall back on — a listing that does not say so is not a souvenir finish.
+ */
+const craftHasSouvenir = computed(
+  () => craftType.value === "weapon" && (craft.value?.skin ?? craftInst.value?.item)?.hasSouvenir === true,
+);
+/**
+ * Souvenir and StatTrak are one quality slot in game (12 or 9, never both), so
+ * each switch turns the other off. Turning Souvenir OFF takes its stickers with
+ * it: they were the event's, picked in SouvenirPanel, never stickers the player
+ * applied — leaving them would quietly mint them as owned stickers on save.
+ */
+function setCraftSouvenir(on: boolean) {
+  const c = craft.value;
+  if (!c) return;
+  c.souvenir = on;
+  if (on) c.stattrak = false;
+  else {
+    c.stickers = emptySlots(MAX_STICKERS);
+    if (c.charm?.highlight != null && souvenirCharm.value) c.charm = null;
+  }
+  souvenirCharm.value = false;
+}
+function setCraftStatTrak(on: boolean) {
+  const c = craft.value;
+  if (!c) return;
+  if (on && c.souvenir) setCraftSouvenir(false);
+  c.stattrak = on;
+}
+/** Whether the charm on the gun was hung by a souvenir HIGHLIGHT package, so
+ *  leaving that package (or Souvenir) takes it back off — and only then. */
+const souvenirCharm = ref(false);
+/**
+ * SouvenirPanel's stickers, into the slots in the game's order. A sticker that
+ * stays in its slot keeps its scratch and placement; everything else starts
+ * fresh, and none carries an `inst` — a souvenir's stickers are never minted.
+ */
+function applySouvenirStickers(list: { id: number; name: string; image: string | null }[]) {
+  const c = craft.value;
+  if (!c) return;
+  c.stickers = Array.from({ length: MAX_STICKERS }, (_, i) => {
+    const want = list[i];
+    if (!want) return null;
+    const had = c.stickers[i];
+    return had && had.id === want.id
+      ? { ...had, inst: null }
+      : { id: want.id, name: want.name, image: want.image, inst: null };
+  });
+}
+/** A highlight package's charm: hung (placement kept when it is the same
+ *  charm), or taken off when the package or highlight no longer gives one. */
+async function applySouvenirCharm(next: { id: number; highlight: number } | null) {
+  const c = craft.value;
+  if (!c) return;
+  if (!next) {
+    if (souvenirCharm.value) c.charm = null;
+    souvenirCharm.value = false;
+    return;
+  }
+  if (c.charm?.id === next.id) {
+    c.charm.highlight = next.highlight;
+    souvenirCharm.value = true;
+    return;
+  }
+  const [item] = await fetchCatalogItems([next.id]).catch(() => []);
+  if (!item || craft.value !== c) return;
+  c.charm = { id: item.id, name: item.name, image: item.image, highlight: next.highlight, inst: null };
+  souvenirCharm.value = true;
+}
+/**
+ * Which charms are highlight reels, by id, once asked. Three charms in the
+ * whole catalog are, and the editor needs to know before it draws a charm's
+ * controls — a reel charm has a highlight to pick and NO pattern (cs2-lib 9.10
+ * turned hasSeed off for them), and the catalog listings the picker reads do
+ * not carry either fact.
+ */
+const reelCharms = reactive(new Map<number, boolean>());
+watch(
+  // `craft` only, NOT craftType: this runs at setup (immediate), and craftType
+  // reads craftInst, declared further down — a TDZ throw Vue swallows, which
+  // would leave this watcher dead (see the setup-TDZ note on focusSubject).
+  () => [craft.value?.charm?.id, craft.value?.skin.type === "keychain" ? craft.value.skin.id : undefined] as const,
+  (ids) => {
+    for (const id of ids) {
+      if (id == null || reelCharms.has(id)) continue;
+      void fetchCharmHighlights(id).then((list) => {
+        if (list) reelCharms.set(id, list.length > 0);
+      });
+    }
+  },
+  { immediate: true },
 );
 /**
  * A GLOVE's pattern range. Gloves get their own plain control rather than a
@@ -2428,7 +2687,7 @@ function openCraft(skin: Skin) {
   const skinIsWeapon = !skin.type || skin.type === "weapon" || skin.type === "melee";
   craftModel.value =
     skin.model ?? (skinIsWeapon && isWeaponPos(selected.value) ? occupantModel(selected.value) : null);
-  craft.value = { skin, wear: DEFAULT_WEAR, seed: 1, stattrak: false, stattrakCount: 0, nametag: "", stickers: emptySlots(MAX_STICKERS), patches: emptySlots(MAX_PATCHES), charm: null, style: null, stage: null };
+  craft.value = { skin, wear: DEFAULT_WEAR, seed: 1, stattrak: false, stattrakCount: 0, souvenir: false, highlight: null, nametag: "", stickers: emptySlots(MAX_STICKERS), patches: emptySlots(MAX_PATCHES), charm: null, style: null, stage: null };
   craftBaseline = ""; // new craft — no stored render to reuse
   // A brand-new craft gets a URL too: /craft/<skinId>, with the draft itself in
   // the query. Without it the one state worth sharing before you commit to it
@@ -2467,6 +2726,8 @@ async function restoreDraftRoute(skinId: number) {
         seed: d.seed,
         stattrak: d.stattrak,
         stattrakCount: 0,
+        souvenir: !!d.souvenir && skin.hasSouvenir === true,
+        highlight: d.highlight ?? null,
         nametag: d.nametag,
         stickers: d.stickers
           .slice(0, MAX_STICKERS)
@@ -2477,7 +2738,8 @@ async function restoreDraftRoute(skinId: number) {
           y: d.charm?.y ?? null,
           z: d.charm?.z ?? null,
           seed: d.charm?.seed ?? null,
-        }) as (Attach & { z?: number | null; seed?: number | null }) | null,
+          highlight: d.charm?.highlight ?? null,
+        }) as (Attach & { z?: number | null; seed?: number | null; highlight?: number | null }) | null,
         style: d.style,
         stage: d.stage,
       };
@@ -2532,6 +2794,7 @@ function openEdit(inst: InventoryItem, warm: "edit" | "open" = "edit") {
       // 0..1 slider on Edit — a Doppler, which exists only to 0.08, dragged to
       // 0.9 and then failed to save.
       hasWear: inst.item.hasWear, hasSeed: inst.item.hasSeed, hasStatTrak: inst.item.hasStatTrak, seedMin: inst.item.seedMin, seedMax: inst.item.seedMax,
+      hasSouvenir: inst.item.hasSouvenir,
       wearMin: inst.item.wearMin, wearMax: inst.item.wearMax,
       // Music kits: what the editor's player plays.
       audio: inst.item.audio ?? null, mvpAudio: inst.item.mvpAudio ?? null,
@@ -2540,15 +2803,24 @@ function openEdit(inst: InventoryItem, warm: "edit" | "open" = "edit") {
     seed: inst.seed ?? 1,
     stattrak: inst.stattrak,
     stattrakCount: inst.stattrak_count ?? 0,
+    souvenir: inst.souvenir === true,
+    highlight: inst.highlight ?? null,
     nametag: inst.nametag ?? "",
     stickers,
     patches,
     charm: inst.charm
-      ? { id: inst.charm.id, name: inst.charm.name, image: inst.charm.image, x: inst.charm.x ?? null, y: inst.charm.y ?? null, z: inst.charm.z ?? null, seed: inst.charm.seed ?? null, inst: inst.charm.inst ?? null }
+      ? {
+          id: inst.charm.id, name: inst.charm.name, image: inst.charm.image,
+          x: inst.charm.x ?? null, y: inst.charm.y ?? null, z: inst.charm.z ?? null, seed: inst.charm.seed ?? null,
+          inst: inst.charm.inst ?? null, highlight: inst.charm.highlight ?? null,
+        }
       : null,
     style: inst.style ?? null,
     stage: inst.upgrade_level ?? null,
   };
+  // A souvenir's highlight charm came from its HIGHLIGHT package, and goes with
+  // it if the package changes in SouvenirPanel.
+  souvenirCharm.value = inst.souvenir === true && inst.charm?.highlight != null;
   // Until something changes, show the render we already have for this item.
   craftBaseline = craftStateJson();
   craftPreview.value = renderSrc(inst);
@@ -2728,7 +3000,7 @@ function randomSeed() {
 function resetCraft() {
   if (craft.value)
     Object.assign(craft.value, {
-      wear: DEFAULT_WEAR, seed: 1, stattrak: false, stattrakCount: 0, nametag: "",
+      wear: DEFAULT_WEAR, seed: 1, stattrak: false, stattrakCount: 0, souvenir: false, highlight: null, nametag: "",
       stickers: emptySlots(MAX_STICKERS), patches: emptySlots(MAX_PATCHES), charm: null,
       style: null, stage: null,
     });
@@ -2752,7 +3024,10 @@ function craftBody() {
     // at all, so what is sent is exactly what was editable.
     wear: craftHasWear.value || craftHasScratch.value ? c.wear : null,
     seed: craftHasSeed.value ? c.seed : null,
-    stattrak: craftHasStatTrak.value ? c.stattrak : false,
+    stattrak: craftHasStatTrak.value && !c.souvenir ? c.stattrak : false,
+    souvenir: craftHasSouvenir.value ? c.souvenir : false,
+    // A loose highlight charm's own; undefined (left alone) on everything else.
+    highlight: craftType.value === "keychain" && c.highlight != null ? c.highlight : undefined,
     nametag: craftHasNameTag.value ? c.nametag.trim() || null : null,
     // Left OFF the body (undefined) for anything but a pet, rather than sent as
     // null: on these two a null is a value — "back to the default" — and the
@@ -2762,7 +3037,12 @@ function craftBody() {
     stickers: c.stickers.map(toSpec),
     patches: c.patches.map(toSpec),
     charm_id: c.charm?.id ?? null,
-    charm_offset: c.charm ? { x: c.charm.x ?? null, y: c.charm.y ?? null, z: c.charm.z ?? null, seed: c.charm.seed ?? null, inst: c.charm.inst ?? null } : null,
+    charm_offset: c.charm
+      ? {
+          x: c.charm.x ?? null, y: c.charm.y ?? null, z: c.charm.z ?? null, seed: c.charm.seed ?? null,
+          inst: c.charm.inst ?? null, highlight: c.charm.highlight ?? null,
+        }
+      : null,
   };
 }
 /** The kill count the module shows. Read-only: kills are the game server's to
@@ -2889,6 +3169,7 @@ async function saveCraft(andEquip = false) {
               seed: updated.seed,
               stattrak: updated.stattrak,
               stattrak_count: updated.stattrak_count,
+              souvenir: updated.souvenir,
               nametag: updated.nametag,
               style: updated.style,
               upgrade_level: updated.upgrade_level,
@@ -3591,10 +3872,12 @@ function draftFromCraft(): Draft | null {
     wear: c.wear,
     seed: c.seed,
     stattrak: c.stattrak,
+    souvenir: c.souvenir,
+    highlight: c.highlight,
     nametag: c.nametag,
     stickers: c.stickers.map((s) => (s ? { id: s.id, x: s.x, y: s.y, r: s.r, w: s.w } : null)),
     patches: c.patches.map((p) => p?.id ?? null),
-    charm: c.charm ? { id: c.charm.id, x: c.charm.x, y: c.charm.y, z: c.charm.z, seed: c.charm.seed } : null,
+    charm: c.charm ? { id: c.charm.id, x: c.charm.x, y: c.charm.y, z: c.charm.z, seed: c.charm.seed, highlight: c.charm.highlight } : null,
     style: c.style,
     stage: c.stage,
   };
@@ -4442,7 +4725,7 @@ let craftPreviewToken = 0;
 let craftBaseline = "";
 const craftStateJson = () =>
   craft.value
-    ? JSON.stringify([craft.value.skin.id, craft.value.wear, craft.value.seed, craft.value.stickers, craft.value.charm, craft.value.stattrak, craft.value.style, craft.value.stage])
+    ? JSON.stringify([craft.value.skin.id, craft.value.wear, craft.value.seed, craft.value.stickers, craft.value.charm, craft.value.stattrak, craft.value.style, craft.value.stage, craft.value.souvenir, craft.value.highlight])
     : "";
 /**
  * The still's image didn't load — a stored card bake that was never made (or a
@@ -5012,7 +5295,9 @@ function pickAttachment(item: PickerRow) {
   } else if (kind === "patch") {
     craft.value.patches[picker.value.slot] = a;
   } else {
-    craft.value.charm = item.inst ? { ...a, seed: item.seed ?? null } : a;
+    // A different charm is a different reel: an owned one brings its own, a
+    // catalog pick starts with none and HighlightPicker picks the first.
+    craft.value.charm = item.inst ? { ...a, seed: item.seed ?? null, highlight: item.highlight ?? null } : { ...a, highlight: null };
   }
   picker.value = null;
   // Anything you just stuck on the gun is something you'll want to place, so
@@ -5148,11 +5433,17 @@ function onCacheCleared(scope: "renders" | "composites") {
 // which existed only because the markup was pasted rather than shared.
 
 /** The header's three screens. `to` is what the tab navigates to. */
+// The Inventory tab's count is drawn while loading from the last
+// one seen, so the header doesn't shift sideways when the real one arrives.
+const lastInvCount = usePersistedNumber("cs2inv.lastInvCount", 0);
+watch([() => inventory.value.length, loading], ([n, busy]) => {
+  if (!busy) lastInvCount.value = n;
+});
 const viewTabs = computed(() => [
   { key: "grid", label: "Loadout", icon: LayoutGrid, to: "/" },
   ...(canEdit.value
     ? [
-        { key: "inventory", label: "Inventory", icon: Package, to: "/items", count: inventory.value.length || undefined },
+        { key: "inventory", label: "Inventory", icon: Package, to: "/items", count: inventory.value.length || (loading.value && lastInvCount.value) || undefined },
         { key: "armory", label: "Craft", icon: Hammer, to: "/craft" },
         { key: "stickers", label: "Sticker Crafts", icon: StickerIcon, to: "/sticker-crafts" },
       ]
@@ -5483,35 +5774,16 @@ function resetSheetFilters() {
   sheetDir.value = sheetSortCtl.loadDir(DEFAULT_SORT);
 }
 
-// ---- desktop: the lifting picker sheet --------------------------------------
-// The picker used to be a fixed 34vh strip below the loadout. Browsing skins in
-// it is cramped, and the only lever for more room — shrinking the loadout —
-// reflows three column scrollers and squeezes every slot card down to its
-// min-height.
-//
-// So on desktop the sheet comes OUT OF FLOW and floats over the loadout. The
-// loadout half reserves the collapsed height as padding and then never moves
-// again: lifting changes nothing but the sheet's own height, which also means
-// the 3D canvas up there never gets resized by a lift. The cost is occlusion —
-// the slot you're editing can end up underneath — and `revealSelectedSlot`
-// below is what pays it off.
-//
-// Explicitly toggled, never automatic. An earlier build raised it on pointer-in
-// and lowered it on pointer-out, which read as the panel deciding things on its
-// own — a half-second of hesitation over the wrong pixel resized the screen.
-//
-// Compact keeps its drag-to-snap sheet; none of this applies there.
-const SHEET_COLLAPSED_MIN = 210; // was min-h-[210px]
-const SHEET_COLLAPSED_VH = 34; // was h-[34vh]
-const SHEET_LIFT_PCT = 60; // of the loadout column, NOT of the viewport
-const SHEET_LIFT_MS = 240; // height transition; the reveal below waits it out
+// ---- desktop: the picker sheet ----------------------------------------------
+// On desktop the picker docks beside the loadout (see `docked` below). The
+// collapsed strip height survives only in the visitor's loading skeleton, which
+// still draws the old below-the-loadout layout.
+const SHEET_COLLAPSED_MIN = 210;
+const SHEET_COLLAPSED_VH = 34;
 const SHEET_COLLAPSED_CSS = `max(${SHEET_COLLAPSED_MIN}px, ${SHEET_COLLAPSED_VH}vh)`;
 
-const sheetLift = usePersistedBool("cs2inv.sheetLift", false);
-
-// The sheet only floats on desktop, and only when it's on screen at all — the
-// 3D viewer route replaces it entirely (`v-if="!viewerId"`), and reserving
-// space for a sheet that isn't rendered would leave a dead strip.
+// The picker is on desktop only when it's on screen at all — a visitor's view
+// (`?player=`) has none, and reserving room for it would leave a dead strip.
 const canLift = computed(() => !isCompact.value && !viewerId.value);
 
 // Tap-to-equip is a desktop affordance: it leans on hover to preview what the
@@ -5521,20 +5793,9 @@ const canLift = computed(() => !isCompact.value && !viewerId.value);
 // exactly where the phone layout gets tested, and there a stray tap silently
 // re-equipped the slot with no menu and no undo.
 const tapOpensMenu = computed(() => isCoarse.value || isCompact.value);
-const lifted = computed(() => canLift.value && sheetLift.value);
 
 const loadoutEl = ref<HTMLElement | null>(null);
 const loadoutH = ref(0);
-const viewportH = ref(typeof window === "undefined" ? 0 : window.innerHeight);
-// Collapsed height stays viewport-derived (that's what 34vh meant) while the
-// lifted one is a fraction of the loadout column, so CSS can resolve both on
-// its own. Only their DIFFERENCE has to be a real number here, because that's
-// how far the sheet reaches over the loadout — the band the slot columns have
-// to be able to scroll out from under.
-const collapsedPx = computed(() => Math.max(SHEET_COLLAPSED_MIN, (SHEET_COLLAPSED_VH / 100) * viewportH.value));
-const liftIntrusion = computed(() =>
-  lifted.value ? Math.max(0, Math.round((loadoutH.value * SHEET_LIFT_PCT) / 100 - collapsedPx.value)) : 0,
-);
 
 // Reserved on the loadout side so the collapsed layout is exactly what it was
 // when the sheet still took its space in flow.
@@ -5543,42 +5804,569 @@ const liftIntrusion = computed(() =>
 // loadout's last row would sit permanently under the collapsed sheet. A
 // constant, deliberately — anything snap-dependent would relayout the loadout
 // mid-animation and reintroduce exactly the jank the transform is avoiding.
+const DOCK_ASPECT = 1.25;
+const DOCK_ART = 0.75;
+const DOCK_MIN_DOCK = 760;
+// Column chrome above/below the five cells (padding, header, rule) + four 8px gaps.
+const DOCK_COL_CHROME = 94;
+const DOCK_SPOT_RAIL_W = 212;
+const DOCK_SPOT_TILE_W = 60;
+const docked = computed(() => !isCompact.value);
+const dockPaneW = ref(0);
+let dockRO: ResizeObserver | null = null;
+watch(loadoutEl, (el) => {
+  dockRO?.disconnect();
+  dockRO = null;
+  if (!el || typeof ResizeObserver === "undefined") return;
+  dockPaneW.value = el.clientWidth;
+  dockRO = new ResizeObserver(() => (dockPaneW.value = el.clientWidth));
+  dockRO.observe(el);
+});
+// The skeleton stands exactly where the loadout will, so it measures for it:
+// the first real frame then already has its final geometry.
+const dockSkelEl = ref<HTMLElement | null>(null);
+let dockSkelRO: ResizeObserver | null = null;
+watch(dockSkelEl, (el) => {
+  dockSkelRO?.disconnect();
+  dockSkelRO = null;
+  if (!el || typeof ResizeObserver === "undefined") return;
+  const read = () => {
+    if (loadoutEl.value) return;
+    loadoutH.value = el.clientHeight;
+    dockPaneW.value = el.clientWidth;
+  };
+  read();
+  dockSkelRO = new ResizeObserver(read);
+  dockSkelRO.observe(el);
+});
+const clampTo = (lo: number, v: number, hi: number) => Math.min(hi, Math.max(lo, v));
+const dockGeo = computed(() => {
+  const W = dockPaneW.value;
+  const cellH = Math.max(64, Math.floor((loadoutH.value - DOCK_COL_CHROME) / 5));
+  const cellW = clampTo(212, Math.round(cellH * DOCK_ASPECT), 460);
+  const asideW = clampTo(220, cellW, 360);
+  const dockW = Math.max(420, W - (asideW + 20) - 3 * cellW - 56);
+  return { W, cellH, cellW, asideW, dockW, cramped: dockW < DOCK_MIN_DOCK };
+});
+const dockSmall = computed(
+  () => docked.value && canLift.value && view.value === "grid" && dockGeo.value.cramped,
+);
+const dockOpenNow = computed(() => dockSmall.value && dockOpen.value);
+const spotlight = computed(() => dockOpenNow.value);
+const spotW = computed(() => clampTo(380, Math.round(dockGeo.value.W * 0.3), 560));
+const dockPickerW = computed(() => {
+  const g = dockGeo.value;
+  return dockSmall.value ? g.W - DOCK_SPOT_RAIL_W - spotW.value : g.dockW;
+});
+const dockVars = computed(() =>
+  docked.value && canLift.value
+    ? { "--dock-cell-h": `${dockGeo.value.cellH}px`, "--dock-aside-w": `${dockGeo.value.asideW}px` }
+    : {},
+);
+function dockSelectPos(pos: string) {
+  if (dockSmall.value && !dockOpen.value) {
+    dockReady = dockMakeReady();
+    dockHoverArmed = false;
+    dockHover.value = null;
+    dockOpening.value = true;
+    clearTimeout(dockOpeningTimer);
+    const ready = dockReady;
+    void ready.then(() => {
+      if (dockReady !== ready) return;
+      dockOpeningTimer = setTimeout(() => (dockOpening.value = false), DOCK_OPEN_MS + 60);
+    });
+  }
+  if (dockSmall.value && !dockOpen.value) {
+    const img = dockCellImg(pos);
+    dockFlipSrc = img ? { rect: img.getBoundingClientRect(), img } : null;
+  }
+  selectPos(pos);
+  if (dockSmall.value) dockOpen.value = true;
+}
+function dockCardHover(e: PointerEvent) {
+  if (!spotlight.value || dockOpening.value || !dockHoverArmed) return;
+  const card = (e.target as Element | null)?.closest?.('[style*="grid-template-columns"] > *');
+  const img = card?.querySelector("img");
+  if (!card || !img) {
+    dockHover.value = null;
+    return;
+  }
+  const src = img.currentSrc || img.src;
+  if (dockHover.value?.src === src) return;
+  const name = card.querySelector(".font-medium, .font-semibold")?.textContent?.trim() ?? "";
+  const edge = (card as HTMLElement).style.borderBottomColor || card.querySelector<HTMLElement>('[style*="border-bottom"]')?.style.borderBottomColor;
+  dockHover.value = { src, name, rarity: edge || null };
+}
+// Spotlight's slot list: three across, each tile as tall as the height allows
+// (up to square) so the whole loadout fits without scrolling.
+const dockRailTileH = computed(() => {
+  const groups = focusRail.value;
+  const rows = groups.reduce((n, g) => n + Math.ceil(g.items.length / 3), 0);
+  const rowGaps = groups.reduce((n, g) => n + (Math.ceil(g.items.length / 3) - 1) * 6, 0);
+  const free = loadoutH.value - 24 - 32 - 12 - groups.length * 19 - (groups.length - 1) * 12 - rowGaps;
+  return clampTo(34, Math.floor(free / Math.max(1, rows)), DOCK_SPOT_TILE_W);
+});
+watch(view, (v) => {
+  if (v !== "grid") dockOpen.value = false;
+});
+watch(dockOpenNow, (v) => {
+  if (!v) dockHover.value = null;
+});
+// Cells crossfade to what they now show; they wave across the grid only when
+// the whole loadout turns over (first paint, CT/T flip, preset switch).
+const dockWave = ref(true);
+let dockWaveTimer: ReturnType<typeof setTimeout> | undefined;
+function dockStartWave() {
+  dockWave.value = true;
+  clearTimeout(dockWaveTimer);
+  dockWaveTimer = setTimeout(() => (dockWave.value = false), 900);
+}
+watch(team, dockStartWave);
+watch(shownPresetId, dockStartWave);
+watch(loading, (v) => {
+  if (!v) dockStartWave();
+});
+
+// Spotlight motion. The clicked weapon flies from its cell into the stage and
+// back to it on close; the panel around it only fades. Open and close share
+// the picker's curve, close runs faster.
+const DOCK_EASE = "cubic-bezier(0.32, 0.72, 0, 1)";
+const DOCK_OUT = "cubic-bezier(0.23, 1, 0.32, 1)";
+const DOCK_OPEN_MS = 360;
+const DOCK_CLOSE_MS = 240;
+// The weapon's trip home is something already on screen moving, so it brakes
+// as well as accelerates, and runs long enough to be seen.
+const DOCK_HOME_MS = 320;
+const DOCK_HOME_EASE = "cubic-bezier(0.45, 0, 0.2, 1)";
+let dockFlipSrc: { rect: DOMRect; img: HTMLElement } | null = null;
+// The flight in progress, with what it must undo. Interrupting runs that undo
+// NOW: a cancel()'s own event fires later, and when it reset the panel's
+// overflow mid-close it clipped the trip home to nothing.
+let dockFlight: { anim: Animation | null; raf: number; cleanup: () => void } | null = null;
+function dockStopFlight() {
+  const f = dockFlight;
+  dockFlight = null;
+  if (!f) return;
+  cancelAnimationFrame(f.raf);
+  if (f.anim) {
+    f.anim.onfinish = null;
+    f.anim.cancel();
+  }
+  f.cleanup();
+}
+// The frame that opens or closes Spotlight is a heavy one (panel, slot list and
+// a new set of picker cards all render in it). An animation started inside it
+// loses its first steps and visibly jumps, so the art is parked at its start
+// and the flight begins two frames later, once that frame has painted.
+function dockFly(
+  wrap: HTMLElement,
+  from: string,
+  to: string,
+  opts: KeyframeAnimationOptions,
+  cleanup: () => void,
+  ready?: Promise<void> | null,
+) {
+  wrap.style.transform = from;
+  const f: { anim: Animation | null; raf: number; cleanup: () => void } = { anim: null, raf: 0, cleanup };
+  dockFlight = f;
+  const start = () => {
+    if (dockFlight !== f) return;
+    wrap.style.transform = "";
+    const a = wrap.animate([{ transform: from }, { transform: to }], opts);
+    f.anim = a;
+    a.onfinish = () => {
+      if (dockFlight === f) dockFlight = null;
+      cleanup();
+    };
+  };
+  if (ready) void ready.then(() => (f.raf = requestAnimationFrame(start)));
+  else f.raf = requestAnimationFrame(() => (f.raf = requestAnimationFrame(start)));
+}
+// Opening waits until it is ready to move: the frames that render Spotlight
+// have painted, and the picker's card pictures have decoded (capped, so a slow
+// network never holds it). Then the flight and the slide start together, with
+// nothing left to draw underneath them.
+let dockReady: Promise<void> | null = null;
+function dockMakeReady(): Promise<void> {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => {
+        const imgs = [
+          ...(loadoutEl.value?.querySelectorAll<HTMLImageElement>('[data-role="picker-sheet"] img, [data-spot-art] img') ?? []),
+        ].slice(0, 48);
+        const decoded = Promise.all(imgs.map((i) => i.decode().catch(() => {})));
+        void Promise.race([decoded, new Promise((r) => setTimeout(r, 300))]).then(() => resolve());
+      }),
+    );
+  });
+}
+// The drawn picture inside an object-contain box, not the box itself.
+function dockDrawnWidth(img: HTMLImageElement | null, box: DOMRect): number {
+  if (!img?.naturalWidth || !img.naturalHeight) return box.width;
+  return Math.min(box.width, box.height * (img.naturalWidth / img.naturalHeight));
+}
+const spotFacts = computed(() => cellFacts(selected.value));
+const dockPreviewing = computed(() => !!dockHover.value && !dockHover.value.equipped);
+const dockEquipped = ref(false);
+let dockEquippedTimer: ReturnType<typeof setTimeout> | undefined;
+// Keyed by the slot and what is equipped there, never by the hovered card:
+// hovering swaps the picture instantly (it happens constantly, and crossfading
+// every one double-exposed two guns), while a slot switch or an equip crossfades.
+const dockArtKey = computed(() => `sel:${selected.value}|${dockShownId.value}`);
+// The cell's own source, drawn with a plain eager <img>: ItemArt is lazy and
+// decodes async, which left the stage blank for the first frames of the flight.
+const spotSrc = computed(() => (isSpecial(selected.value) ? specialImage(selected.value) : cellSrc(selected.value)));
+// The glow is part of the picture: it follows the hovered card while hovering,
+// and changes in the same frame the art does — never on its own afterwards.
+const dockGlow = computed(() => (dockHover.value ? dockHover.value.rarity ?? null : rarityOf(selected.value) ?? null));
+// The picker starts sliding two frames after it is asked to open, for the same
+// reason as dockFly: the opening frame is heavy and would eat its first steps.
+const dockSlid = ref(false);
+watch(dockOpen, (v) => {
+  if (!v) {
+    dockSlid.value = false;
+    return;
+  }
+  void (dockReady ?? dockMakeReady()).then(() => {
+    if (dockOpen.value) dockSlid.value = true;
+  });
+});
+// Hover previews wait until the picker has finished arriving AND the mouse has
+// actually moved: cards sliding under a still pointer report as hovered, and
+// the preview flickered through them on the way in.
+let dockHoverArmed = false;
+function dockArmHover(e: PointerEvent) {
+  if (dockHoverArmed || dockOpening.value || !spotlight.value || (!e.movementX && !e.movementY)) return;
+  dockHoverArmed = true;
+  dockCardHover(e);
+}
+// While the picker slides in it IS the entrance — its cards don't fade too.
+const dockOpening = ref(false);
+let dockOpeningTimer: ReturnType<typeof setTimeout> | undefined;
+function dockCellImg(pos: string): HTMLElement | null {
+  return (
+    loadoutEl.value?.querySelector<HTMLElement>(
+      `:is([data-role="weapon"], [data-role="rail"], [data-role="agent"])[data-slot="${CSS.escape(pos)}"] img`,
+    ) ?? null
+  );
+}
+function spotArt(panel: Element): HTMLElement | null {
+  const all = panel.querySelectorAll<HTMLElement>("[data-spot-art]");
+  return all[all.length - 1] ?? null;
+}
+function dockFlip(from: DOMRect, wrap: HTMLElement): string | null {
+  const w = wrap.getBoundingClientRect();
+  const img = wrap.querySelector("img");
+  const iw = img ? dockDrawnWidth(img, img.getBoundingClientRect()) : w.width * 0.88;
+  if (!iw || !from.width) return null;
+  const dx = from.left + from.width / 2 - (w.left + w.width / 2);
+  const dy = from.top + from.height / 2 - (w.top + w.height / 2);
+  return `translate(${dx}px, ${dy}px) scale(${from.width / iw})`;
+}
+function spotParts(panel: Element) {
+  return [...panel.querySelectorAll<HTMLElement>("[data-spot]")];
+}
+function spotEnter(el: Element, done: () => void) {
+  const panel = el as HTMLElement;
+  const src = dockFlipSrc;
+  dockFlipSrc = null;
+  if (reducedMotion.value) return done();
+  for (const part of spotParts(panel)) {
+    const spot = part.dataset.spot;
+    const lifts = spot === "head" || spot === "foot";
+    part.animate(
+      lifts ? [{ opacity: 0, transform: "translateY(8px)" }, {}] : [{ opacity: 0 }, {}],
+      {
+        duration: 260,
+        delay: lifts ? 110 : 0,
+        easing: lifts ? DOCK_OUT : "ease-out",
+        fill: "backwards",
+      },
+    );
+  }
+  const wrap = spotArt(panel);
+  const flip = src && wrap ? dockFlip(src.rect, wrap) : null;
+  if (!wrap || !src || !flip) {
+    wrap?.animate([{ opacity: 0, transform: "scale(0.96)" }, {}], { duration: 260, easing: DOCK_OUT });
+    setTimeout(done, 260);
+    return;
+  }
+  dockStopFlight();
+  panel.style.zIndex = "6";
+  panel.style.overflow = "visible";
+  src.img.style.visibility = "hidden";
+  dockFly(
+    wrap,
+    flip,
+    "none",
+    { duration: DOCK_OPEN_MS, easing: DOCK_EASE },
+    () => {
+      src.img.style.visibility = "";
+      panel.style.zIndex = "";
+      panel.style.overflow = "";
+      done();
+    },
+    dockReady,
+  );
+}
+function spotLeave(el: Element, done: () => void) {
+  const panel = el as HTMLElement;
+  dockStopFlight();
+  if (reducedMotion.value) return done();
+  for (const part of spotParts(panel)) {
+    part.animate([{}, { opacity: 0 }], { duration: 160, easing: "ease-in", fill: "forwards" });
+  }
+  const wrap = spotArt(panel);
+  const flyer = wrap?.querySelector("img");
+  // The model can't fly, its picture can: swap to the picture in this frame
+  // (no crossfade — a fading model left behind while its picture flew off).
+  const host3d = panel.querySelector<HTMLElement>("[data-spot-3d]");
+  if (host3d) {
+    host3d.style.transition = "none";
+    host3d.style.opacity = "0";
+  }
+  if (flyer) {
+    flyer.style.transition = "none";
+    flyer.classList.remove("opacity-0");
+    // Frozen where it is, not reset: resetting the bob jumped it up to 4px.
+    for (const a of flyer.getAnimations()) a.pause();
+    if (spotSrc.value && flyer.getAttribute("src") !== spotSrc.value) flyer.src = spotSrc.value;
+  }
+  const img = view.value === "grid" ? dockCellImg(selected.value) : null;
+  const r = img?.getBoundingClientRect();
+  const flip = wrap && r && r.width ? dockFlip(r, wrap) : null;
+  if (!wrap || !img || !flip) {
+    wrap?.animate([{}, { opacity: 0, transform: "scale(0.97)" }], { duration: 160, easing: "ease-in", fill: "forwards" });
+    setTimeout(done, 160);
+    return;
+  }
+  panel.style.zIndex = "6";
+  panel.style.overflow = "visible";
+  img.style.visibility = "hidden";
+  dockFly(wrap, "none", flip, { duration: DOCK_HOME_MS, easing: DOCK_HOME_EASE, fill: "forwards" }, () => {
+    img.style.visibility = "";
+    done();
+  });
+}
+// Equipping while the Spotlight is up: the art lands with a small settle, the
+// glow flares once, and an "Equipped" chip replaces "Preview".
+watch(
+  () => (spotlight.value ? `${selected.value}|${cellInstance(selected.value)?.id ?? rowFor(selected.value)?.item?.id ?? ""}` : ""),
+  (key, prev) => {
+    if (!key || !prev || key === prev || key.split("|")[0] !== prev.split("|")[0]) return;
+    if (dockHover.value) dockHover.value = { ...dockHover.value, equipped: true };
+    dockEquipped.value = true;
+    clearTimeout(dockEquippedTimer);
+    dockEquippedTimer = setTimeout(() => (dockEquipped.value = false), 1600);
+    if (reducedMotion.value) return;
+    void nextTick(() => {
+      const panel = loadoutEl.value?.querySelector("[data-spot-panel]");
+      if (!panel) return;
+      spotArt(panel)?.animate([{ transform: "scale(1.035)" }, { transform: "none" }], {
+        duration: 360,
+        easing: DOCK_OUT,
+      });
+    });
+  },
+);
+// ---- A click opens the item modal; Equip is in its footer ----
+function dockTileClick(inst: InventoryItem) {
+  if (tapOpensMenu.value) return openItemCtxFor(inst);
+  if (!docked.value) return void equipInstanceAt(inst, selected.value);
+  view3dForInstance(inst);
+}
+// A colour list (a sticker's nineteen colours) opens with its pictures already
+// on hand: hovering a deck warms them, and the click waits for the first screen
+// of them to decode (160ms at most) so the list arrives whole, not as empty
+// cards filling in one by one.
+const dockArtWarm = new Map<string, Promise<boolean>>();
+function dockWarm(url?: string | null): Promise<boolean> {
+  if (!url) return Promise.resolve(false);
+  let p = dockArtWarm.get(url);
+  if (!p) {
+    const img = new Image();
+    img.decoding = "async";
+    img.src = url;
+    p = img.decode().then(
+      () => true,
+      () => false,
+    );
+    dockArtWarm.set(url, p);
+  }
+  return p;
+}
+// An owned item shows its baked render; one with no render yet shows its
+// catalogue picture instead (onRenderError), so that is the one to have on hand.
+const dockWarmVariant = (v: Skin | InventoryItem) =>
+  "item" in v
+    ? dockWarm(renderSrc(v as InventoryItem)).then((ok) => ok || dockWarm((v as InventoryItem).item?.image))
+    : dockWarm(catalogArt.value[v.id] ?? (v as Skin).image);
+const dockWarmDeck = (variants: readonly (Skin | InventoryItem)[]) => Promise.all(variants.slice(0, 24).map(dockWarmVariant));
+let dockWarmTimer: ReturnType<typeof setTimeout> | undefined;
+function dockDeckHover(variants: readonly (Skin | InventoryItem)[] | null) {
+  clearTimeout(dockWarmTimer);
+  if (!docked.value || !variants || variants.length < 2) return;
+  dockWarmTimer = setTimeout(() => void dockWarmDeck(variants), 80);
+}
+const dockDrill = ref<"in" | "out" | null>(null);
+async function dockOpenDeck(design: number | null, variants: readonly (Skin | InventoryItem)[]) {
+  if (!docked.value || design == null) return void (sheetDesign.value = design);
+  const at = `${sheetMode.value}|${sheetKey.value}`;
+  await Promise.race([dockWarmDeck(variants), new Promise((r) => setTimeout(r, 160))]);
+  if (at !== `${sheetMode.value}|${sheetKey.value}`) return;
+  dockDeckReturnN = dockSheetWindow().items.value.length;
+  dockDrill.value = "in";
+  sheetDesign.value = design;
+}
+// Leaving a colour list resets the card window to its first page, which left
+// nothing to scroll back to. Re-reveal what was drawn before going in.
+let dockDeckReturnN = 0;
+const dockSheetWindow = () => (sheetMode.value === "owned" ? ownedWindow : craftWindow);
+function dockBackOutOfDeck() {
+  if (view.value === "inventory" && invView.invDesign.value !== null) {
+    invView.invDesign.value = null;
+    return true;
+  }
+  if (view.value !== "grid" && view.value !== "focus") return false;
+  if (sheetMode.value === "replace" || sheetDesign.value === null) return false;
+  dockDrill.value = "out";
+  sheetDesign.value = null;
+  const n = dockDeckReturnN;
+  const w = dockSheetWindow();
+  void nextTick(() => w.reveal(n));
+  return true;
+}
+const dockContentEnter = computed(() =>
+  dockDrill.value === "in" ? "opacity-0 translate-x-4" : dockDrill.value === "out" ? "opacity-0 -translate-x-4" : "opacity-40",
+);
+watch([sheetMode, sheetKey], () => (dockDrill.value = null));
+// Out instantly: the next one starts in the same frame, so a switch never shows
+// an empty picker.
+// A microtask, not synchronously: finishing inside Vue's own patch re-renders
+// mid-patch and throws.
+function dockLeaveNow(_el: Element, done: () => void) {
+  queueMicrotask(done);
+}
+// Art lands softly (it can take a second on a cold cache): marked once, so a
+// src upgrade on the same <img> doesn't replay it. See style.css.
+// A picture that was on hand when its grid appeared gets a short fade; one that
+// kept you waiting arrives slowly, sharpening as the glow under it goes.
+let dockGridAt = 0;
+function dockGridEntered() {
+  dockGridAt = performance.now();
+}
+function dockArtLanded(e: Event) {
+  const t = e.target;
+  if (!(t instanceof HTMLImageElement) || t.hasAttribute("data-art-in")) return;
+  t.setAttribute("data-art-in", performance.now() - dockGridAt < 150 ? "fast" : "slow");
+}
+// The Default card has no owned item behind it, so it opens the default-weapon
+// 3D overlay instead, which gains an Equip for this.
+const dockDefaultApplyFn = shallowRef<(() => unknown) | null>(null);
+// After setup: loadout3d is declared much further down this file, and a watch
+// created here would read it before it exists.
+onMounted(() =>
+  watch(loadout3d, (v) => {
+    if (!v) dockDefaultApplyFn.value = null;
+  }),
+);
+function dockDefaultClick(apply: () => unknown) {
+  if (!docked.value) return void apply();
+  const pos = selected.value;
+  const def = isSpecial(pos) ? specialDefault(pos) : null;
+  const model = (def ? resolveViewerModelSync(def)?.model : null) ?? occupantModel(pos);
+  if (!model) return void apply();
+  const kind: ViewerKind = pos === "gloves" ? "glove" : pos === "agent" ? "agent" : "weapon";
+  const name = (isSpecial(pos) ? def?.name : occupantWeapon(pos)?.name) ?? "Default";
+  void openViewer3d(model, name, null, false, kind, occupantWeapon(pos)?.id ?? null).then(() => {
+    if (loadout3d.value) dockDefaultApplyFn.value = apply;
+  });
+  dockDefaultApplyFn.value = apply;
+}
+// What Spotlight shows, by identity: re-equipping the item it already shows
+// doesn't crossfade or remount the stage.
+const dockShownId = computed(() => {
+  const row = focusRow.value;
+  return row?.item_instance_id ? `i:${row.item_instance_id}` : `c:${row?.item?.id ?? "none"}`;
+});
+
+// ---- Spotlight in 3D -----------------------------------------
+// The stage shows the model, not the artwork, once it has loaded. The artwork
+// stays underneath for everything that has to be instant — the flight in and
+// home, hovering a card — and the model takes over when it is ready. A new
+// finish is a remount (the viewer can only change wear/pattern live), so it
+// happens on a click, never on hover.
+const spot3d = usePersistedBool("cs2inv.spot3d", true);
+const spot3dReady = ref(false);
+const spotHostEl = ref<HTMLElement | null>(null);
+const spotViewer = useViewerMount({
+  label: "spot",
+  host: () => spotHostEl.value,
+  onError: () => {
+    spot3dReady.value = false;
+  },
+});
+const spotTarget = computed<ViewerTarget | null>(() => {
+  if (!spotlight.value || isNo3d(selected.value)) return null;
+  const item = focusRow.value?.item ?? null;
+  if (item) return resolveViewerModelSync(item) ?? null;
+  const key = occupantModel(selected.value);
+  return key ? { model: key, kind: "weapon" } : null;
+});
+const spot3dKey = computed(() => {
+  const t = spotTarget.value;
+  return t && spot3d.value ? `${t.model}|${dockShownId.value}|${team.value}` : "";
+});
+const dockShow3d = computed(() => spot3dReady.value && !!spot3dKey.value && !dockHover.value);
+let spot3dMounted = "";
+let spot3dTimer: ReturnType<typeof setTimeout> | undefined;
+watch([spot3dKey, dockOpening], ([key, opening]) => {
+  clearTimeout(spot3dTimer);
+  if (!key) {
+    if (spot3dMounted) spotViewer.teardown();
+    spot3dMounted = "";
+    spot3dReady.value = false;
+    return;
+  }
+  if (opening || key === spot3dMounted) return;
+  spot3dReady.value = false;
+  spot3dTimer = setTimeout(() => void mountSpot3d(key), 60);
+});
+async function mountSpot3d(key: string) {
+  const t = spotTarget.value;
+  if (!t || key !== spot3dKey.value) return;
+  spot3dMounted = key;
+  const row = focusRow.value;
+  const att: AttachSource | null = focusAttachments.value;
+  const isWeapon = (t.kind ?? "weapon") === "weapon";
+  await spotViewer.mount(
+    t.model,
+    async () => ({
+      kind: t.kind,
+      paintMaterial: focusPaint.value,
+      legacyPaint: focusLegacyPaint.value,
+      wear: row?.wear ?? focusInstance.value?.wear,
+      seed: row?.seed ?? focusInstance.value?.seed,
+      petStyle: t.kind === "pet" ? ((att as InventoryItem | null)?.style ?? null) : null,
+      petStage: t.kind === "pet" ? ((att as InventoryItem | null)?.upgrade_level ?? null) : null,
+      ...(isWeapon ? await stickerGeom(t.model) : {}),
+      ...(isWeapon ? instPlacements(att) : {}),
+      patches: t.kind === "agent" ? (att?.patches ?? []).map((x) => x?.image ?? null) : undefined,
+      stattrak: att?.stattrak || row?.stattrak ? { count: att?.stattrak_count ?? row?.stattrak_count ?? 0 } : null,
+      frameInset: { right: 0 },
+    }),
+    () => {
+      if (spot3dMounted === key) spot3dReady.value = true;
+    },
+  );
+}
 const loadoutPadStyle = computed(() =>
   isCompact.value
     ? { paddingBottom: `${Math.round(sheetPeekPx.value || loadoutH.value * PEEK_FRAC)}px` }
-    : canLift.value
-      ? { paddingBottom: SHEET_COLLAPSED_CSS }
+    : canLift.value && !dockSmall.value
+      ? { paddingRight: `${dockGeo.value.dockW}px` }
       : {},
 );
-// Every loadout scroller gets the same pair: a spacer in the template gives it
-// somewhere to scroll TO, and scroll-padding keeps browser-driven scrolls (tab
-// focus, mostly) from landing under the sheet.
-const liftScrollStyle = computed(() => (liftIntrusion.value ? { scrollPaddingBottom: `${liftIntrusion.value}px` } : {}));
-
-// The whole point of the reserve above: with the sheet lifted, the slot being
-// edited has to stay visible in the strip that's left. Every loadout scroller
-// carries a spacer exactly `liftIntrusion` tall while lifted, so there is
-// always a scroll position that clears the sheet.
-async function revealSelectedSlot(smooth = true) {
-  if (!lifted.value || view.value !== "grid") return;
-  await nextTick(); // the spacer has to be in the DOM before there's anywhere to go
-  const el = loadoutEl.value?.querySelector<HTMLElement>(`[data-slot="${CSS.escape(selected.value)}"]`);
-  if (!el) return;
-  const inset = liftIntrusion.value;
-  // Two passes, and the second is the one that's actually load-bearing. A
-  // scroll issued while the sheet is still animating its own height lands
-  // short — measured ~50px shy — and on the toggle-up that starts it the
-  // scroller may not even have the range yet, making the first pass a silent
-  // no-op. The settle pass runs once the transition is over and is itself a
-  // no-op whenever the first one already arrived.
-  revealInScroller(el, inset, smooth && !reducedMotion.value);
-  clearTimeout(revealSettleTimer);
-  revealSettleTimer = setTimeout(() => revealInScroller(el, inset, false), SHEET_LIFT_MS + 80);
-}
-let revealSettleTimer: ReturnType<typeof setTimeout> | undefined;
-// liftIntrusion is in here for the resize case: the free strip changes size and
-// what used to be visible may not be any more.
-watch([lifted, selected, liftIntrusion], () => void revealSelectedSlot());
 
 let loadoutRO: ResizeObserver | null = null;
 // The loadout column mounts and unmounts with the view swap, so the observer
@@ -5590,10 +6378,7 @@ watch(loadoutEl, (el) => {
   loadoutRO = null;
   if (!el || typeof ResizeObserver === "undefined") return;
   loadoutH.value = el.clientHeight;
-  loadoutRO = new ResizeObserver(() => {
-    loadoutH.value = el.clientHeight;
-    viewportH.value = window.innerHeight;
-  });
+  loadoutRO = new ResizeObserver(() => (loadoutH.value = el.clientHeight));
   loadoutRO.observe(el);
 });
 
@@ -5699,16 +6484,38 @@ const sheetTranslate = computed(() =>
     : Math.max(0, sheetFullPx.value - snapPx(sheetSnap.value, loadoutH.value)),
 );
 
+/** How far the resting sheet sits below fully open. Its list pads by this much
+ *  so the last rows can scroll into view; the live drag offset is left out so
+ *  a drag stays a transform and never relays out the list. */
+const sheetRestHiddenPx = computed(() =>
+  isCompact.value
+    ? Math.max(0, Math.round(sheetFullPx.value - snapPx(sheetSnap.value, loadoutH.value)))
+    : 0,
+);
+
 const sheetStyle = computed(() => {
   if (!isCompact.value) {
-    // Desktop: absolutely positioned, so the height IS the whole interaction.
-    // The percentage resolves against the loadout column, which is what makes
-    // "60% of the loadout area" mean that on every screen.
+    // Desktop: docked beside the loadout.
+    const base = {
+      top: "0",
+      left: "auto",
+      height: "auto",
+      width: `${dockPickerW.value}px`,
+      borderTopWidth: "0",
+      borderLeftWidth: "1px",
+    };
+    if (!dockSmall.value) return base;
+    const open = dockOpen.value && dockSlid.value;
+    const ms = reducedMotion.value ? 0 : open ? DOCK_OPEN_MS : DOCK_CLOSE_MS;
     return {
-      height: lifted.value ? `${SHEET_LIFT_PCT}%` : SHEET_COLLAPSED_CSS,
-      transition: reducedMotion.value ? "none" : `height ${SHEET_LIFT_MS}ms cubic-bezier(0.22,1,0.36,1)`,
-      // Reads as a layer above the loadout rather than a taller panel.
-      boxShadow: lifted.value ? "0 -18px 40px -22px hsl(var(--background))" : "none",
+      ...base,
+      transform: open ? "translate3d(0, 0, 0)" : "translate3d(100%, 0, 0)",
+      transition: `transform ${ms}ms ${SHEET_EASE}`,
+      willChange: "transform",
+      pointerEvents: open ? ("auto" as const) : ("none" as const),
+      // Always on: it is off screen while closed, and switching a 64px blur
+      // on at the start of the slide repainted the whole layer in that frame.
+      boxShadow: "-32px 0 64px -32px rgba(0, 0, 0, 0.75)",
     };
   }
   return {
@@ -5888,6 +6695,10 @@ const sheetRows = computed(() => isCompact.value && sheetMode.value !== "craft")
 const pickerCardTracks = computed(() => {
   const tile = isCompact.value ? COMPACT_CRAFT_TILE : sheetCardSize.value;
   const chrome = isCompact.value ? COMPACT_CRAFT_CHROME : CARD_CHROME_PX;
+  // Dock shortens the card so it reads square, not portrait. Agents are portrait art; they keep it.
+  if (docked.value && sheetKey.value !== "agent") {
+    return { columns: `repeat(auto-fill, minmax(${tile}px, 1fr))`, row: `${Math.round(tile * DOCK_ART) + chrome}px` };
+  }
   return { columns: `repeat(auto-fill, minmax(${tile}px, 1fr))`, row: `${tile + chrome}px` };
 });
 const pickerGridStyle = computed(() => {
@@ -5937,7 +6748,7 @@ function measureSheetScroll(el: HTMLElement | null) {
   // screen. That hidden strip is content below the fold too — count it, or the
   // tally claims you've seen everything while a whole detent's worth is
   // sitting under the edge.
-  const offscreen = isCompact.value ? sheetTranslate.value : 0;
+  const offscreen = isCompact.value ? Math.max(0, sheetTranslate.value - sheetListPadPx.value) : 0;
   sheetHasMore.value = el.scrollHeight - el.scrollTop - el.clientHeight + offscreen > 8;
 }
 // Same per-frame coalescing as scrollFade, and for the same reason: the three
@@ -5959,6 +6770,45 @@ const onSheetScroll = (e: Event) => {
 // every mode switch and a static ref would go stale. Measured on the next frame
 // because the grid's children mount after the container does.
 let sheetScrollEl: HTMLElement | null = null;
+/** The list's bottom padding, which lags sheetRestHiddenPx when it shrinks.
+ *  Opening the sheet further would drop the padding under a list scrolled to
+ *  its end and clamp it down a whole detent in one frame; instead the list
+ *  scrolls down in step with the slide and the padding goes once it lands. */
+const sheetListPadPx = ref(0);
+let sheetPadTimer: ReturnType<typeof setTimeout> | null = null;
+watch(
+  sheetRestHiddenPx,
+  (next) => {
+    if (sheetPadTimer) {
+      clearTimeout(sheetPadTimer);
+      sheetPadTimer = null;
+    }
+    if (next >= sheetListPadPx.value) {
+      sheetListPadPx.value = next;
+      return;
+    }
+    const el = sheetScrollEl;
+    if (el) {
+      const settled = el.scrollHeight - (sheetListPadPx.value - next) - el.clientHeight;
+      if (el.scrollTop > settled) {
+        el.scrollTo({ top: Math.max(0, settled), behavior: reducedMotion.value ? "auto" : "smooth" });
+      }
+    }
+    sheetPadTimer = setTimeout(
+      () => {
+        sheetListPadPx.value = next;
+        sheetPadTimer = null;
+      },
+      reducedMotion.value ? 0 : SHEET_SNAP_MS,
+    );
+  },
+  { immediate: true },
+);
+onBeforeUnmount(() => {
+  if (sheetPadTimer) {
+    clearTimeout(sheetPadTimer);
+  }
+});
 function setSheetScrollEl(el: unknown) {
   sheetScrollEl = (el as HTMLElement) ?? null;
   if (sheetScrollEl) {
@@ -6248,6 +7098,7 @@ const focusSubject = shallowRef<{
   wear: number;
   seed: number;
   stattrak: boolean;
+  souvenir: boolean;
   nametag: string;
   stickers: (Attach | null)[];
   patches: (Attach | null)[];
@@ -6267,6 +7118,7 @@ function quoteKeyOf(c: NonNullable<typeof priceSubject.value>) {
     c.skin.id,
     c.wear,
     c.stattrak ? 1 : 0,
+    c.souvenir ? 1 : 0,
     c.stickers.map((x) => x?.id ?? "-").join(","),
     c.patches.map((x) => x?.id ?? "-").join(","),
     c.charm?.id ?? "-",
@@ -6320,6 +7172,7 @@ function scheduleQuote() {
         item_id: c.skin.id,
         wear: c.wear,
         stattrak: c.stattrak,
+        souvenir: c.souvenir,
         stickers: c.stickers.map((x) => (x ? { id: x.id } : null)),
         patches: c.patches.map((x) => (x ? { id: x.id } : null)),
         charm_id: c.charm?.id ?? null,
@@ -6483,13 +7336,14 @@ function scheduleDetail() {
     itemDetail.value = null;
     return;
   }
-  const key = `${c.skin.id}:${wearTier(c.wear ?? 0)}:${c.stattrak ? 1 : 0}`;
+  const keyOf = (s: NonNullable<typeof c>) => `${s.skin.id}:${wearTier(s.wear ?? 0)}:${s.stattrak ? 1 : 0}:${s.souvenir ? 1 : 0}`;
+  const key = keyOf(c);
   detailTimer = setTimeout(async () => {
     try {
-      const detail = await fetchPriceDetail(c.skin.id, c.wear ?? null, c.stattrak);
+      const detail = await fetchPriceDetail(c.skin.id, c.wear ?? null, c.stattrak, c.souvenir);
       priceLog("detail: back", { available: detail?.available, rows: detail?.history?.length });
       const still = priceSubject.value;
-      if (still && `${still.skin.id}:${wearTier(still.wear ?? 0)}:${still.stattrak ? 1 : 0}` === key) {
+      if (still && keyOf(still) === key) {
         itemDetail.value = detail.available ? detail : null;
       }
     } catch (e) {
@@ -6573,8 +7427,14 @@ async function loadPrices() {
   pricesLoading.value = true;
   try {
     const { items, slots, presets: parked, ready } = await fetchInventoryPrices();
-    for (const inst of inventory.value) inst.price = items[String(inst.id)] ?? null;
-    slotValues.value = slots;
+    for (const inst of inventory.value) {
+      const next = items[String(inst.id)] ?? null;
+      // An equal price is not a change; assigning a fresh object
+      // re-ran every sort and price label in the app on each refresh.
+      if (JSON.stringify(inst.price ?? null) === JSON.stringify(next)) continue;
+      inst.price = next;
+    }
+    if (JSON.stringify(slotValues.value) !== JSON.stringify(slots)) slotValues.value = slots;
     // Absent on a backend that predates the deck: the cards simply carry no figure.
     presetSlotValues.value = parked ?? {};
     pricesLoaded.value = ready;
@@ -7547,6 +8407,9 @@ const focusPriceable = computed(() => {
     wear: row.wear ?? 0,
     seed: row.seed ?? 0,
     stattrak: !!row.stattrak,
+    // The instance's, when it is yours: a loadout row only carries it from a
+    // backend new enough to send it.
+    souvenir: (instanceById(row.item_instance_id)?.souvenir ?? row.souvenir) === true,
     nametag: "",
     stickers: (a?.stickers ?? []) as (Attach | null)[],
     patches: (a?.patches ?? []) as (Attach | null)[],
@@ -7714,6 +8577,7 @@ async function mount3d() {
       // The spec panel floats over the pane's right edge; the viewer frames the
       // model around it rather than the pane giving up the width.
       frameInset: { right: focusPanelW.value },
+      narrowFit: docked.value,
       // Absent unless asked for, which is what keeps the item view the default.
       firstPerson:
         isWeapon && fpvOn.value
@@ -7858,7 +8722,6 @@ watch([focus3d, fpvOn], ([on, held], [was3d]) => {
 onBeforeUnmount(() => {
   clearTimeout(pulseTimer);
   clearTimeout(pendingDeleteTimer);
-  clearTimeout(revealSettleTimer);
   loadoutRO?.disconnect();
   // Don't let unmount abandon a staged delete — fire the API calls now.
   const batch = pendingDelete.value;
@@ -7969,6 +8832,7 @@ async function load() {
       // already looking at is not worth a slower first paint, and a backend
       // that has never heard of presets must still render a loadout.
       void loadPresets();
+      void loadLoadoutSettings();
     }
   } catch (e) {
     error.value = e instanceof Error ? e.message : String(e);
@@ -8035,10 +8899,11 @@ function onGlobalKey(e: KeyboardEvent) {
     } else if (craft.value) {
       closeCraft();
       e.stopPropagation();
-    } else if (lifted.value) {
-      // Topmost non-modal layer: it's covering the loadout, so it's what
-      // Escape should get you out from under.
-      sheetLift.value = false;
+    } else if (dockBackOutOfDeck()) {
+      // Out of a colour list before out of the picker.
+      e.stopPropagation();
+    } else if (dockOpenNow.value) {
+      dockOpen.value = false;
       e.stopPropagation();
     } else if (view.value === "focus") {
       go("/");
@@ -8051,6 +8916,7 @@ function onGlobalKey(e: KeyboardEvent) {
   const el = e.target as HTMLElement | null;
   if (el && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)) return;
   if (craft.value || picker.value || loadout3d.value || ctx.value || itemCtx.value) return;
+  if (e.key === "Backspace" && dockBackOutOfDeck()) return void e.preventDefault();
   if (view.value === "admin") return;
   if (e.key === "/") {
     // "/" drops you into the search that's on screen: inventory's own box
@@ -8099,9 +8965,6 @@ onMounted(() => {
       .then((s) => (extractWarn.value = extractWarnFrom(s)))
       .catch(() => { /* older backend or no mount — nothing to warn about */ });
   }
-  // Loading straight into a remembered lift never trips the watcher below, so
-  // the slot a deep link selected would start out under the sheet.
-  void revealSelectedSlot(false);
 });
 
 // The host may resolve the session after we mount, handing `user` down late. We
@@ -8174,10 +9037,13 @@ function draftFromRow(row: LoadoutEntry): Draft {
     wear: src.wear ?? DEFAULT_WEAR,
     seed: src.seed ?? 1,
     stattrak: !!src.stattrak,
+    souvenir: src.souvenir === true,
     nametag: src.nametag ?? "",
     stickers: (src.stickers ?? []).map((a) => (a ? { id: a.id, x: a.x, y: a.y, r: a.r, w: a.w } : null)),
     patches: (src.patches ?? []).map((a) => a?.id ?? null),
-    charm: src.charm ? { id: src.charm.id, x: src.charm.x, y: src.charm.y, z: src.charm.z, seed: src.charm.seed } : null,
+    charm: src.charm
+      ? { id: src.charm.id, x: src.charm.x, y: src.charm.y, z: src.charm.z, seed: src.charm.seed, highlight: src.charm.highlight }
+      : null,
     style: src.style ?? null,
     stage: src.upgrade_level ?? null,
   };
@@ -8539,6 +9405,55 @@ if (MDEBUG) {
   );
 }
 // ---- end temporary tracing -------------------------------------------------
+
+// ---- the panel's breadcrumbs -----------------------------------------------
+//
+// The host shows "<plugin title> › <this trail>" in its top bar, so pages are
+// named by what they ARE — "Loadout › Settings › 3D Models", "Loadout ›
+// AWP | Dragon Lore" — instead of the URL's "apps › inventory › admin ›
+// models" or an item id. It is why the settings console no longer needs a page
+// header of its own.
+//
+// Each step's `to` is plugin-relative; the last step is this page. A name not
+// known yet (an item still loading) is left off rather than shown as an id, and
+// the next evaluation adds it. Down here, after everything it reads: it is an
+// immediate watcher, and one declared above a `const` it reads dies silently
+// in setup (see the note on focusSubject).
+const crumbTrail = computed<HostCrumb[]>(() => {
+  const r = route.value;
+  const named = (label: string): HostCrumb[] => (label ? [{ label }] : []);
+  switch (r.name) {
+    // Named by the build on screen, not left as the bare plugin title:
+    // "Loadout" alone read as the breadcrumbs not working at all, and the
+    // tab's own name would repeat it.
+    case "loadout":
+      return [{ label: activePresetName.value }];
+    case "focus":
+      return [{ label: activePresetName.value, to: "/" }, ...named(itemName(focusRow.value?.item))];
+    case "inventory":
+      return [{ label: "Inventory" }];
+    case "armory":
+      return [{ label: "Craft" }];
+    case "stickerCrafts":
+      return [{ label: "Sticker Crafts" }];
+    case "item":
+      return named(itemName(instanceById(r.id)?.item));
+    case "draft":
+      return [
+        { label: "Craft", to: "/craft" },
+        ...named(craft.value?.skin.id === r.skinId ? itemName(craft.value.skin) : ""),
+      ];
+    case "admin":
+      return [{ label: "Settings", to: "/admin" }, { label: adminTabLabel(r.section) }];
+  }
+});
+// Sent on the HOST's path too, not just when the trail changes. A click inside
+// the plugin moves its own path first (pluginRouter's pendingPath) and the
+// host's route a moment later, so the first send is stamped with the page we
+// are leaving; when the host's path arrives the trail is already up to date
+// and would never be sent again — leaving the panel a name for the wrong path
+// and its URL trail on screen ("Apps › Inventory › Admin › Prices").
+watch([crumbTrail, () => props.path], ([trail]) => props.setCrumb?.(trail), { immediate: true });
 </script>
 
 <template>
@@ -8575,6 +9490,7 @@ if (MDEBUG) {
       // gap along the bottom edge. Keep the two in step.
       embedMode ? 'h-[70dvh] min-h-[480px]' : 'h-[calc(100dvh-6rem+0.25rem)] sm:h-[calc(100dvh-6rem+1rem)]',
       !isCompact && !embedMode && 'min-h-[560px]',
+      docked && '!max-w-none',
     ]"
     :data-team="team"
     :style="{ '--acc': accent, ...appHeightStyle }"
@@ -8632,7 +9548,7 @@ if (MDEBUG) {
         :active="team"
         variant="solid"
         :solid-background="gradient"
-        :button-class="`relative z-[1] flex h-7 items-center rounded-md font-bold uppercase tracking-widest transition-colors ${isCompact ? 'px-2.5 text-f13' : 'px-5 text-sm'}`"
+        :button-class="`touch-hit relative z-[1] flex h-7 items-center rounded-md font-bold uppercase tracking-widest transition-colors ${isCompact ? 'px-2.5 text-f13' : 'px-5 text-sm'}`"
         active-class="text-black"
         @select="(t) => switchTeam(t as Team)"
       />
@@ -8677,7 +9593,7 @@ if (MDEBUG) {
         <button
           v-else
           ref="presetBtnEl"
-          class="tac-action flex min-w-0 items-center gap-1.5 border border-border uppercase tracking-wider text-muted-foreground disabled:opacity-60"
+          class="tac-action touch-hit flex min-w-0 items-center gap-1.5 border border-border uppercase tracking-wider text-muted-foreground disabled:opacity-60"
           :class="[isCompact ? 'h-8 rounded-md px-2 text-f11' : 'h-9 rounded-lg px-3 text-f11 font-semibold', presetDeck && 'tac-on']"
           :disabled="presetBusy"
           :title="`${activePresetName} — ${isCompact ? 'tap' : 'click'} to switch or manage`"
@@ -8691,7 +9607,7 @@ if (MDEBUG) {
       </div>
       <button
         v-if="view === 'grid' || view === 'focus'"
-        class="tac-action flex items-center gap-1.5 rounded-lg border text-f11 font-semibold uppercase tracking-wider"
+        class="tac-action touch-hit flex items-center gap-1.5 rounded-lg border text-f11 font-semibold uppercase tracking-wider"
         :class="[isCompact ? 'order-6 h-8 px-2' : 'h-9 px-3.5', view === 'focus' ? 'tac-on' : 'border-border text-muted-foreground']"
         :title="view === 'focus' ? 'Focused' : 'Focus'"
         @click="go(view === 'focus' ? '/' : '/focus')"
@@ -8708,6 +9624,28 @@ if (MDEBUG) {
           <SlideReveal :open="view === 'focus'">ed</SlideReveal>
         </span>
       </button>
+      <!-- Its own row on compact: rows one and two are already full at 376px,
+           so anywhere else it pushes the screen tabs or the tools onto a new line. -->
+      <div
+        v-if="canEdit && gridInGameReady && (view === 'grid' || view === 'focus')"
+        data-role="in-game-switch"
+        class="flex flex-none items-center gap-2"
+        :class="isCompact ? 'order-8 w-full justify-between' : ''"
+      >
+        <span class="text-f10 uppercase tracking-widest text-muted-foreground/70">
+          {{ tr("inventory.in_game.label", "In game") }}
+        </span>
+        <PillTabs
+          :items="IN_GAME_MODES"
+          :item-key="(m) => m"
+          :item-title="inGameTip"
+          :active="gridInGame ? 'grid' : 'default'"
+          :button-class="`touch-hit relative z-[1] flex h-7 items-center rounded-md font-semibold uppercase tracking-wider transition-colors ${isCompact ? 'px-2.5 text-f10' : 'px-3 text-f11'}`"
+          @select="(m) => setGridInGame(m === 'grid')"
+        >
+          <template #default="{ item }">{{ inGameLabel(item) }}</template>
+        </PillTabs>
+      </div>
       <!-- The headline figure for whatever screen you're on: the side's loadout
            on the loadout screens, the whole collection on the inventory. ONE
            chip rather than two, so the two screens cannot drift apart — the
@@ -8795,7 +9733,7 @@ if (MDEBUG) {
              button. The dialog behind it says what it will do first. -->
         <button
           v-if="viewerId && !viewingSelf && signedIn && loadout.length && !loading && !error"
-          class="tac-action flex items-center gap-1.5 rounded-lg border border-border text-f11 font-semibold uppercase tracking-wider text-muted-foreground disabled:opacity-60"
+          class="tac-action touch-hit flex items-center gap-1.5 rounded-lg border border-border text-f11 font-semibold uppercase tracking-wider text-muted-foreground disabled:opacity-60"
           :class="isCompact ? 'h-8 px-2' : 'h-9 px-3.5'"
           :disabled="copyBusy"
           title="Copy every skin in this loadout into your own inventory"
@@ -8826,7 +9764,7 @@ if (MDEBUG) {
               : 'Sync from Steam — read-only: mirrors your public Steam inventory. No passwords, keys, or trades, ever.'"
           >
             <button
-              class="relative grid place-items-center rounded-md border text-muted-foreground tac-action disabled:opacity-60"
+              class="relative grid place-items-center rounded-md border text-muted-foreground tac-action touch-hit disabled:opacity-60"
               :class="[
                 isCompact ? 'h-8 w-8' : 'h-9 w-9',
                 needsSteamSync ? 'border-[#f97316]/60' : 'border-border',
@@ -8864,7 +9802,7 @@ if (MDEBUG) {
                  as the control being stood down rather than as a second accent
                  colour in a row that already has amber. -->
             <button
-              class="relative grid place-items-center rounded-md border tac-action"
+              class="relative grid place-items-center rounded-md border tac-action touch-hit"
               :class="[
                 isCompact ? 'h-8 w-8' : 'h-9 w-9',
                 showPrices ? 'border-border text-foreground' : 'border-border/40 text-muted-foreground/40',
@@ -8880,7 +9818,7 @@ if (MDEBUG) {
             :text="gearWarnings.length ? gearWarnings.join(' · ') : 'Game-server configuration'"
           >
             <button
-              class="relative grid place-items-center rounded-md border border-border text-muted-foreground tac-action"
+              class="relative grid place-items-center rounded-md border border-border text-muted-foreground tac-action touch-hit"
               :class="isCompact ? 'h-8 w-8' : 'h-9 w-9'"
               @click="go('/admin')"
             >
@@ -8939,7 +9877,60 @@ if (MDEBUG) {
          and card tracks (pickerCardTracks). Drawn freehand it had a taller
          agent, two rows of extras and a sheet of tall cards with no toolbar,
          and the whole screen visibly shrank when the real one landed on it. -->
-    <div v-if="loading && !isCompact" aria-busy="true" class="flex min-h-0 flex-1 flex-col overflow-hidden">
+    <!-- The Dock's skeleton, drawn from the same numbers as the
+         real cells (dockGeo) so nothing moves when the loadout lands on it. -->
+    <div v-if="loading && docked && canLift" ref="dockSkelEl" aria-busy="true" class="relative flex min-h-0 flex-1 flex-col overflow-hidden">
+      <div class="relative flex min-h-0 flex-1 overflow-hidden" :style="loadoutPadStyle">
+        <div class="flex flex-none flex-col pb-3 pl-4 pr-1 pt-3" :style="{ width: `${dockGeo.asideW + 20}px` }">
+          <div class="flex items-baseline border-b border-border/60 px-1 pb-2">
+            <span class="animate-skeleton rounded bg-secondary/40 text-f11 font-semibold uppercase tracking-cs2 text-transparent" :style="{ '--i': 0 }">Equipment</span>
+          </div>
+          <div class="flex flex-col gap-2 pt-2">
+            <div v-for="r in 2" :key="'rail' + r" class="animate-skeleton flex-none rounded-lg bg-secondary/40" :style="{ '--i': r, height: `${dockGeo.cellH}px` }"></div>
+            <div class="animate-skeleton flex-none rounded-lg bg-secondary/40" :style="{ '--i': 3, height: `${2 * dockGeo.cellH + 8}px` }"></div>
+            <div class="grid flex-none grid-cols-3 gap-2">
+              <div v-for="(x, r) in EXTRAS" :key="x.slot" class="animate-skeleton rounded-lg bg-secondary/40" :style="{ '--i': 4 + r, height: `${(dockGeo.cellH - 8) / 2}px` }"></div>
+            </div>
+          </div>
+        </div>
+        <div class="flex flex-1 gap-3 overflow-hidden px-4 pb-4 pt-3">
+          <div v-for="c in 3" :key="'col' + c" class="flex min-w-[212px] max-w-[460px] flex-1 flex-col">
+            <div class="flex items-baseline border-b border-border/60 px-1 pb-2">
+              <span class="animate-skeleton rounded bg-secondary/40 text-f11 font-semibold uppercase tracking-cs2 text-transparent" :style="{ '--i': c }">Pistols</span>
+            </div>
+            <div class="flex flex-col gap-2 pt-2">
+              <div v-for="r in 5" :key="'cell' + r" class="animate-skeleton flex-none rounded-lg bg-secondary/40" :style="{ '--i': r * 3 + c, height: `${dockGeo.cellH}px` }"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div
+        v-if="!dockSmall"
+        class="absolute bottom-0 right-0 top-0 z-[5] flex flex-col border-l border-border bg-background"
+        :style="{ width: `${dockPickerW}px` }"
+      >
+        <div class="flex flex-none flex-col gap-5 border-b border-border px-4 py-2.5">
+          <div class="flex items-center gap-2.5">
+            <div class="animate-skeleton h-8 w-[217px] rounded-lg bg-secondary/40" :style="{ '--i': 0 }"></div>
+            <div class="animate-skeleton ml-auto h-8 w-[320px] max-w-[40%] rounded-md bg-secondary/40" :style="{ '--i': 1 }"></div>
+          </div>
+          <div class="flex items-center gap-2.5">
+            <div class="animate-skeleton h-8 w-[129px] rounded-md bg-secondary/40" :style="{ '--i': 2 }"></div>
+            <div class="animate-skeleton h-8 w-[114px] rounded-md bg-secondary/40" :style="{ '--i': 3 }"></div>
+            <div class="animate-skeleton h-8 w-8 rounded-md bg-secondary/40" :style="{ '--i': 4 }"></div>
+            <div class="animate-skeleton h-8 w-[174px] rounded-md bg-secondary/40" :style="{ '--i': 5 }"></div>
+            <div class="animate-skeleton ml-auto h-4 w-[118px] rounded-full bg-secondary/40" :style="{ '--i': 6 }"></div>
+          </div>
+        </div>
+        <div
+          class="grid min-h-0 flex-1 content-start gap-2.5 overflow-hidden px-6 pb-6 pt-3.5"
+          :style="{ gridTemplateColumns: pickerCardTracks.columns, gridAutoRows: pickerCardTracks.row }"
+        >
+          <div v-for="r in 4" :key="'sh' + r" class="animate-skeleton rounded-lg bg-secondary/40" :style="{ '--i': r }"></div>
+        </div>
+      </div>
+    </div>
+    <div v-else-if="loading && !isCompact" aria-busy="true" class="flex min-h-0 flex-1 flex-col overflow-hidden">
       <div class="flex min-h-0 flex-1 overflow-hidden">
         <div class="flex w-full min-w-[200px] max-w-[340px] flex-1 flex-col pb-3 pl-4 pr-1 pt-3">
           <div class="flex items-baseline border-b border-border/60 px-1 pb-2">
@@ -9075,38 +10066,51 @@ if (MDEBUG) {
       <!-- `relative` makes this the containing block for the desktop picker
            sheet, which floats over the loadout instead of sitting under it; the
            existing overflow-hidden then clips it to the loadout area. -->
-      <div v-else ref="loadoutEl" key="loadout" class="relative flex min-h-0 flex-1 flex-col overflow-hidden">
+      <div v-else ref="loadoutEl" key="loadout" class="relative flex min-h-0 flex-1 flex-col overflow-hidden" :data-dock="docked && canLift ? '' : undefined" :style="dockVars">
       <!-- Stacks on compact so the focus rail can sit above the stage as a
            strip rather than beside it as a fixed 122px column.
-           The padding is the space the sheet used to occupy in flow: reserving
-           it here means the collapsed layout is unchanged and a lift moves
-           nothing but the sheet. -->
+           The padding is the room the picker takes: beside the loadout when
+           docked, the peek height on compact. -->
       <!-- `isolate` keeps this half's z-indexes to itself — the focus-view 3D
            cursor overlay sits at z-20 and would otherwise punch up through the
-           lifted sheet. With a stacking context here the sheet only has to
+           picker. With a stacking context here the sheet only has to
            out-rank one element, so it can stay at a low enough z to lose to the
            host's drawers. -->
       <div class="relative isolate flex min-h-0 flex-1 overflow-hidden" :class="isCompact && 'flex-col'" :style="loadoutPadStyle">
         <!-- Slot rail (focus view only): the WHOLE loadout, mini. This is the
              only navigation focus mode needs — no strip under the stage. -->
         <nav
-          v-if="view === 'focus'"
+          v-if="view === 'focus' || spotlight"
           class="flex flex-none gap-3"
-          :class="isCompact
-            ? 'animate-rail-in-top w-full flex-row overflow-x-auto border-b border-border px-2.5 py-2'
-            : 'animate-rail-in w-[122px] flex-col overflow-y-auto border-r border-border px-2.5 py-3'"
+          :class="[
+            isCompact
+              ? 'animate-rail-in-top w-full flex-row overflow-x-auto border-b border-border px-2.5 py-2'
+              : 'animate-rail-in w-[122px] flex-col overflow-y-auto border-r border-border px-2.5 py-3',
+            spotlight && 'absolute inset-y-0 left-0 z-[1] bg-background',
+          ]"
+          :style="spotlight ? { width: DOCK_SPOT_RAIL_W + 'px' } : undefined"
           @pointerdown="onSlotPointerDown"
           @pointermove="onSlotPointerMove"
           @pointerup="cancelLongPress"
           @pointercancel="cancelLongPress"
           @click.capture="onSlotClickCapture"
         >
+          <button
+            v-if="spotlight"
+            class="flex h-8 w-full flex-none items-center justify-center rounded-md border border-[hsl(var(--tac-amber,33_94%_58%)/0.55)] bg-[hsl(var(--tac-amber,33_94%_58%)/0.12)] text-f10 font-semibold uppercase tracking-cs1 text-foreground transition-colors hover:bg-[hsl(var(--tac-amber,33_94%_58%)/0.22)]"
+            title="Back to the loadout (Esc)"
+            @click="dockOpen = false"
+          >Back to Loadout</button>
           <section v-for="grp in focusRail" :key="grp.key" class="flex flex-none flex-col gap-1.5">
             <div class="px-0.5 text-f8 uppercase tracking-cs3 text-muted-foreground/60">{{ grp.label }}</div>
             <!-- Compact turns each group into a single scrolling row so the
                  whole loadout stays reachable without a 122px column eating a
                  third of the width. -->
-            <div class="grid gap-1.5" :class="isCompact ? 'grid-flow-col grid-rows-1' : 'grid-cols-2'">
+            <div
+              class="grid gap-1.5"
+              :class="isCompact ? 'grid-flow-col grid-rows-1' : 'grid-cols-2'"
+              :style="spotlight ? { gridTemplateColumns: 'repeat(3, minmax(0, 1fr))' } : undefined"
+            >
               <button
                 v-for="it in grp.items"
                 :key="it.pos"
@@ -9119,7 +10123,7 @@ if (MDEBUG) {
                     : 'border-border/60 bg-secondary/30 hover:border-muted-foreground/40 hover:bg-secondary/60',
                   pulsePos === it.pos && 'animate-equip-pulse',
                 ]"
-                :style="[selRing(selected === it.pos), it.rarity ? { borderBottom: `2px solid ${it.rarity}` } : {}, dropStyle(it.pos)]"
+                :style="[selRing(selected === it.pos), it.rarity ? { borderBottom: `2px solid ${it.rarity}` } : {}, dropStyle(it.pos), spotlight ? { height: dockRailTileH + 'px', aspectRatio: 'auto' } : {}]"
                 :title="it.name"
                 @click="selectPos(it.pos)"
                 @contextmenu.prevent="openCtx(it.pos, $event)"
@@ -9173,8 +10177,9 @@ if (MDEBUG) {
           :preview-pos="previewPos"
           :drop-style="dropStyle"
           :reorder-style="reorderStyle"
-          :pulse-pos="pulsePos"
-          :select-pos="viewerId ? openSlot : selectPos"
+          :pulse-pos="spotlight ? null : pulsePos"
+          :memo="docked"
+          :select-pos="viewerId ? openSlot : dockSelectPos"
           :open-ctx="openCtx"
           :on-slot-drag-over="onSlotDragOver"
           :on-slot-drop="onSlotDrop"
@@ -9187,8 +10192,6 @@ if (MDEBUG) {
           :on-slot-pointer-move="onSlotPointerMove"
           :cancel-long-press="cancelLongPress"
           :on-slot-click-capture="onSlotClickCapture"
-          :lift-intrusion="liftIntrusion"
-          :lift-scroll-style="liftScrollStyle"
           @slot-drag-leave="slotDragLeave"
         />
 
@@ -9399,11 +10402,144 @@ if (MDEBUG) {
            internals can't reach up here), low enough to stay UNDER the host
            panel's own chrome — the notifications and friends drawers are fixed
            at z-10, and at z-40 this sheet painted straight over them. -->
+      <!-- Spotlight: the clicked weapon, big, beside the picker -->
+      <!-- One backdrop over the whole loadout, under the picker: it covers the
+           grid the moment Spotlight opens (no strip of grid beside the sliding
+           picker), and on close it fades all at once, slot list's area included,
+           so the grid comes back evenly while the weapon flies home on top. -->
+      <Transition
+        enter-active-class="transition-opacity duration-100 ease-out motion-reduce:transition-none"
+        enter-from-class="opacity-0"
+        leave-active-class="transition-opacity duration-200 ease-in motion-reduce:transition-none !left-0"
+        leave-to-class="opacity-0"
+      >
+        <div
+          v-if="spotlight"
+          aria-hidden="true"
+          class="pointer-events-none absolute inset-y-0 right-0 z-[4] bg-background"
+          :style="{ left: DOCK_SPOT_RAIL_W + 'px' }"
+        ></div>
+      </Transition>
+      <Transition :css="false" @enter="spotEnter" @leave="spotLeave">
+        <div
+          v-if="spotlight"
+          data-spot-panel
+          class="absolute inset-y-0 z-[4] flex flex-col overflow-hidden border-r border-border"
+          :style="{ left: DOCK_SPOT_RAIL_W + 'px', width: spotW + 'px' }"
+        >
+          <div data-spot="glow" class="pointer-events-none absolute inset-0">
+            <span
+              class="absolute inset-0"
+              :style="dockGlow ? { background: `radial-gradient(60% 50% at 50% 46%, ${dockGlow}, transparent 66%)`, filter: 'blur(36px)', opacity: 0.45 } : {}"
+            ></span>
+          </div>
+          <div data-spot="head" class="relative z-[3] flex items-start justify-between gap-3 px-6 pt-5">
+            <div class="flex min-w-0 flex-col gap-1.5">
+              <div class="flex h-5 min-w-0 items-center gap-2">
+                <span class="truncate text-f10 uppercase tracking-cs2 text-muted-foreground">{{ focusSlotLabel }}</span>
+                <Transition
+                  mode="out-in"
+                  enter-active-class="transition duration-150 ease-out motion-reduce:transition-none"
+                  enter-from-class="opacity-0 scale-95"
+                  leave-active-class="transition duration-100 ease-in motion-reduce:transition-none"
+                  leave-to-class="opacity-0"
+                >
+                  <span
+                    v-if="dockEquipped"
+                    key="eq"
+                    class="flex-none rounded border border-[hsl(var(--tac-amber,33_94%_58%)/0.55)] bg-[hsl(var(--tac-amber,33_94%_58%)/0.14)] px-1.5 py-0.5 text-f9 font-semibold uppercase tracking-cs1 text-foreground"
+                  >Equipped</span>
+                  <span
+                    v-else-if="dockPreviewing"
+                    key="pv"
+                    class="flex-none rounded border border-[color:var(--acc)] px-1.5 py-0.5 text-f9 uppercase tracking-cs1 text-foreground"
+                  >Preview</span>
+                </Transition>
+              </div>
+              <PriceTag
+                class="transition-opacity duration-150"
+                :class="dockPreviewing && 'opacity-0'"
+                size="md"
+                :value="spotFacts.value"
+                :missing="spotFacts.valueMissing"
+                :title="spotFacts.valueTip"
+              />
+            </div>
+            <div class="flex flex-none items-center gap-2">
+              <StageTabs v-if="spotTarget" :is3d="spot3d" list-class="h-8" @update:is3d="(v) => (spot3d = v)" />
+              <div class="flex items-center gap-2 transition-opacity duration-150" :class="dockPreviewing && 'opacity-0'">
+              <SlotStatus inline :teams="spotFacts.teams" :inst="spotFacts.inst" />
+              <div class="[&>span]:!static [&>span]:!opacity-100">
+                <TileActions
+                  :inst="spotFacts.inst"
+                  focus
+                  @focus="cellActions(selected).focus()"
+                  @view3d="cellActions(selected).view3d()"
+                  @inspect="cellActions(selected).inspect()"
+                  @edit="cellActions(selected).edit()"
+                  @duplicate="cellActions(selected).duplicate()"
+                  @remove="cellActions(selected).remove()"
+                />
+              </div>
+              </div>
+            </div>
+          </div>
+          <div class="relative z-[2] grid min-h-0 flex-1 place-items-center px-6">
+            <Transition
+              enter-active-class="transition duration-150 ease-out motion-reduce:transition-none"
+              enter-from-class="opacity-0 scale-[0.985]"
+              leave-active-class="transition duration-100 ease-in motion-reduce:transition-none"
+              leave-to-class="opacity-0"
+            >
+              <div :key="dockArtKey" data-spot-art class="grid h-full w-full min-h-0 place-items-center [grid-area:1/1]">
+                <img
+                  :src="dockHover ? dockHover.src : spotSrc"
+                  alt=""
+                  :class="cn('h-full min-h-0 w-[88%] object-contain transition-opacity duration-200', !dockHover && 'animate-float motion-reduce:animate-none', !dockHover && !isSkinned(focusRow) && 'opacity-50', dockShow3d && 'opacity-0')"
+                  style="filter: drop-shadow(0 22px 30px rgba(0,0,0,0.55))"
+                />
+              </div>
+            </Transition>
+            <div
+              ref="spotHostEl"
+              data-spot-3d
+              class="absolute inset-0 transition-opacity duration-200 motion-reduce:transition-none"
+              :class="dockShow3d ? 'opacity-100' : 'pointer-events-none opacity-0'"
+            ></div>
+          </div>
+          <div data-spot="foot" class="relative z-[3] flex min-w-0 flex-col gap-2 px-6 pb-6">
+            <span class="truncate text-f11 uppercase tracking-cs2 text-muted-foreground">{{ focusIdentityName.weapon }}</span>
+            <div class="flex h-7 min-w-0 items-center gap-2.5">
+              <span class="min-w-0 truncate text-[22px] font-semibold leading-tight">{{ dockPreviewing ? dockHover?.name : focusIdentityName.finish }}</span>
+              <ItemBadges
+                :class="dockPreviewing && 'invisible'"
+                :inst="spotFacts.badges"
+                :max="4"
+              />
+            </div>
+            <div class="h-9 overflow-hidden transition-opacity duration-150" :class="dockPreviewing && 'opacity-0'">
+              <WearBar
+                v-if="spotFacts.wear != null"
+                :item="spotFacts.item"
+                :wear="spotFacts.wear"
+                :seed="spotFacts.seed"
+                class="w-[min(100%,340px)]"
+              />
+            </div>
+          </div>
+        </div>
+      </Transition>
       <section
         v-if="!viewerId"
         data-role="picker-sheet"
         class="absolute inset-x-0 bottom-0 z-[5] flex flex-col border-t border-border bg-background"
         :style="sheetStyle"
+        :inert="dockSmall && !dockOpen ? true : undefined"
+        :data-dock-opening="dockOpening ? '' : undefined"
+        @pointerover="dockCardHover"
+        @pointermove="dockArmHover"
+        @load.capture="dockArtLanded"
+        @pointerleave="dockHover = null"
       >
         <!-- ============ SHEET HEADER (compact: the drag surface) ============
              The ENTIRE header drags — pill, toolbar and tally together, not
@@ -9427,7 +10563,8 @@ if (MDEBUG) {
              box absorbs the pressure by shrinking instead. -->
         <div
           class="flex items-center border-b border-border"
-          :class="isCompact ? 'flex-wrap gap-2 px-3 py-2' : 'gap-2.5 px-6 py-2.5'"
+          :class="isCompact ? 'flex-wrap gap-2 px-3 py-2' : docked ? 'flex-wrap gap-2.5 px-4 py-2.5' : 'gap-2.5 px-6 py-2.5'"
+          :data-dock-toolbar="docked ? '' : undefined"
         >
           <!-- Sheet-mode tabs: same sliding pill as the view tabs, pinned first
                so nothing in this row ever jumps around. Stays auto-width at
@@ -9556,7 +10693,7 @@ if (MDEBUG) {
           <!-- Compact moves search into the filter sheet: sharing the row with
                the tabs left it ~99px wide and pushed the filter chip onto a
                line of its own, spending 40px to show one button. -->
-          <div v-if="!isCompact" class="relative w-[220px] min-w-[128px] shrink">
+          <div v-if="!isCompact" class="relative w-[220px] min-w-[128px] shrink" data-dock-tb="search">
             <Search class="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
             <input
               ref="sheetSearchEl"
@@ -9571,18 +10708,17 @@ if (MDEBUG) {
               @click="sheetSearch = ''; sheetSearchEl?.focus()"
             ><X class="h-3.5 w-3.5" /></button>
           </div>
-          <!-- The only way in or out of the lift, and it stays put across
-               sessions: the panel changes size when you ask it to and at no
-               other time. -->
           <button
-            v-if="canLift"
-            class="grid h-8 w-8 flex-none place-items-center rounded-md border border-border text-muted-foreground tac-action"
-            :title="sheetLift ? 'Lower the picker' : 'Raise the picker over the loadout'"
-            :aria-expanded="sheetLift"
-            @click="sheetLift = !sheetLift"
+            v-if="dockOpenNow"
+            data-dock-tb="close"
+            class="grid h-8 w-8 flex-none place-items-center rounded-md border border-border text-foreground tac-action"
+            title="Back to the loadout (Esc)"
+            aria-label="Close the picker"
+            @click="dockOpen = false"
           >
-            <ChevronUp class="h-4 w-4 transition-transform duration-200" :class="sheetLift && 'rotate-180'" />
+            <X class="h-4 w-4" />
           </button>
+          <span v-if="docked" data-dock-tb="break" aria-hidden="true"></span>
           <!-- Compact-only disclosure for rarity/sort/origin. Badged so a
                filter left on somewhere out of sight is still visible. -->
           <!-- Owns search as well as the filters on compact, so it shows in
@@ -9820,10 +10956,11 @@ if (MDEBUG) {
               borderColor: 'hsl(var(--tac-amber, 33 94% 58%) / 0.55)',
               background: 'hsl(var(--tac-amber, 33 94% 58%) / 0.12)',
             }"
-            @click="sheetDesign = null"
+            @click="dockBackOutOfDeck()"
           >
             <ChevronLeft class="h-4 w-4" />
             Back
+            <kbd v-if="docked" class="ml-1 rounded border border-border/70 px-1 font-mono text-f8 font-normal normal-case tracking-normal text-muted-foreground">Esc</kbd>
           </button>
           <span class="min-w-0 truncate text-f11 uppercase tracking-cs2 text-foreground">{{ sheetDesignName }}</span>
           <span class="flex-none text-f9 uppercase tracking-cs1 text-muted-foreground">
@@ -9834,15 +10971,18 @@ if (MDEBUG) {
 
         <Transition
           mode="out-in"
-          enter-active-class="transition duration-150"
-          enter-from-class="opacity-0"
-          leave-active-class="transition duration-100"
-          leave-to-class="opacity-0"
+          :enter-active-class="docked ? (dockDrill ? 'transition-[opacity,transform] duration-200 ease-[cubic-bezier(0.23,1,0.32,1)] motion-reduce:transition-none' : 'transition-opacity duration-150 ease-out motion-reduce:transition-none') : 'transition duration-150'"
+          :enter-from-class="docked && dockOpening ? '' : docked ? dockContentEnter : 'opacity-0'"
+          :leave-active-class="docked ? '' : 'transition duration-100'"
+          :leave-to-class="docked ? '' : 'opacity-0'"
+          v-bind="docked ? { onLeave: dockLeaveNow } : {}"
+          @before-enter="dockGridEntered"
+          @after-enter="dockDrill = null"
         >
         <!-- One unit per mode and sheet, the knife/glove rail included: the
              rail fades with the grid it belongs to, instead of popping in over
              the old grid while that one is still fading out. -->
-        <div :key="sheetMode + '|' + sheetKey" class="flex min-h-0 flex-1 flex-col">
+        <div :key="sheetMode + '|' + sheetKey + (docked ? '|' + (sheetDesign ?? '') : '')" class="flex min-h-0 flex-1 flex-col">
         <!-- Knives and gloves: the model rail (see craftModelList). Above the
              scroller, not in it: pinned for free, and the Jump menu opens over
              the grid instead of being clipped by it. Its height is held while
@@ -9888,7 +11028,10 @@ if (MDEBUG) {
             // the rail; the usual top padding was a dead band above it.
             sheetMode === 'craft' && craftLabels ? 'pt-0' : isCompact ? 'pt-2' : 'pt-3.5',
           ]"
-          :style="pickerGridStyle"
+          :style="[
+            pickerGridStyle,
+            sheetListPadPx ? { paddingBottom: `calc(2rem + ${sheetListPadPx}px)` } : null,
+          ]"
           @scroll.passive="onSheetScroll"
         >
           <!-- OWNED: your skins for the slot's weapon -->
@@ -9909,10 +11052,11 @@ if (MDEBUG) {
               v-if="isSpecial(selected) && specialDefault(selected)"
               data-role="skin"
               class="animate-sheet-in relative overflow-hidden rounded-lg border bg-card text-left transition-colors hover:border-muted-foreground/40"
-              :class="[SHEET_ENTRY, !isSkinned(rowFor(selected)) ? 'border-[color:var(--acc)]' : 'border-border']"
+              :class="[SHEET_ENTRY, 'group', !isSkinned(rowFor(selected)) ? 'border-[color:var(--acc)]' : 'border-border']"
               :style="{ '--i': 1 }"
-              @click="clearSlot(selected)"
+              @click="dockDefaultClick(() => clearSlot(selected))"
             >
+
               <div :class="SHEET_ART">
                 <img
                   :src="specialDefault(selected)?.image ?? undefined"
@@ -9930,10 +11074,11 @@ if (MDEBUG) {
               v-if="isWeaponPos(selected) && occupantWeapon(selected)"
               data-role="skin"
               class="animate-sheet-in relative overflow-hidden rounded-lg border bg-card text-left transition-colors hover:border-muted-foreground/40"
-              :class="[SHEET_ENTRY, !isSkinned(rowFor(selected)) ? 'border-[color:var(--acc)]' : 'border-border']"
+              :class="[SHEET_ENTRY, 'group', !isSkinned(rowFor(selected)) ? 'border-[color:var(--acc)]' : 'border-border']"
               :style="{ '--i': 1 }"
-              @click="equipDefaultAt(occupantWeapon(selected)!, selected)"
+              @click="dockDefaultClick(() => equipDefaultAt(occupantWeapon(selected)!, selected))"
             >
+
               <div :class="SHEET_ART">
                 <img :src="occupantWeapon(selected)!.image ?? undefined" alt="" class="max-h-full max-w-full object-contain" />
               </div>
@@ -9958,7 +11103,9 @@ if (MDEBUG) {
                 :count="st.variants.length"
                 role="skin"
                 :strip-suffix="TINT_SUFFIX"
-                @open="sheetDesign = st.face.item?.design ?? null"
+                @open="dockOpenDeck(st.face.item?.design ?? null, st.variants)"
+                @pointerenter="dockDeckHover(st.variants)"
+                @pointerleave="dockDeckHover(null)"
               />
               <ItemTile
                 v-else
@@ -9977,7 +11124,7 @@ if (MDEBUG) {
                 show-header
                 :row="sheetRows"
                 :active="String(rowFor(selected)?.item_instance_id) === String(st.face.id)"
-                @click="tapOpensMenu ? openItemCtxFor(st.face) : equipInstanceAt(st.face, selected)"
+                @click="dockTileClick(st.face)"
                 @contextmenu.prevent="openItemCtx(st.face, $event)"
                 @longpress="openItemCtxFor(st.face)"
                 @view3d="view3dForInstance(st.face)"
@@ -10059,7 +11206,9 @@ if (MDEBUG) {
                   data-role="skin"
                   class="group relative flex h-full w-full flex-col overflow-hidden rounded-lg border border-border bg-card px-2.5 py-2.5 text-left transition-colors hover:border-[color:var(--acc)]"
                   :style="st.face.rarity ? { borderBottom: `3px solid ${st.face.rarity}` } : {}"
-                  @click="st.variants.length > 1 ? (sheetDesign = st.face.design ?? null) : openCraft(st.face)"
+                  @click="st.variants.length > 1 ? dockOpenDeck(st.face.design ?? null, st.variants) : openCraft(st.face)"
+                  @pointerenter="dockDeckHover(st.variants)"
+                  @pointerleave="dockDeckHover(null)"
                 >
                   <span class="pointer-events-none absolute inset-0" :style="glowStyle(st.face.rarity, 0.22)"></span>
                   <!-- A stack isn't craftable as such — you pick a colour first
@@ -10234,7 +11383,7 @@ if (MDEBUG) {
       v-if="craft"
       class="fixed inset-0 flex items-center justify-center bg-background/85 backdrop-blur-sm" :style="{ zIndex: Z.modal }"
       role="dialog" aria-modal="true" aria-label="Item editor"
-      :class="isCompact || !viewOnly ? 'p-0' : 'p-4'"
+      :class="isCompact || !viewOnly || docked ? 'p-0' : 'p-4'"
       @click.self="picker ? (picker = null) : closeCraft()"
     >
       <!-- EDITING FILLS THE SCREEN; VIEWING IS A CARD.
@@ -10250,7 +11399,7 @@ if (MDEBUG) {
            in half of it; 1800x1240 keeps the same ~1.45:1 card, just larger. -->
       <div
         class="relative flex flex-col overflow-hidden bg-card shadow-2xl animate-pop-in"
-        :class="isCompact || !viewOnly
+        :class="isCompact || !viewOnly || docked
           ? 'h-full w-full'
           : 'h-[min(92vh,1240px)] w-[min(96vw,1800px)] rounded-lg border border-border'"
       >
@@ -10599,6 +11748,9 @@ if (MDEBUG) {
             <div v-if="attachKind === 'weapon'" class="animate-sheet-in rounded-md bg-secondary/40 p-2.5" :style="{ '--i': 1 }">
               <div class="mb-1.5 flex items-baseline gap-2">
                 <span class="text-f10 uppercase tracking-cs1 text-muted-foreground">Stickers</span>
+                <!-- A souvenir's stickers are the event's: picked in the
+                     Souvenir box, still scratched and placed here. -->
+                <span v-if="craft.souvenir" class="ml-auto text-f9 text-[hsl(var(--tac-souvenir))]">Set by Souvenir</span>
               </div>
               <!-- A picked Sticker Craft, waiting to be dragged onto the gun —
                    see useStickerCraftPlacement. The whole card is the handle. -->
@@ -10673,9 +11825,9 @@ if (MDEBUG) {
                     craftPendingSlots.has(idx) && '!border-dashed !border-[color:var(--acc)]',
                     craftGroupSlots.has(idx) && (craftGroup?.linked ? 'shadow-[inset_0_-2px_0_var(--acc)]' : 'shadow-[inset_0_-2px_0_color-mix(in_srgb,var(--acc)_35%,transparent)]'),
                   ]"
-                  :title="craftPending ? (craftPendingSlots.has(idx) ? 'Kept for ' : 'Waiting on ') + craftPending.entry.name + ' — place it or put it back first' : st ? st.name + ' (slot ' + (idx + 1) + ') — drag onto another slot to reorder; later slots draw on top' : 'Add a sticker in slot ' + (idx + 1)"
+                  :title="craftPending ? (craftPendingSlots.has(idx) ? 'Kept for ' : 'Waiting on ') + craftPending.entry.name + ' — place it or put it back first' : craft.souvenir ? (st ? st.name + ' — a souvenir sticker, chosen in Souvenir' : 'A souvenir carries only its event\'s stickers — choose them in Souvenir') : st ? st.name + ' (slot ' + (idx + 1) + ') — drag onto another slot to reorder; later slots draw on top' : 'Add a sticker in slot ' + (idx + 1)"
                   :draggable="!!st && !craftPending"
-                  @click="!craftPending && openPicker('sticker', idx)"
+                  @click="!craftPending && !craft.souvenir && openPicker('sticker', idx)"
                   @dragstart="stickerDragFrom = idx; $event.dataTransfer?.setData('text/plain', String(idx))"
                   @dragover.prevent="!craftPending && stickerDragFrom != null && (stickerDropOn = idx)"
                   @dragleave="stickerDropOn === idx && (stickerDropOn = null)"
@@ -10686,7 +11838,7 @@ if (MDEBUG) {
                   <img v-if="st?.image" :src="st.image" alt="" class="max-h-8 max-w-full object-contain" />
                   <Plus v-else class="h-3.5 w-3.5" />
                   <span
-                    v-if="st"
+                    v-if="st && !craft.souvenir"
                     class="absolute -right-1 -top-1 z-[2] rounded-full bg-background p-0.5 text-muted-foreground opacity-0 transition-opacity hover:text-foreground group-hover/st:opacity-100"
                     @click.stop="!craftPending && (craft!.stickers[idx] = null)"
                   ><X class="h-3 w-3" /></span>
@@ -10726,7 +11878,7 @@ if (MDEBUG) {
                   @pointerdown="(e: PointerEvent) => stickerRowsTopFirst.length > 1 && !craftPending && stickerSort.press(e, 'gun', pos)"
                   @wear="(w: number) => setStickerWear(idx, w)"
                   @place="(k: 'x' | 'y' | 'r', v: number) => placeSticker(idx, k, v)"
-                  @remove="!craftPending && (craft!.stickers[idx] = null)"
+                  @remove="!craftPending && !craft!.souvenir && (craft!.stickers[idx] = null)"
                 />
               </div>
             </div>
@@ -10771,8 +11923,21 @@ if (MDEBUG) {
                    coordinates at it is the problem the rail solves. The rail
                    owns the readout and it is still click-to-edit, so a pattern
                    quoted from a trade site is no harder to enter than before. -->
+              <!-- A HIGHLIGHT charm (Austin 2025, Budapest 2025, Cologne 2026)
+                   has no pattern: which highlight it carries is its look, and
+                   the game shows a blank reel without one. -->
+              <HighlightPicker
+                v-if="craft.charm && reelCharms.get(craft.charm.id)"
+                class="mt-2"
+                :charm-id="craft.charm.id"
+                :model-value="craft.charm.highlight ?? null"
+                auto-pick
+                @update:model-value="craft!.charm!.highlight = $event"
+              />
+              <!-- `v-else`: an unanswered lookup (or a failed one) draws the rail,
+                   as before reels existed — only a known reel hides it. -->
               <PatternRail
-                v-if="craft.charm"
+                v-else-if="craft.charm"
                 class="mt-2"
                 :model-value="craft.charm.seed ?? 0"
                 :image="craft.charm.image"
@@ -10806,7 +11971,19 @@ if (MDEBUG) {
             <!-- The panel goes with the rail when the charm has no pattern to
                  pick. Hiding the control alone would leave an empty card. -->
             <div
-              v-if="craftHasSeed && craftSeedIsCharm && !craftCharmInert"
+              v-if="craftSeedIsCharm && reelCharms.get(craft.skin.id)"
+              class="animate-sheet-in rounded-md bg-secondary/40 p-2.5"
+              :style="{ '--i': 3 }"
+            >
+              <HighlightPicker
+                :charm-id="craft.skin.id"
+                :model-value="craft.highlight"
+                auto-pick
+                @update:model-value="craft!.highlight = $event"
+              />
+            </div>
+            <div
+              v-if="craftHasSeed && craftSeedIsCharm && !craftCharmInert && reelCharms.get(craft.skin.id) !== true"
               class="animate-sheet-in rounded-md bg-secondary/40 p-2.5"
               :style="{ '--i': 3 }"
             >
@@ -10995,7 +12172,7 @@ if (MDEBUG) {
                   :aria-checked="craft.stattrak"
                   class="relative h-5 w-9 flex-none rounded-full transition-colors"
                   :class="craft.stattrak ? 'bg-[#e0a92e]' : 'bg-muted'"
-                  @click="craft.stattrak = !craft.stattrak"
+                  @click="setCraftStatTrak(!craft.stattrak)"
                 >
                   <span
                     class="absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform"
@@ -11009,6 +12186,42 @@ if (MDEBUG) {
                 <span class="w-16 flex-none text-f10 uppercase tracking-cs1 text-muted-foreground">Kills</span>
                 <span class="font-mono text-f13 tabular-nums text-foreground">{{ craftStatTrakCount().toLocaleString() }}</span>
               </div>
+            </div>
+            <!-- SOUVENIR (cs2-lib 9.10): every painted gun can be one. Its
+                 stickers are an event's — two teams, the event, an autograph
+                 and the map — so switching it on hands the sticker slots to
+                 the panel below, and switching it off clears them. One quality
+                 in game: StatTrak goes off when this goes on, and back. -->
+            <div
+              v-if="craftHasSouvenir"
+              class="animate-sheet-in rounded-md bg-secondary/40 p-2.5"
+              :style="{ '--i': 5 }"
+            >
+              <div class="flex items-center justify-between">
+                <span class="text-f10 uppercase tracking-cs1" :class="craft.souvenir ? 'text-[hsl(var(--tac-souvenir))]' : 'text-muted-foreground'">Souvenir</span>
+                <button
+                  role="switch"
+                  :aria-checked="craft.souvenir"
+                  aria-label="Souvenir"
+                  class="relative h-5 w-9 flex-none rounded-full transition-colors"
+                  :class="craft.souvenir ? 'bg-[hsl(var(--tac-souvenir))]' : 'bg-muted'"
+                  @click="setCraftSouvenir(!craft.souvenir)"
+                >
+                  <span
+                    class="absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform"
+                    :class="craft.souvenir && 'translate-x-4'"
+                  ></span>
+                </button>
+              </div>
+              <SouvenirPanel
+                v-if="craft.souvenir"
+                class="mt-2.5"
+                :item-id="craft.skin.id"
+                :sticker-ids="craft.stickers.map((st) => st?.id ?? null)"
+                :highlight-id="craft.charm?.highlight ?? null"
+                @stickers="applySouvenirStickers"
+                @charm="applySouvenirCharm"
+              />
             </div>
             <!-- Music kits: the kit IS its sound, so the editor plays it — the
                  full menu theme and, when the mount has it, the round-MVP
@@ -11211,7 +12424,8 @@ if (MDEBUG) {
         <button
           v-if="ctx && !['agent', 'graffiti', 'musickit', 'collectible', 'pet'].includes(ctx.pos)"
           :class="[MENU_ROW, 'disabled:opacity-40 disabled:hover:bg-transparent']"
-          :disabled="!equippedInstance(ctx.pos)"
+          :disabled="!equippedInstance(ctx.pos) || equippedInstance(ctx.pos)?.souvenir === true"
+          :title="equippedInstance(ctx.pos)?.souvenir ? 'A Souvenir can\'t be StatTrak™' : undefined"
           @click="ctxStatTrak"
         >
           <Sparkles class="h-3.5 w-3.5" /> Toggle StatTrak™
@@ -11246,12 +12460,12 @@ if (MDEBUG) {
         v-if="loadout3d"
         class="fixed inset-0 flex items-center justify-center bg-background" :style="{ zIndex: Z.stage }"
         role="dialog" aria-modal="true" aria-label="3D view"
-        :class="isCompact ? 'p-0' : 'p-6'"
+        :class="isCompact || docked ? 'p-0' : 'p-6'"
         @click="dismissLoadout3d"
       >
         <div
           class="relative flex flex-col overflow-hidden bg-card shadow-2xl animate-pop-in"
-          :class="isCompact
+          :class="isCompact || docked
             ? 'h-full w-full'
             : 'h-[min(88vh,900px)] w-[min(96vw,1400px)] rounded-lg border border-border'"
           @click.stop
@@ -11295,6 +12509,15 @@ if (MDEBUG) {
                 <span class="text-f11 uppercase tracking-cs2">Loading 3D model…</span>
               </div>
             </div>
+          </div>
+          <!-- Equip the default from its own preview, in the same
+               footer and the same spot as the item modal's Equip. -->
+          <div v-if="dockDefaultApplyFn" class="flex items-center justify-end border-t border-border" :class="isCompact ? 'gap-2 px-3 py-2.5' : 'gap-3 px-5 py-3.5'">
+            <button class="flex h-9 items-center rounded-md border border-transparent px-4 text-f11 font-semibold uppercase tracking-wider text-muted-foreground transition-colors hover:text-foreground" @click="dismissLoadout3d">Close</button>
+            <button
+              class="tac-cta flex h-9 items-center gap-1.5 rounded-md border border-transparent px-4 text-f11 font-bold uppercase tracking-wider"
+              @click="() => { const fn = dockDefaultApplyFn; dismissLoadout3d(); fn?.(); }"
+            >Equip</button>
           </div>
         </div>
       </div>
@@ -11509,7 +12732,7 @@ if (MDEBUG) {
           </button>
         </template>
         <button
-          v-if="itemCtx && !['agent', 'graffiti', 'musickit', 'collectible', 'pet'].includes(itemCtx.inst.slot ?? '')"
+          v-if="itemCtx && !itemCtx.inst.souvenir && !['agent', 'graffiti', 'musickit', 'collectible', 'pet'].includes(itemCtx.inst.slot ?? '')"
           :class="MENU_ROW"
           @click="itemCtxStatTrak"
         >

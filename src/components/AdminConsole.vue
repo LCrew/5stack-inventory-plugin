@@ -24,6 +24,7 @@ import {
 } from "lucide-vue-next";
 import SkinTests from "./SkinTests.vue";
 import ValveParity from "./ValveParity.vue";
+import { ADMIN_TABS } from "../adminTabs";
 import { FLAGS, activeFlags, flagValue, flagsVersion, setFlag } from "../devFlags";
 import {
   API_ORIGIN,
@@ -99,14 +100,8 @@ const isAdmin = computed(() => props.user?.role === "administrator");
 const fail = (e: unknown) => emit("notify", e instanceof Error ? e.message : String(e), "error");
 
 // ---- side tabs --------------------------------------------------------------
-const TABS = [
-  { key: "", label: "Game Server" },
-  { key: "assets", label: "Asset Cache" },
-  { key: "prices", label: "Prices" },
-  { key: "models", label: "3D Models" },
-  { key: "tests", label: "Skin Tests" },
-  { key: "dev", label: "Developer" },
-] as const;
+// Shared with App, which names the open tab in the panel's breadcrumbs.
+const TABS = ADMIN_TABS;
 const activeKey = computed(() => {
   const s = props.section ?? "";
   return TABS.some((t) => t.key === s) ? s : "";
@@ -644,7 +639,7 @@ async function doStartExtract() {
 }
 
 // ---- workers ----------------------------------------------------------------
-// A memory dial. Each decompile worker peaks around 1.4 GB (measured — see the
+// A memory dial. Each decompile worker peaks at up to 3.3 GB (measured — see the
 // script's "Parallelism" note), which is why this defaults to 1 and why the
 // projection below is stated in GB rather than as an abstract "parallelism"
 // number: running this at core count is what OOM-killed people's machines.
@@ -659,7 +654,7 @@ const fmtGb = (gb: number) => `${gb >= 10 ? Math.round(gb) : gb.toFixed(1)} GB`;
  *  first band — an operator needs to see that the extraction stacks on top of
  *  a box that is already doing something, not into an empty machine. The
  *  projection is a RANGE for the same reason the backend reports one: a worker
- *  drawing the knife directory takes 0.5 GB and one drawing an AK takes 1.3, so
+ *  drawing the knife directory takes 0.8 GB and one drawing an agent takes 3.2, so
  *  a single number would be a guess dressed as a measurement. */
 const memPlan = computed(() => {
   const w = workers.value;
@@ -948,47 +943,31 @@ const BTN_DANGER =
 
 <template>
   <div class="h-full min-w-0 overflow-y-auto px-4 py-4 sm:px-6 sm:py-5">
-    <!-- Page header, in the panel's tactical style -->
-    <header
-      class="relative overflow-hidden rounded-lg border border-border bg-[linear-gradient(180deg,hsl(var(--card)/0.55)_0%,hsl(var(--card)/0.25)_100%)] px-4 py-4 sm:px-6 sm:py-5 [backdrop-filter:blur(6px)]"
+    <!-- No page header: the panel's breadcrumbs name this page now
+         ("Inventory › Settings › 3D Models", set from App via setCrumb). What
+         the header carried that still matters is the STALE-TAB warning — the
+         bundle only cache-busts on page load, so an open tab keeps running an
+         old build — and that shows here only when it is true. The plain "build
+         of … · up to date" line lives in the Developer tab. -->
+    <div
+      v-if="buildBehind"
+      role="status"
+      class="mb-4 flex items-center gap-2 rounded-md border border-[hsl(var(--tac-amber)/0.45)] bg-[hsl(var(--tac-amber)/0.08)] px-3 py-2 text-xs text-muted-foreground"
     >
-      <span
-        aria-hidden="true"
-        class="pointer-events-none absolute left-2 top-2 h-[14px] w-[14px] border-l-2 border-t-2 border-[hsl(var(--tac-amber))]"
-      ></span>
-      <span
-        aria-hidden="true"
-        class="pointer-events-none absolute bottom-2 right-2 h-[14px] w-[14px] border-b-2 border-r-2 border-[hsl(var(--tac-amber))]"
-      ></span>
+      <span class="h-1.5 w-1.5 flex-none rounded-full bg-[hsl(var(--tac-amber))]"></span>
+      <span>
+        This page runs the build of <span class="font-mono text-foreground">{{ fmtBuild(bundleBuild) }}</span>;
+        <span class="text-[hsl(var(--tac-amber))]">a newer one ({{ fmtBuild(serverBuild) }}) is out — reload the page</span>
+      </span>
+    </div>
 
-      <div class="flex min-w-0 flex-col gap-[0.35rem]">
-        <span class="inline-flex items-center gap-2 text-sm font-medium uppercase tracking-[0.2em] text-muted-foreground">
-          <span class="translate-y-[-1px] text-[0.7rem] text-[hsl(var(--tac-amber))]">◢</span>
-          Inventory
-        </span>
-        <h1 class="truncate text-xl font-semibold tracking-tight">Plugin Settings</h1>
-        <p class="text-sm text-muted-foreground">
-          Game-server integration, cached assets and 3D model extraction.
-        </p>
-        <!-- Which build this page runs, and whether the server has a newer one:
-             the question every "is the fix live?" comes down to. -->
-        <p v-if="fmtBuild(bundleBuild)" class="text-xs text-muted-foreground">
-          This page: build of <span class="font-mono text-foreground">{{ fmtBuild(bundleBuild) }}</span>
-          <template v-if="buildBehind">
-            · <span class="text-[hsl(var(--tac-amber))]">newer build of {{ fmtBuild(serverBuild) }} is out — reload the page</span>
-          </template>
-          <template v-else-if="serverBuild"> · up to date</template>
-        </p>
-      </div>
-    </header>
-
-    <div v-if="!isAdmin" :class="[CARD, 'mt-6 flex flex-col items-center gap-3 p-10 text-center']">
+    <div v-if="!isAdmin" :class="[CARD, 'flex flex-col items-center gap-3 p-10 text-center']">
       <ShieldAlert class="h-6 w-6 text-muted-foreground" />
       <p class="text-sm text-muted-foreground">This section is restricted to panel administrators.</p>
       <button :class="BTN" @click="emit('back')">Back to loadout</button>
     </div>
 
-    <div v-else class="mt-6 flex flex-col gap-6 lg:flex-row lg:gap-6">
+    <div v-else class="flex flex-col gap-6 lg:flex-row lg:gap-6">
       <!-- Side tabs — real routes, like the panel's settings nav -->
       <aside class="w-full shrink-0 lg:w-auto">
         <nav
@@ -1698,6 +1677,17 @@ const BTN_DANGER =
                 <p class="text-sm text-muted-foreground">
                   Switches that change how the 3D viewer renders. Browser-local — nothing here is a server setting, and
                   nothing here affects anyone else.
+                </p>
+                <!-- Which build this page runs, and whether the server has a
+                     newer one: the question every "is the fix live?" comes
+                     down to. Moved here with the page header; a stale tab still
+                     says so at the top of every tab. -->
+                <p v-if="fmtBuild(bundleBuild)" class="text-xs text-muted-foreground">
+                  This page: build of <span class="font-mono text-foreground">{{ fmtBuild(bundleBuild) }}</span>
+                  <template v-if="buildBehind">
+                    · <span class="text-[hsl(var(--tac-amber))]">newer build of {{ fmtBuild(serverBuild) }} is out — reload the page</span>
+                  </template>
+                  <template v-else-if="serverBuild"> · up to date</template>
                 </p>
               </div>
             </div>

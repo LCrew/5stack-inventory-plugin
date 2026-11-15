@@ -31,6 +31,7 @@ import PriceTag from "./PriceTag.vue";
 import SlotStatus from "./SlotStatus.vue";
 import TileActions from "./TileActions.vue";
 import WearBar from "./WearBar.vue";
+import { isPhone } from "../responsive";
 import { Clock, Loader2 } from "lucide-vue-next";
 import { cn } from "@5stack/ui";
 import { ART_FADE_B, CARD_ART, glowStyle } from "../itemVisuals";
@@ -68,8 +69,30 @@ const props = withDefaults(
     showWear: true,
     showPrice: true,
     showBadges: true,
+    swap: false,
+    wave: false,
   },
 );
+
+// Keyed by what the well SHOWS, so a team flip that lands the
+// same gun animates nothing, and anything that does change crossfades in place.
+// The ITEM, not its URL: art upgrades in place (catalog → extracted → baked
+// render) after load, and keying on the src replayed the crossfade each time.
+const swapKey = computed(() => {
+  const what = props.inst ? `i:${props.inst.id}` : props.item ? `c:${props.item.id}` : `img:${props.image ?? ""}`;
+  return `${what}|${props.dim ? 1 : 0}`;
+});
+const swapDelay = computed(() => (props.wave ? `${Math.min(props.index * 16, 220)}ms` : "0ms"));
+function pinLeaving(el: Element) {
+  if (!props.swap) return;
+  const e = el as HTMLElement;
+  e.style.position = "absolute";
+  e.style.left = `${e.offsetLeft}px`;
+  e.style.top = `${e.offsetTop}px`;
+  e.style.width = `${e.offsetWidth}px`;
+  e.style.height = `${e.offsetHeight}px`;
+  e.style.pointerEvents = "none";
+}
 
 /**
  * The kit's length for the caption, or "" while it is unknown.
@@ -171,10 +194,17 @@ defineEmits<{
       />
     </div>
 
+    <Transition
+      :appear="swap"
+      :css="swap"
+      enter-active-class="animate-cell-swap-in"
+      leave-active-class="animate-cell-swap-out"
+      @before-leave="pinLeaving"
+    >
     <div
-      :key="artKey"
-      :class="['animate-cell-in', padArt && 'py-1', CARD_ART]"
-      :style="{ '--i': index }"
+      :key="swap ? swapKey : artKey"
+      :class="[!swap && 'animate-cell-in', padArt && 'py-1', CARD_ART]"
+      :style="{ '--i': index, '--d': swapDelay }"
     >
       <ItemArt
         v-if="image"
@@ -213,6 +243,7 @@ defineEmits<{
            <span> — see MusicPlayer. -->
       <MusicPlayer v-if="audio" :src="audio" overlay />
     </div>
+    </Transition>
 
     <!-- The centred caption the small rail tiles carry instead of a footer.
          A kit's LENGTH rides here rather than on the artwork: it is a fact about
@@ -228,14 +259,20 @@ defineEmits<{
         · {{ audioLength }}</span>
     </div>
 
-    <div v-else-if="showName || showWear" class="relative z-[2] flex items-end justify-between gap-2">
+    <!-- Phones stack the wear bar under the name: sharing one row with the
+         badges and the bar, a skin name got ~50px and read "Hyper …". -->
+    <div
+      v-else-if="showName || showWear"
+      class="relative z-[2] flex"
+      :class="isPhone ? 'flex-col items-stretch gap-1' : 'items-end justify-between gap-2'"
+    >
       <span v-if="showName" class="flex min-w-0 flex-1 items-center gap-1.5">
         <ItemName :item="item" :strip="strip" :fallback="fallback" :nametag="item?.type === 'pet' ? (inst ?? badges)?.nametag : null" name-class="text-f11 font-medium" class="min-w-0 flex-1" />
         <!-- StatTrak and what's applied. The loadout showed neither until this
              component existed; the inventory grid has shown both all along. -->
         <ItemBadges v-if="showBadges" :inst="badges ?? inst" :max="3" compact />
       </span>
-      <WearBar v-if="showWear" :item="item" :wear="wear" :seed="seed" mini class="mb-1" />
+      <WearBar v-if="showWear" :item="item" :wear="wear" :seed="seed" mini :class="isPhone ? 'self-start' : 'mb-1'" />
     </div>
   </button>
 </template>

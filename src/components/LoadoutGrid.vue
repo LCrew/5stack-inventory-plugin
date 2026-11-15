@@ -83,10 +83,8 @@ export interface LoadoutGridProps {
   onSlotPointerMove: (e: PointerEvent) => void;
   cancelLongPress: () => void;
   onSlotClickCapture: (e: MouseEvent) => void;
-  /** How far the lifted picker sheet covers this half, in px, and the matching
-   *  scroll padding. Zero whenever the sheet is down. */
-  liftIntrusion: number;
-  liftScrollStyle: { scrollPaddingBottom?: string };
+  /** Let a cell skip re-rendering when nothing it draws changed. */
+  memo?: boolean;
 }
 </script>
 
@@ -124,9 +122,11 @@ defineEmits<{
   (e: "slot-drag-leave", pos: string): void;
 }>();
 
-// A little more scroll range than the sheet actually covers, so the LAST slot
-// in a column can sit clear of its top edge instead of flush against it.
-const LIFT_SPACER_PAD = 12;
+// Each cell re-rendered on every grid render (fresh :style and
+// :class arrays, fresh handlers), so one equip redrew all 25 (~80ms). The memo
+// lists everything a cell draws; a cell whose list is unchanged is skipped.
+// Without `memo` the first entry is a new object every render, i.e. no memo.
+const memoKey = (v: unknown) => JSON.stringify(v);
 </script>
 
 <template>
@@ -145,11 +145,11 @@ const LIFT_SPACER_PAD = 12;
           @pointercancel="cancelLongPress"
           @click.capture="onSlotClickCapture"
         >
-          <nav class="flex flex-none gap-1 overflow-x-auto border-b border-border px-2 py-0.5" data-role="compact-rail">
+          <nav class="flex flex-none gap-1 overflow-x-auto overflow-y-hidden border-b border-border px-2 py-0.5" data-role="compact-rail">
             <button
               v-for="c in compactCats"
               :key="c.key"
-              class="flex min-h-[30px] flex-1 items-center justify-center gap-1 whitespace-nowrap rounded-md border px-2 text-f10 font-semibold uppercase tracking-cs1 transition-colors"
+              class="touch-hit flex min-h-[30px] flex-1 items-center justify-center gap-1 whitespace-nowrap rounded-md border px-2 text-f10 font-semibold uppercase tracking-cs1 transition-colors"
               :class="compactCat === c.key
                 ? 'border-[color:var(--acc)] text-foreground'
                 : 'border-border/60 text-muted-foreground'"
@@ -247,11 +247,8 @@ const LIFT_SPACER_PAD = 12;
         <!-- ============ LOADOUT GRID ============ -->
         <template v-else>
           <!-- Identity column: gloves + knife (prominent) and a compact agent -->
-          <!-- The inner wrapper exists so the lift spacer can be a SIBLING of
-               the cards rather than padding on the scroller: padding would come
-               out of the flex line and squeeze every flex-1 card toward its
-               min-height, which is the reflow the floating sheet exists to
-               avoid. min-h-full keeps the cards stretching exactly as before. -->
+          <!-- The inner min-h-full wrapper keeps the flex-1 cards stretching to
+               the scroller's height (the dock's cell sizing targets it too). -->
           <!-- Header sits OUTSIDE the scroller and matches the weapon columns'
                exactly, so all four labels share one baseline and one rule. -->
           <aside class="animate-grid-in flex w-full min-w-[200px] max-w-[340px] flex-1 flex-col pb-3 pl-4 pr-1 pt-3">
@@ -259,11 +256,12 @@ const LIFT_SPACER_PAD = 12;
               <span class="text-f11 font-semibold uppercase tracking-cs2 text-muted-foreground">Equipment</span>
               <span v-if="equipmentCount" class="ml-auto font-mono text-f9 text-muted-foreground/60">{{ equipmentCount.skinned }}/{{ equipmentCount.total }}</span>
             </header>
-            <div class="flex flex-1 flex-col overflow-y-auto pt-2" :style="liftScrollStyle">
+            <div class="flex flex-1 flex-col overflow-y-auto pt-2">
             <div class="flex min-h-full flex-col gap-2.5">
             <LoadoutCell
               v-for="(s, si) in [RAIL[2], RAIL[1]]"
               :key="s.slot"
+              v-memo="[memo || {}, selected === s.slot, pulsePos === s.slot, team, memoKey(dropStyle(s.slot)), rowFor(s.slot)?.item?.rarity, memoKey(cellFacts(s.slot))]"
               class="min-h-[96px] flex-1"
               :class="[
                 selected === s.slot ? 'border-[color:var(--acc)] bg-secondary/70' : 'border-border/60 bg-secondary/40 hover:bg-secondary/70',
@@ -287,6 +285,7 @@ const LIFT_SPACER_PAD = 12;
               @remove="cellActions(s.slot).remove()"
             />
             <LoadoutCell
+              v-memo="[memo || {}, selected === 'agent', pulsePos === 'agent', team, memoKey(dropStyle('agent')), memoKey(cellFacts('agent'))]"
               class="min-h-[132px] flex-[1.6]"
               :class="[
                 selected === 'agent' ? 'border-[color:var(--acc)] bg-secondary/70' : 'border-border/60 bg-secondary/40 hover:bg-secondary/70',
@@ -315,6 +314,7 @@ const LIFT_SPACER_PAD = 12;
               <LoadoutCell
                 v-for="(s, si) in EXTRAS"
                 :key="s.slot"
+                v-memo="[memo || {}, selected === s.slot, pulsePos === s.slot, team, memoKey(dropStyle(s.slot)), slotTitle(s.slot, s.name), memoKey(cellFacts(s.slot))]"
                 class="h-[70px] items-center justify-between !p-1.5"
                 :class="[
                   selected === s.slot ? 'border-[color:var(--acc)] bg-secondary/70' : 'border-border/60 bg-secondary/40 hover:bg-secondary/70',
@@ -345,7 +345,6 @@ const LIFT_SPACER_PAD = 12;
               />
             </div>
             </div>
-            <div v-if="liftIntrusion" aria-hidden="true" class="flex-none" :style="{ height: liftIntrusion + LIFT_SPACER_PAD + 'px' }"></div>
             </div>
           </aside>
 
@@ -361,11 +360,8 @@ const LIFT_SPACER_PAD = 12;
                 <span class="text-f11 font-semibold uppercase tracking-cs2 text-muted-foreground">{{ g.label }}</span>
                 <span class="ml-auto font-mono text-f9 text-muted-foreground/60">{{ g.skinned }}/{{ g.positions.length }}</span>
               </header>
-              <!-- Wrapper + spacer, same shape as the identity column: the
-                   spacer is what gives this scroller somewhere to scroll when
-                   the lifted sheet is covering its bottom, without padding
-                   stealing height from the flex-1 cells. -->
-              <div class="flex flex-1 flex-col overflow-y-auto pt-2" :style="liftScrollStyle">
+              <!-- Same min-h-full wrapper as the identity column. -->
+              <div class="flex flex-1 flex-col overflow-y-auto pt-2">
                 <div class="flex min-h-full flex-col gap-2">
                 <!-- Every pos-derived display below reads through
                      previewPos(): during a reorder hover the two cells render
@@ -373,6 +369,7 @@ const LIFT_SPACER_PAD = 12;
                 <LoadoutCell
                   v-for="(cell, ci) in g.cells"
                   :key="cell.pos"
+                  v-memo="[memo || {}, selected === cell.pos, pulsePos === cell.pos, canEdit, team, previewPos(cell.pos), occupantModel(cell.pos), occupantWeapon(previewPos(cell.pos))?.name, rarityOf(previewPos(cell.pos)), memoKey(dropStyle(cell.pos)), memoKey(reorderStyle(cell.pos)), memoKey(cellFacts(cell.pos, previewPos(cell.pos)))]"
                   class="min-h-[96px] flex-1"
                   :data-slot="cell.pos" data-role="weapon"
                   :draggable="canEdit"
@@ -407,7 +404,6 @@ const LIFT_SPACER_PAD = 12;
                   @remove="cellActions(cell.pos).remove()"
                 />
                 </div>
-                <div v-if="liftIntrusion" aria-hidden="true" class="flex-none" :style="{ height: liftIntrusion + LIFT_SPACER_PAD + 'px' }"></div>
               </div>
             </section>
           </div>
