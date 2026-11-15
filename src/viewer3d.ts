@@ -5768,6 +5768,71 @@ async function buildViewer(
     panPx.y += dy;
     applyPan();
   };
+  /**
+   * LCrew fork: ZOOM TOWARD THE POINTER.
+   *
+   * OrbitControls zooms this orthographic camera about the projection's centre,
+   * which is the weapon's (the pivot never moves — see "PAN MOVES THE PICTURE").
+   * With a pan applied that pulled every wheel step back toward the middle of
+   * the gun instead of into the part you were looking at. So when a wheel or a
+   * pinch changes the zoom, the pan is rescaled around the pointer (a pinch:
+   * the fingers' midpoint) so the point under it stays put. Rotation still
+   * pivots on the weapon. Programmatic zooms (reset, the framing flights) are
+   * left alone: only a zoom within 250ms of a wheel event, or during a
+   * two-pointer gesture, is anchored.
+   *
+   * The algebra: a point at screen offset `a` from the pane's centre sits at
+   * `a - pan + inset/2` in the unshifted image (see applyPan's setViewOffset),
+   * and that scales by the zoom ratio; solving for the pan that brings it
+   * back under `a` gives the two lines below.
+   */
+  const zoomPointers = new Map<number, { x: number; y: number }>();
+  let zoomHover: { x: number; y: number } | null = null;
+  let zoomFrom = camera.zoom;
+  let zoomWheelAt = -Infinity;
+  const zoomLocal = (e: { clientX: number; clientY: number }) => {
+    const r = view.getBoundingClientRect();
+    return { x: e.clientX - (r.left + r.width / 2), y: e.clientY - (r.top + r.height / 2) };
+  };
+  view.addEventListener("pointermove", (e) => {
+    const p = zoomLocal(e);
+    zoomHover = p;
+    if (zoomPointers.has(e.pointerId)) zoomPointers.set(e.pointerId, p);
+  });
+  view.addEventListener("pointerdown", (e) => zoomPointers.set(e.pointerId, zoomLocal(e)));
+  const zoomPointerUp = (e: PointerEvent) => zoomPointers.delete(e.pointerId);
+  view.addEventListener("pointerup", zoomPointerUp);
+  view.addEventListener("pointercancel", zoomPointerUp);
+  view.addEventListener(
+    "wheel",
+    (e) => {
+      zoomHover = zoomLocal(e);
+      zoomWheelAt = performance.now();
+    },
+    { passive: true },
+  );
+  controls.addEventListener("change", () => {
+    const z = camera.zoom;
+    if (z === zoomFrom) return;
+    const ratio = z / zoomFrom;
+    zoomFrom = z;
+    const pinch = zoomPointers.size >= 2;
+    if (!pinch && performance.now() - zoomWheelAt > 250) return;
+    const a = { x: 0, y: 0 };
+    if (pinch) {
+      for (const p of zoomPointers.values()) {
+        a.x += p.x / zoomPointers.size;
+        a.y += p.y / zoomPointers.size;
+      }
+    } else if (zoomHover) {
+      a.x = zoomHover.x;
+      a.y = zoomHover.y;
+    }
+    const inset = Number.isFinite(insetApplied) ? insetApplied : 0;
+    panPx.x = a.x + inset / 2 - ratio * (a.x - panPx.x + inset / 2);
+    panPx.y = a.y - ratio * (a.y - panPx.y);
+    applyPan();
+  });
 
   // ---- Placement space ---------------------------------------------------------
   // Weapons lie along their longest axis; height is Y unless Y IS the length.
