@@ -6313,12 +6313,15 @@ const dockShownId = computed(() => {
 // happens on a click, never on hover.
 const spot3d = usePersistedBool("cs2inv.spot3d", true);
 const spot3dReady = ref(false);
+// LCrew fork: a failed mount ends the loading indicator (spot3dLoading).
+const spot3dFailed = ref(false);
 const spotHostEl = ref<HTMLElement | null>(null);
 const spotViewer = useViewerMount({
   label: "spot",
   host: () => spotHostEl.value,
   onError: () => {
     spot3dReady.value = false;
+    spot3dFailed.value = true;
   },
 });
 const spotTarget = computed<ViewerTarget | null>(() => {
@@ -6333,6 +6336,8 @@ const spot3dKey = computed(() => {
   return t && spot3d.value ? `${t.model}|${dockShownId.value}|${team.value}` : "";
 });
 const dockShow3d = computed(() => spot3dReady.value && !!spot3dKey.value && !dockHover.value);
+/** LCrew fork: the stage is waiting on its 3D model — shows "Loading 3D model…". */
+const spot3dLoading = computed(() => !!spot3dKey.value && !spot3dReady.value && !spot3dFailed.value && !dockHover.value);
 let spot3dMounted = "";
 let spot3dTimer: ReturnType<typeof setTimeout> | undefined;
 watch([spot3dKey, dockOpening], ([key, opening]) => {
@@ -6345,6 +6350,7 @@ watch([spot3dKey, dockOpening], ([key, opening]) => {
   }
   if (opening || key === spot3dMounted) return;
   spot3dReady.value = false;
+  spot3dFailed.value = false;
   spot3dTimer = setTimeout(() => void mountSpot3d(key), 60);
 });
 async function mountSpot3d(key: string) {
@@ -6369,6 +6375,10 @@ async function mountSpot3d(key: string) {
       patches: t.kind === "agent" ? (att?.patches ?? []).map((x) => x?.image ?? null) : undefined,
       stattrak: att?.stattrak || row?.stattrak ? { count: att?.stattrak_count ?? row?.stattrak_count ?? 0 } : null,
       frameInset: { right: 0 },
+      // LCrew fork: the stage is taller than wide, and without this the viewer
+      // holds the model's height and crops its sides — a long rifle came up
+      // zoomed in and cut off, by a different amount on every window shape.
+      narrowFit: true,
     }),
     () => {
       if (spot3dMounted === key) spot3dReady.value = true;
@@ -9894,7 +9904,7 @@ watch([crumbTrail, () => props.path], ([trail]) => props.setCrumb?.(trail), { im
          and the whole screen visibly shrank when the real one landed on it. -->
     <!-- The Dock's skeleton, drawn from the same numbers as the
          real cells (dockGeo) so nothing moves when the loadout lands on it. -->
-    <div v-if="loading && docked && canLift" ref="dockSkelEl" aria-busy="true" class="relative flex min-h-0 flex-1 flex-col overflow-hidden">
+    <div v-if="loading && docked && canLift" ref="dockSkelEl" aria-busy="true" class="relative flex min-h-0 flex-1 flex-col overflow-hidden" :data-dock-fill="DOCK_ALWAYS_SPOTLIGHT ? '' : undefined">
       <div class="relative flex min-h-0 flex-1 overflow-hidden" :style="loadoutPadStyle">
         <div class="flex flex-none flex-col pb-3 pl-4 pr-1 pt-3" :style="{ width: `${dockGeo.asideW + 20}px` }">
           <div class="flex items-baseline border-b border-border/60 px-1 pb-2">
@@ -10081,7 +10091,7 @@ watch([crumbTrail, () => props.path], ([trail]) => props.setCrumb?.(trail), { im
       <!-- `relative` makes this the containing block for the desktop picker
            sheet, which floats over the loadout instead of sitting under it; the
            existing overflow-hidden then clips it to the loadout area. -->
-      <div v-else ref="loadoutEl" key="loadout" class="relative flex min-h-0 flex-1 flex-col overflow-hidden" :data-dock="docked && canLift ? '' : undefined" :style="dockVars">
+      <div v-else ref="loadoutEl" key="loadout" class="relative flex min-h-0 flex-1 flex-col overflow-hidden" :data-dock="docked && canLift ? '' : undefined" :data-dock-fill="DOCK_ALWAYS_SPOTLIGHT && docked && canLift ? '' : undefined" :style="dockVars">
       <!-- Stacks on compact so the focus rail can sit above the stage as a
            strip rather than beside it as a fixed 122px column.
            The padding is the room the picker takes: beside the loadout when
@@ -10526,6 +10536,21 @@ watch([crumbTrail, () => props.path], ([trail]) => props.setCrumb?.(trail), { im
               class="absolute inset-0 transition-opacity duration-200 motion-reduce:transition-none"
               :class="dockShow3d ? 'opacity-100' : 'pointer-events-none opacity-0'"
             ></div>
+            <!-- LCrew fork: says the 3D view is on its way. Fades in after a
+                 beat, so a model that is already cached never flashes it. -->
+            <Transition
+              enter-active-class="transition-opacity duration-200 delay-200 motion-reduce:transition-none"
+              enter-from-class="opacity-0"
+              leave-active-class="transition-opacity duration-150 motion-reduce:transition-none"
+              leave-to-class="opacity-0"
+            >
+              <div v-if="spot3dLoading" class="pointer-events-none absolute inset-x-0 bottom-3 z-[3] flex justify-center">
+                <span class="flex items-center gap-2 rounded-full border border-border/60 bg-background/80 px-3 py-1.5 text-f10 uppercase tracking-cs2 text-muted-foreground backdrop-blur">
+                  <Loader2 class="h-3.5 w-3.5 animate-spin text-[color:var(--acc)]" />
+                  Loading 3D model…
+                </span>
+              </div>
+            </Transition>
           </div>
           <div data-spot="foot" class="relative z-[3] flex min-w-0 flex-col gap-2 px-6 pb-6">
             <span class="truncate text-f11 uppercase tracking-cs2 text-muted-foreground">{{ focusIdentityName.weapon }}</span>
