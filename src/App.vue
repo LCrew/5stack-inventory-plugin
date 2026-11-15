@@ -5811,6 +5811,14 @@ const DOCK_MIN_DOCK = 760;
 const DOCK_COL_CHROME = 94;
 const DOCK_SPOT_RAIL_W = 212;
 const DOCK_SPOT_TILE_W = 60;
+/**
+ * LCrew fork: a slot click opens Spotlight (the rail, the slot's stage and the
+ * picker) at every desktop width. Upstream opens it only when the loadout and
+ * a 760px picker cannot sit side by side (about 1,690px of pane), so a wide or
+ * maximised window docked the picker beside the full grid and never showed the
+ * stage. Phones keep their own layout (isCompact).
+ */
+const DOCK_ALWAYS_SPOTLIGHT = true;
 const docked = computed(() => !isCompact.value);
 const dockPaneW = ref(0);
 let dockRO: ResizeObserver | null = null;
@@ -5846,7 +5854,7 @@ const dockGeo = computed(() => {
   const cellW = clampTo(212, Math.round(cellH * DOCK_ASPECT), 460);
   const asideW = clampTo(220, cellW, 360);
   const dockW = Math.max(420, W - (asideW + 20) - 3 * cellW - 56);
-  return { W, cellH, cellW, asideW, dockW, cramped: dockW < DOCK_MIN_DOCK };
+  return { W, cellH, cellW, asideW, dockW, cramped: DOCK_ALWAYS_SPOTLIGHT || dockW < DOCK_MIN_DOCK };
 });
 const dockSmall = computed(
   () => docked.value && canLift.value && view.value === "grid" && dockGeo.value.cramped,
