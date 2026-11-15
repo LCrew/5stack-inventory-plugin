@@ -6170,9 +6170,16 @@ watch(
   },
 );
 // ---- A click opens the item modal; Equip is in its footer ----
+// LCrew fork: DOCK_CLICK_EQUIPS. Upstream (#91) opens the item's 3D modal on a
+// docked click, and the Default card the default-weapon 3D overlay. Here a
+// click EQUIPS into the selected slot, as before #91, so a loadout can be
+// switched quickly: Spotlight's 3D stage follows the slot's occupant
+// (spot3dKey) and shows the new weapon. Edit stays on the tile's pencil, the
+// 3D modal on its cube. Touch still gets the action menu.
+const DOCK_CLICK_EQUIPS = true;
 function dockTileClick(inst: InventoryItem) {
   if (tapOpensMenu.value) return openItemCtxFor(inst);
-  if (!docked.value) return void equipInstanceAt(inst, selected.value);
+  if (DOCK_CLICK_EQUIPS || !docked.value) return void equipInstanceAt(inst, selected.value);
   view3dForInstance(inst);
 }
 // A colour list (a sticker's nineteen colours) opens with its pictures already
@@ -6271,7 +6278,7 @@ onMounted(() =>
   }),
 );
 function dockDefaultClick(apply: () => unknown) {
-  if (!docked.value) return void apply();
+  if (DOCK_CLICK_EQUIPS || !docked.value) return void apply();
   const pos = selected.value;
   const def = isSpecial(pos) ? specialDefault(pos) : null;
   const model = (def ? resolveViewerModelSync(def)?.model : null) ?? occupantModel(pos);
