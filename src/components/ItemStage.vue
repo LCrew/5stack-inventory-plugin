@@ -25,7 +25,7 @@ import ViewerControls from "./ViewerControls.vue";
 import { ACTION_ICON, ACTION_ICON_BOX, ACTION_ICON_VIEWBOX } from "../weaponActionIcons";
 import { glowStyle } from "../itemVisuals";
 import { choiceValue, choicesVersion } from "../devFlags";
-import { BACKDROP_FEATHER_MASK, viewerEnvironment } from "../viewerEnvironments";
+import { LIVE_BACKDROPS, viewerEnvironment } from "../viewerEnvironments";
 import type { InspectTransport } from "../viewer3d";
 import type { StageKey } from "../composables/useViewerStage";
 
@@ -196,10 +196,11 @@ const DAYLIGHT_HAZE =
 const backdropStyle = computed(() => {
   void choicesVersion.value;
   const env = viewerEnvironment(choiceValue("env"));
-  // LCrew fork: feathered like the viewer's own backdrop (BACKDROP_FEATHER),
-  // or this full-size stand-in would keep the hard edge the canvas fades out.
-  if (env.daylight) return { background: DAYLIGHT_HAZE, ...BACKDROP_FEATHER_MASK };
-  if (env.backdrop) return { background: `center / cover no-repeat url("${env.backdrop.image}")`, ...BACKDROP_FEATHER_MASK };
+  // LCrew fork: the viewer draws no backdrop (LIVE_BACKDROPS), so neither does
+  // its stand-in — the card shows through while loading, as it does after.
+  if (!LIVE_BACKDROPS) return null;
+  if (env.daylight) return { background: DAYLIGHT_HAZE };
+  if (env.backdrop) return { background: `center / cover no-repeat url("${env.backdrop.image}")` };
   return null;
 });
 </script>

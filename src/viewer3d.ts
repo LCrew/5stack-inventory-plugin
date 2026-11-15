@@ -19,7 +19,7 @@ import { buildArms, buildTwistSolver, weaponSeat, type ArmsRig, type Hand, type 
 import { buildPropClip, buildViewmodelClip, INSPECTS, loadViewmodelClip, viewmodelActions, viewmodelAssetUrl, type ClipAction, type ClipCue } from "./viewmodelClip";
 import { buildMuzzleFlash, type MuzzleFlash } from "./muzzleFlash";
 import { CHOICES, FLAGS, NUMBERS, choicesVersion, choiceValue, flagValue, flagsVersion, numberValue, numbersVersion, setChoice, setFlag, setNumber } from "./devFlags";
-import { BACKDROP_FEATHER, BAKE_ENVIRONMENT, viewerEnvironment, type ViewerEnvironment } from "./viewerEnvironments";
+import { BAKE_ENVIRONMENT, LIVE_BACKDROPS, viewerEnvironment, type ViewerEnvironment } from "./viewerEnvironments";
 import { compositePaint, dropCompositeCache, loadPaintDef, loadWeaponInputs, paintTextureUrl } from "./paintComposite";
 import { type CharmShading, dressCharm, loadCharmTintMasks, tuneCharmShading } from "./charmMaterial";
 import { tickCharmLiquid } from "./charmLiquid";
@@ -14387,7 +14387,8 @@ async function buildViewer(
   let backdrop: import("three").Mesh | null = null;
   const backdropDir = new THREE.Matrix3();
   function setBackdrop(tex: import("three").Texture | null, isPlate: boolean, blur?: number) {
-    if (!tex) {
+    // LCrew fork: no backdrop, only the preset's lighting — see LIVE_BACKDROPS.
+    if (!tex || !LIVE_BACKDROPS) {
       if (backdrop) backdrop.visible = false;
       return;
     }
@@ -14401,9 +14402,6 @@ async function buildViewer(
             tPano: { value: tex },
             uDir: { value: backdropDir },
             uAspect: { value: 1 },
-            /** LCrew fork: the edge fade, as a fraction of the pane's width and
-             *  height — see BACKDROP_FEATHER. Set per frame with uAspect. */
-            uEdge: { value: new THREE.Vector2(BACKDROP_FEATHER.max, BACKDROP_FEATHER.max) },
             uTan: { value: Math.tan((42 * Math.PI) / 180 / 2) },
             /**
              * DEPTH OF FIELD, as a mip bias.
@@ -14432,7 +14430,6 @@ async function buildViewer(
             uniform sampler2D tPano;
             uniform mat3 uDir;
             uniform float uAspect;
-            uniform vec2 uEdge;
             uniform float uTan;
             uniform float uBlur;
             uniform float uPlate;
@@ -14464,17 +14461,6 @@ async function buildViewer(
               // in material ends with.
               #include <tonemapping_fragment>
               #include <colorspace_fragment>
-              // LCrew fork: fade out toward the pane's edges, so the scene
-              // dissolves into the panel rather than ending in a hard box.
-              // Written PREMULTIPLIED and with no blending, which is exact
-              // because this quad draws first (renderOrder -1000, opaque list)
-              // into a cleared, transparent frame. It must stay in the opaque
-              // list: as a "transparent" material it would draw after the
-              // weapon and, with depthTest off, paint over it.
-              vec2 e = max(uEdge, vec2(1e-4));
-              float edge = smoothstep(0.0, e.x, vUv.x) * smoothstep(0.0, e.x, 1.0 - vUv.x)
-                         * smoothstep(0.0, e.y, vUv.y) * smoothstep(0.0, e.y, 1.0 - vUv.y);
-              gl_FragColor = vec4(gl_FragColor.rgb * edge, gl_FragColor.a * edge);
             }`,
         }),
       );
@@ -15306,12 +15292,7 @@ async function buildViewer(
     // Only the pane's shape. The backdrop's DIRECTION is deliberately fixed —
     // see setBackdrop.
     if (backdrop?.visible) {
-      const bu = (backdrop.material as import("three").ShaderMaterial).uniforms;
-      bu.uAspect.value = cssW / Math.max(1, cssH);
-      (bu.uEdge.value as import("three").Vector2).set(
-        Math.min(BACKDROP_FEATHER.px / Math.max(1, cssW), BACKDROP_FEATHER.max),
-        Math.min(BACKDROP_FEATHER.px / Math.max(1, cssH), BACKDROP_FEATHER.max),
-      );
+      (backdrop.material as import("three").ShaderMaterial).uniforms.uAspect.value = cssW / Math.max(1, cssH);
     }
     // Letterbox first person. SCISSOR as well as viewport: without it the bars
     // keep whatever the last frame drew there, which reads as the model

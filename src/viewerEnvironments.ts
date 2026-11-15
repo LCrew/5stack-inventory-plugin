@@ -168,13 +168,22 @@ export const BAKE_ENVIRONMENT = "studio";
 
 /**
  * What a LIVE viewer opens under when the user has not picked. The LCrew fork
- * opens on CS2: neutral daylight with the main-menu haze behind, because most
- * people open the 3D view to see a skin the way the game shows it. Judging a
- * finish under a studio rig is one click away in Lighting. (Upstream opens on
- * Showcase; ItemStage paints the haze under the canvas while a model loads, so
- * the pane no longer jumps from the dark card to grey.)
+ * opens on CS2's neutral daylight, because most people open the 3D view to see
+ * a skin the way the game lights it. Judging a finish under a studio rig is one
+ * click away in Lighting. (Upstream opens on Showcase.)
  */
 export const DEFAULT_ENVIRONMENT = "cs2";
+
+/**
+ * LCrew fork: whether a live viewer draws its preset's BACKDROP — CS2's grey
+ * haze, or the photograph behind Italy, Italy (alley) and Ancient (night). Off:
+ * every preset keeps its LIGHTING (the CS2 daylight, a scene's reflections) but
+ * the model stands on the item card itself, its dark ground and rarity glow,
+ * exactly as the 2D picture does. A full-bleed scene ended in a hard box
+ * against the panel, and a faded edge looked worse. viewer3d's setBackdrop
+ * and ItemStage's loading stand-in both read this.
+ */
+export const LIVE_BACKDROPS = false;
 
 /** The CS2 rig's lamps, exposure and colours — shared by its scene variants. */
 const CS2_LIGHT = {
@@ -215,7 +224,7 @@ export const VIEWER_ENVIRONMENTS: ViewerEnvironment[] = [
   {
     key: "cs2",
     label: "CS2",
-    hint: "Bright, neutral daylight with the main-menu haze behind — how the game's own inspect shows an item.",
+    hint: "Bright, neutral daylight — how the game's own inspect lights an item.",
     ...CS2_LIGHT,
     daylight: true,
   },
@@ -303,31 +312,3 @@ export function viewerEnvironment(key: string | null | undefined): ViewerEnviron
     VIEWER_ENVIRONMENTS.find((e) => e.key === BAKE_ENVIRONMENT)!
   );
 }
-
-/**
- * LCrew fork: how far a live viewer's BACKDROP (the CS2 haze, a photographed
- * scene, a map) fades out at the pane's edges, so it dissolves into the panel
- * instead of ending in a hard rectangle. `px` CSS pixels on each side, but
- * never more than `max` of that side, so a small pane keeps most of its scene.
- *
- * Only the backdrop fades: viewer3d does it in the backdrop's own shader, which
- * draws before the model, so the weapon itself stays fully sharp to the edge.
- * The studio rigs (Showcase and the rest) draw no backdrop, so nothing changes
- * there. ItemStage's CSS stand-in (shown while a model loads) uses the same
- * numbers through BACKDROP_FEATHER_MASK.
- */
-export const BACKDROP_FEATHER = { px: 64, max: 0.18 };
-
-/** The same fade as a CSS mask, for a backdrop drawn by CSS. */
-export const BACKDROP_FEATHER_MASK = (() => {
-  const f = `min(${BACKDROP_FEATHER.px}px, ${BACKDROP_FEATHER.max * 100}%)`;
-  const ramp = (dir: string) => `linear-gradient(${dir}, transparent, #000 ${f}, #000 calc(100% - ${f}), transparent)`;
-  const image = `${ramp("to right")}, ${ramp("to bottom")}`;
-  return {
-    maskImage: image,
-    WebkitMaskImage: image,
-    // Both ramps have to agree for a pixel to show: the corners fade on both.
-    maskComposite: "intersect",
-    WebkitMaskComposite: "source-in",
-  };
-})();
