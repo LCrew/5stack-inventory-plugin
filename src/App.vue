@@ -10485,6 +10485,11 @@ watch([crumbTrail, () => props.path], ([trail]) => props.setCrumb?.(trail), { im
             </div>
           </div>
           <div class="relative z-[2] grid min-h-0 flex-1 place-items-center px-6">
+            <!-- LCrew fork: the picture holds still. Upstream bobs it
+                 (animate-float) whenever no card is hovered, so it bounced
+                 while the 3D model loaded, never stopped on a slot with no 3D
+                 (a default knife or gloves), and snapped to rest each time a
+                 hover started or ended. -->
             <Transition
               enter-active-class="transition duration-150 ease-out motion-reduce:transition-none"
               enter-from-class="opacity-0 scale-[0.985]"
@@ -10495,7 +10500,7 @@ watch([crumbTrail, () => props.path], ([trail]) => props.setCrumb?.(trail), { im
                 <img
                   :src="dockHover ? dockHover.src : spotSrc"
                   alt=""
-                  :class="cn('h-full min-h-0 w-[88%] object-contain transition-opacity duration-200', !dockHover && 'animate-float motion-reduce:animate-none', !dockHover && !isSkinned(focusRow) && 'opacity-50', dockShow3d && 'opacity-0')"
+                  :class="cn('h-full min-h-0 w-[88%] object-contain transition-opacity duration-200', !dockHover && !isSkinned(focusRow) && 'opacity-50', dockShow3d && 'opacity-0')"
                   style="filter: drop-shadow(0 22px 30px rgba(0,0,0,0.55))"
                 />
               </div>
