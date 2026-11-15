@@ -167,12 +167,14 @@ const mapEnvironment = ({ map, label, hint }: (typeof MAP_SCENES)[number]): View
 export const BAKE_ENVIRONMENT = "studio";
 
 /**
- * What a LIVE viewer opens under when the user has not picked. Showcase: the
- * studio rig with a harder spot, which is what the plugin has opened on all
- * along. CS2's daylight haze is one click away in Lighting; as the default it
- * turned every item screen into a pale grey card the moment a model loaded.
+ * What a LIVE viewer opens under when the user has not picked. The LCrew fork
+ * opens on CS2: neutral daylight with the main-menu haze behind, because most
+ * people open the 3D view to see a skin the way the game shows it. Judging a
+ * finish under a studio rig is one click away in Lighting. (Upstream opens on
+ * Showcase; ItemStage paints the haze under the canvas while a model loads, so
+ * the pane no longer jumps from the dark card to grey.)
  */
-export const DEFAULT_ENVIRONMENT = "showcase";
+export const DEFAULT_ENVIRONMENT = "cs2";
 
 /** The CS2 rig's lamps, exposure and colours — shared by its scene variants. */
 const CS2_LIGHT = {
