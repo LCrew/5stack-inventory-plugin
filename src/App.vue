@@ -11506,7 +11506,15 @@ watch([crumbTrail, () => props.path], ([trail]) => props.setCrumb?.(trail), { im
             </button>
           </div>
         </div>
-        <div class="flex min-h-0 flex-1 flex-wrap overflow-y-auto" :class="isCompact ? 'gap-3 p-2' : 'gap-5 p-5'">
+        <!-- LCrew fork: on desktop the editor is one fixed row — the stage keeps
+             the screen's height and the options column scrolls by itself (see
+             below). Wrapped and scrolled as a whole, a long sticker list grew
+             the row and stretched the stage down with it, so the model sat far
+             below the middle of what was on screen. Compact still stacks. -->
+        <div
+          class="flex min-h-0 flex-1"
+          :class="isCompact ? 'flex-wrap overflow-y-auto gap-3 p-2' : viewOnly ? 'flex-wrap overflow-y-auto gap-5 p-5' : 'overflow-hidden gap-5 p-5'"
+        >
           <!-- THE SAME SCREEN THE FOCUS VIEW IS. Identity, actions, stage,
                footer — in that order, decided by ItemScreen rather than here,
                which is the only way two surfaces stay one surface. -->
@@ -11694,7 +11702,7 @@ watch([crumbTrail, () => props.path], ([trail]) => props.setCrumb?.(trail), { im
           <div
             v-if="craftHasOptions && !viewOnly"
             class="flex w-full flex-none flex-col gap-2.5"
-            :class="[{ 'sheet-settled': craftSettled }, !isCompact && 'max-w-[300px]']"
+            :class="[{ 'sheet-settled': craftSettled }, !isCompact && 'max-w-[300px] min-h-0 overflow-y-auto overscroll-contain pr-1 [&>*]:flex-none']"
           >
             <!-- Inspect, share and reset, at the top of the form rather than in
                  the screen's actions row — see CraftActions. Editing is work
