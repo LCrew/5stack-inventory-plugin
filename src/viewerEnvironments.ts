@@ -303,3 +303,31 @@ export function viewerEnvironment(key: string | null | undefined): ViewerEnviron
     VIEWER_ENVIRONMENTS.find((e) => e.key === BAKE_ENVIRONMENT)!
   );
 }
+
+/**
+ * LCrew fork: how far a live viewer's BACKDROP (the CS2 haze, a photographed
+ * scene, a map) fades out at the pane's edges, so it dissolves into the panel
+ * instead of ending in a hard rectangle. `px` CSS pixels on each side, but
+ * never more than `max` of that side, so a small pane keeps most of its scene.
+ *
+ * Only the backdrop fades: viewer3d does it in the backdrop's own shader, which
+ * draws before the model, so the weapon itself stays fully sharp to the edge.
+ * The studio rigs (Showcase and the rest) draw no backdrop, so nothing changes
+ * there. ItemStage's CSS stand-in (shown while a model loads) uses the same
+ * numbers through BACKDROP_FEATHER_MASK.
+ */
+export const BACKDROP_FEATHER = { px: 64, max: 0.18 };
+
+/** The same fade as a CSS mask, for a backdrop drawn by CSS. */
+export const BACKDROP_FEATHER_MASK = (() => {
+  const f = `min(${BACKDROP_FEATHER.px}px, ${BACKDROP_FEATHER.max * 100}%)`;
+  const ramp = (dir: string) => `linear-gradient(${dir}, transparent, #000 ${f}, #000 calc(100% - ${f}), transparent)`;
+  const image = `${ramp("to right")}, ${ramp("to bottom")}`;
+  return {
+    maskImage: image,
+    WebkitMaskImage: image,
+    // Both ramps have to agree for a pixel to show: the corners fade on both.
+    maskComposite: "intersect",
+    WebkitMaskComposite: "source-in",
+  };
+})();
