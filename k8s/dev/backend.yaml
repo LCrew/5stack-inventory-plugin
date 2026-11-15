@@ -34,6 +34,13 @@ spec:
       labels:
         app: inventory-dev-backend
     spec:
+      # NO AppArmor confinement, as k8s/base/deployment.yaml (upstream #80): the
+      # node's stacked containerd profile refuses every signal inside the
+      # container, so a running extraction read as "none running" and cwebp's
+      # timeout kill never landed. This backend runs extractions by hand.
+      securityContext:
+        appArmorProfile:
+          type: Unconfined
       # The node install labeled for the live plugin — its hostPaths are local.
       affinity:
         nodeAffinity:
