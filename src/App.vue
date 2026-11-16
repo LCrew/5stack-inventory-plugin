@@ -1298,8 +1298,8 @@ const craftGroups = computed(() => {
   return groups;
 });
 /**
- * Which track every card on the music kit CRAFT grid plays: the menu theme or
- * the round-MVP anthem. One switch beside the grid's one volume, so comparing
+ * Which track every card on the music kit grids (Owned and Craft) plays: the
+ * menu theme or the round-MVP anthem. One switch beside the grid's one volume, so comparing
  * anthems is not a trip through each kit's editor. A viewing choice only —
  * nothing is saved, and a kit with no anthem simply has no player under MVP
  * rather than quietly playing its menu theme instead.
@@ -1310,7 +1310,11 @@ const cardTrack = (c: { audio?: string | null; mvpAudio?: string | null }) =>
   (sheetMusicTrack.value === "mvp" ? c.mvpAudio : c.audio) ?? null;
 /** Offered only where some kit has an anthem to switch to — an instance that
  *  has not run the MVP extraction would get a switch that empties the grid. */
-const sheetHasMvp = computed(() => craftStacks.value.some((st) => !!st.card.mvpAudio));
+const sheetHasMvp = computed(() =>
+  sheetMode.value === "owned"
+    ? ownedStacks.value.some((st) => st.variants.some((v) => !!v.item?.mvpAudio))
+    : craftStacks.value.some((st) => !!st.card.mvpAudio),
+);
 // Sheet: replace mode — the base weapons that can take this position: eligible
 // for it, on this side, and not already somewhere else in the loadout — or in
 // it. That is the whole of the choice. Owned skins of those weapons used to
@@ -7908,6 +7912,14 @@ const focusSlotLabel = computed(() => {
   return `${g.label} · Slot ${(g.positions as readonly string[]).indexOf(pos) + 1}`;
 });
 const focusRow = computed(() => rowFor(selected.value));
+/** LCrew fork: the selected slot's music kit tracks — the equipped kit's, or the
+ *  stock kit's when nothing is equipped (same fallback as specialAudio). Null
+ *  off the kit slot or when neither track was extracted. Drives the players
+ *  under the art in Focus and in the Spotlight. */
+const selMusic = computed(() => {
+  const it = focusRow.value?.item ?? specialDefault(selected.value);
+  return it?.audio || it?.mvpAudio ? { audio: it.audio ?? null, mvpAudio: it.mvpAudio ?? null } : null;
+});
 
 // ---- 3D viewer (Focus view) -------------------------------------------------
 // Shows a 3D toggle whenever public/models/<weapon-model>.glb exists.
@@ -10332,7 +10344,7 @@ watch([crumbTrail, () => props.path], ([trail]) => props.setCrumb?.(trail), { im
                   <div
                     :key="selected"
                     class="grid h-full w-full min-h-0 place-items-center"
-                    :class="(focusRow?.item?.audio || focusRow?.item?.mvpAudio) && 'grid-rows-[minmax(0,1fr)_auto] gap-3'"
+                    :class="selMusic && 'grid-rows-[minmax(0,1fr)_auto] gap-3'"
                   >
                     <ItemArt
                       :inst="isSpecial(selected) ? null : cellInstance(selected)"
@@ -10351,20 +10363,20 @@ watch([crumbTrail, () => props.path], ([trail]) => props.setCrumb?.(trail), { im
                     <!-- mb-8: clear of the card's bottom edge, which the last row
                          otherwise sat right on. -->
                     <div
-                      v-if="focusRow?.item?.audio || focusRow?.item?.mvpAudio"
+                      v-if="selMusic"
                       class="mb-8 flex w-[min(80%,420px)] flex-col gap-2"
                     >
                       <div class="flex items-center justify-between">
                         <span class="text-f10 uppercase tracking-cs1 text-muted-foreground">{{ tr('inventory.music.preview', 'Preview') }}</span>
                         <MusicVolume wide />
                       </div>
-                      <div v-if="focusRow.item.audio" class="flex items-center gap-2">
+                      <div v-if="selMusic.audio" class="flex items-center gap-2">
                         <span class="w-16 flex-none text-f10 uppercase tracking-cs1 text-muted-foreground">{{ tr('inventory.music.full_song', 'Full song') }}</span>
-                        <MusicPlayer :src="focusRow.item.audio" :volume="false" class="min-w-0 flex-1" />
+                        <MusicPlayer :key="selMusic.audio" :src="selMusic.audio" :volume="false" class="min-w-0 flex-1" />
                       </div>
-                      <div v-if="focusRow.item.mvpAudio" class="flex items-center gap-2">
+                      <div v-if="selMusic.mvpAudio" class="flex items-center gap-2">
                         <span class="w-16 flex-none text-f10 uppercase tracking-cs1 text-muted-foreground">{{ tr('inventory.music.mvp', 'MVP') }}</span>
-                        <MusicPlayer :src="focusRow.item.mvpAudio" :volume="false" class="min-w-0 flex-1" />
+                        <MusicPlayer :key="selMusic.mvpAudio" :src="selMusic.mvpAudio" :volume="false" class="min-w-0 flex-1" />
                       </div>
                     </div>
                   </div>
@@ -10566,7 +10578,33 @@ watch([crumbTrail, () => props.path], ([trail]) => props.setCrumb?.(trail), { im
                 :max="4"
               />
             </div>
-            <div class="h-9 overflow-hidden transition-opacity duration-150" :class="dockPreviewing && 'opacity-0'">
+            <!-- LCrew fork: a music kit (equipped or the stock one) gets the
+                 Focus view's players here, in the wear bar's place (a kit has
+                 no wear). Both tracks, labelled,
+                 with the shared volume. Hidden while a card is hovered, like the
+                 wear bar: the foot is describing the hovered card then. Each
+                 player is keyed on its track, so equipping another kit remounts
+                 it and the old one's teardown stops its song. -->
+            <div
+              v-if="selMusic"
+              data-spot-music
+              class="flex w-[min(100%,420px)] flex-col gap-2 transition-opacity duration-150"
+              :class="dockPreviewing && 'pointer-events-none opacity-0'"
+            >
+              <div class="flex items-center justify-between">
+                <span class="text-f10 uppercase tracking-cs1 text-muted-foreground">{{ tr('inventory.music.preview', 'Preview') }}</span>
+                <MusicVolume wide />
+              </div>
+              <div v-if="selMusic.audio" class="flex items-center gap-2">
+                <span class="w-16 flex-none text-f10 uppercase tracking-cs1 text-muted-foreground">{{ tr('inventory.music.full_song', 'Full song') }}</span>
+                <MusicPlayer :key="selMusic.audio" :src="selMusic.audio" :volume="false" class="min-w-0 flex-1" />
+              </div>
+              <div v-if="selMusic.mvpAudio" class="flex items-center gap-2">
+                <span class="w-16 flex-none text-f10 uppercase tracking-cs1 text-muted-foreground">{{ tr('inventory.music.mvp', 'MVP') }}</span>
+                <MusicPlayer :key="selMusic.mvpAudio" :src="selMusic.mvpAudio" :volume="false" class="min-w-0 flex-1" />
+              </div>
+            </div>
+            <div v-else class="h-9 overflow-hidden transition-opacity duration-150" :class="dockPreviewing && 'opacity-0'">
               <WearBar
                 v-if="spotFacts.wear != null"
                 :item="spotFacts.item"
@@ -10706,9 +10744,9 @@ watch([crumbTrail, () => props.path], ([trail]) => props.setCrumb?.(trail), { im
                slider on every card — on Owned and Craft alike. The level is
                shared, so every player follows it. -->
           <MusicVolume v-if="sheetMode !== 'replace' && sheetKey === 'musickit'" wide class="px-1" />
-          <!-- Beside the volume: what every card on the Craft grid plays. -->
+          <!-- Beside the volume: what every card on the grid plays. -->
           <PillTabs
-            v-if="sheetMode === 'craft' && sheetKey === 'musickit' && sheetHasMvp"
+            v-if="sheetMode !== 'replace' && sheetKey === 'musickit' && sheetHasMvp"
             :items="MUSIC_TRACKS"
             :item-key="(t) => t.id"
             :active="sheetMusicTrack"
@@ -11163,6 +11201,7 @@ watch([crumbTrail, () => props.path], ([trail]) => props.setCrumb?.(trail), { im
                 :price-pending="pricesPending"
                 :price-source="priceSourceLabel"
                 :music-volume="false"
+                :music-track="sheetMusicTrack"
                 :class="sheetCellClass(idx)"
                 :style="{ '--i': idx + 2 }"
                 draggable="true"

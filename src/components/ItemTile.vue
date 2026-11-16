@@ -79,8 +79,12 @@ const props = withDefaults(
     /** Draw the music kit player's own volume control. Off in the loadout
      *  sheet, which has one volume control on its toolbar for the whole grid. */
     musicVolume?: boolean;
+    /** MUSIC KITS only: which track the player plays — the menu theme or the
+     *  round-MVP anthem. The loadout sheet's toolbar switch drives it for the
+     *  whole grid; everywhere else it is the menu theme. */
+    musicTrack?: "full" | "mvp";
   }>(),
-  { active: false, selected: false, disabled: false, stripWeaponName: false, showHeader: false, hideActions: false, row: false, showPrice: false, pricePending: false, priceSource: "the price feed", musicVolume: true },
+  { active: false, selected: false, disabled: false, stripWeaponName: false, showHeader: false, hideActions: false, row: false, showPrice: false, pricePending: false, priceSource: "the price feed", musicVolume: true, musicTrack: "full" },
 );
 
 const tr = inject<(k: string, f: string, n?: Record<string, unknown>) => string>("tr", (_k, f) => f);
@@ -177,7 +181,11 @@ const equippedTeams = computed(() => (props.inst.equipped ?? []).map((e) => e.te
 // every kit is a disc on a coloured square, so the tile could not tell you what
 // you owned. Absent whenever this instance has no extracted audio, which is what
 // keeps a mount without the music step looking exactly as it did before.
-const audioSrc = computed(() => props.inst.item?.audio ?? null);
+// Under MVP a kit with no anthem draws no player (same as the Craft grid)
+// rather than quietly playing its menu theme, and never falls back to the wear
+// bar either: `hasMusic` is what decides player-or-wear, `audioSrc` what plays.
+const hasMusic = computed(() => !!(props.inst.item?.audio || props.inst.item?.mvpAudio));
+const audioSrc = computed(() => (props.musicTrack === "mvp" ? props.inst.item?.mvpAudio : props.inst.item?.audio) ?? null);
 </script>
 
 <template>
@@ -272,7 +280,9 @@ const audioSrc = computed(() => props.inst.item?.audio ?? null);
           <!-- Transport only. A row has one line under the name and the wear bar
                owns it — but a music kit has no wear to draw there, so the space
                is genuinely free rather than borrowed. -->
-          <MusicPlayer v-if="audioSrc" :src="audioSrc" compact class="min-w-0 flex-1" />
+          <template v-if="hasMusic">
+            <MusicPlayer v-if="audioSrc" :key="audioSrc" :src="audioSrc" compact class="min-w-0 flex-1" />
+          </template>
           <WearBar v-else :item="inst.item" :wear="inst.wear" :seed="inst.seed" inline compact class="min-w-0 flex-1" />
         </div>
       </div>
@@ -283,7 +293,9 @@ const audioSrc = computed(() => props.inst.item?.audio ?? null);
     <template v-else>
     <!-- Model + status dots: steam-synced (steam blue), equipped per team
          (CT blue / T amber) — hover any dot for the label. -->
-    <div v-if="showHeader" class="relative z-[2] flex items-start justify-between gap-2">
+    <!-- The shadow is for the price that hangs below this row: it sits over the
+         top of the art (see the art well below), and album covers are busy. -->
+    <div v-if="showHeader" class="relative z-[2] flex items-start justify-between gap-2 [text-shadow:0_1px_3px_rgb(0_0_0/0.9)]">
       <!-- Model, then the price under it. The top-left corner is the card's
            quietest real estate — a label nobody reads twice — and hanging the
            value off it costs the art nothing that a footer line wouldn't, while
@@ -310,7 +322,10 @@ const audioSrc = computed(() => props.inst.item?.audio ?? null);
          would have put it — top right, under the hover actions. -->
     <SlotStatus v-if="!showHeader" :teams="equippedTeams" :inst="inst" :attached-name="attachedName" />
 
-    <div :class="CARD_ART">
+    <!-- One step BELOW the text (z-[1] over CARD_ART's z-[2]). Level with the
+         header and later in the DOM, the art painted over the price hanging off
+         the label — a square music kit cover hid it completely. -->
+    <div :class="[CARD_ART, '!z-[1]']">
       <ItemArt
         :inst="inst"
         :image="inst.item?.image"
@@ -334,7 +349,11 @@ const audioSrc = computed(() => props.inst.item?.audio ?? null);
     <!-- Where the wear bar would be. Same reasoning as the row above: a kit has
          no float, so this takes nothing from the card — and it is the only thing
          on it that says what the kit actually sounds like. -->
-    <MusicPlayer v-if="audioSrc" :src="audioSrc" :volume="musicVolume" class="relative z-[2] mt-2" />
+    <!-- Keyed on the track, so the sheet's Full song / MVP switch remounts it
+         and the old player's teardown stops what it was playing. -->
+    <template v-if="hasMusic">
+      <MusicPlayer v-if="audioSrc" :key="audioSrc" :src="audioSrc" :volume="musicVolume" class="relative z-[2] mt-2" />
+    </template>
     <WearBar v-else :item="inst.item" :wear="inst.wear" :seed="inst.seed" class="relative z-[2] mt-2" />
     </template>
   </button>
