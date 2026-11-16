@@ -6379,6 +6379,10 @@ async function mountSpot3d(key: string) {
       // holds the model's height and crops its sides — a long rifle came up
       // zoomed in and cut off, by a different amount on every window shape.
       narrowFit: true,
+      // LCrew fork: lighting only, no haze or scene photo behind the model —
+      // the preview sits on the card like the 2D picture. Focus, the editor
+      // and the 3D window keep the preset's backdrop.
+      noBackdrop: true,
     }),
     () => {
       if (spot3dMounted === key) spot3dReady.value = true;

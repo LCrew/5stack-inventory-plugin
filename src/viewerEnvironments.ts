@@ -174,17 +174,6 @@ export const BAKE_ENVIRONMENT = "studio";
  */
 export const DEFAULT_ENVIRONMENT = "cs2";
 
-/**
- * LCrew fork: whether a live viewer draws its preset's BACKDROP — CS2's grey
- * haze, or the photograph behind Italy, Italy (alley) and Ancient (night). Off:
- * every preset keeps its LIGHTING (the CS2 daylight, a scene's reflections) but
- * the model stands on the item card itself, its dark ground and rarity glow,
- * exactly as the 2D picture does. A full-bleed scene ended in a hard box
- * against the panel, and a faded edge looked worse. viewer3d's setBackdrop
- * and ItemStage's loading stand-in both read this.
- */
-export const LIVE_BACKDROPS = false;
-
 /** The CS2 rig's lamps, exposure and colours — shared by its scene variants. */
 const CS2_LIGHT = {
   lighting: { env: 2.1, key: 0.8, rim: 0.35, ambient: 0.28, spot: 0.35 },
@@ -224,7 +213,7 @@ export const VIEWER_ENVIRONMENTS: ViewerEnvironment[] = [
   {
     key: "cs2",
     label: "CS2",
-    hint: "Bright, neutral daylight — how the game's own inspect lights an item.",
+    hint: "Bright, neutral daylight with the main-menu haze behind — how the game's own inspect shows an item.",
     ...CS2_LIGHT,
     daylight: true,
   },

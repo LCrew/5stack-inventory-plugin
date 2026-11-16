@@ -19,7 +19,7 @@ import { buildArms, buildTwistSolver, weaponSeat, type ArmsRig, type Hand, type 
 import { buildPropClip, buildViewmodelClip, INSPECTS, loadViewmodelClip, viewmodelActions, viewmodelAssetUrl, type ClipAction, type ClipCue } from "./viewmodelClip";
 import { buildMuzzleFlash, type MuzzleFlash } from "./muzzleFlash";
 import { CHOICES, FLAGS, NUMBERS, choicesVersion, choiceValue, flagValue, flagsVersion, numberValue, numbersVersion, setChoice, setFlag, setNumber } from "./devFlags";
-import { BAKE_ENVIRONMENT, LIVE_BACKDROPS, viewerEnvironment, type ViewerEnvironment } from "./viewerEnvironments";
+import { BAKE_ENVIRONMENT, viewerEnvironment, type ViewerEnvironment } from "./viewerEnvironments";
 import { compositePaint, dropCompositeCache, loadPaintDef, loadWeaponInputs, paintTextureUrl } from "./paintComposite";
 import { type CharmShading, dressCharm, loadCharmTintMasks, tuneCharmShading } from "./charmMaterial";
 import { tickCharmLiquid } from "./charmLiquid";
@@ -3796,6 +3796,13 @@ export interface ViewerOpts {
    * aspect once the pane itself is.
    */
   narrowFit?: boolean;
+  /**
+   * LCrew fork: draw no BACKDROP (CS2's haze, a scene's photograph) behind the
+   * model, only the preset's lighting — the model stands on the card's own dark
+   * ground and rarity glow, like the 2D picture. The docked picker's Spotlight
+   * preview asks for this; the big viewers keep their backdrop.
+   */
+  noBackdrop?: boolean;
   stickers?: StickerPlacement[];
   /**
    * Patches on an AGENT, slot-ordered, by inventory image — `kind: "agent"`.
@@ -14452,8 +14459,8 @@ async function buildViewer(
   let backdrop: import("three").Mesh | null = null;
   const backdropDir = new THREE.Matrix3();
   function setBackdrop(tex: import("three").Texture | null, isPlate: boolean, blur?: number) {
-    // LCrew fork: no backdrop, only the preset's lighting — see LIVE_BACKDROPS.
-    if (!tex || !LIVE_BACKDROPS) {
+    // LCrew fork: a viewer mounted with noBackdrop keeps the lighting only.
+    if (!tex || opts?.noBackdrop) {
       if (backdrop) backdrop.visible = false;
       return;
     }
